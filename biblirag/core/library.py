@@ -545,3 +545,229 @@ class Library:
         conn.commit()
 
         return True
+
+    # =========================================================================
+    # Tag management
+    # =========================================================================
+
+    def list_tags(self, corpus: Optional[str] = None) -> list[dict]:
+        """
+        List all unique tags with their counts.
+
+        Args:
+            corpus: Optional corpus filter
+
+        Returns:
+            List of dicts with 'tag' and 'count' keys, sorted by count desc
+        """
+        conn = self._get_conn()
+
+        # SQLite doesn't have native JSON array functions, so we fetch and count in Python
+        if corpus:
+            cursor = conn.execute(
+                """SELECT c.tags FROM chunks c
+                   JOIN books b ON c.book_id = b.id
+                   WHERE c.tags IS NOT NULL AND b.corpus = ?""",
+                (corpus,)
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT tags FROM chunks WHERE tags IS NOT NULL"
+            )
+
+        tag_counts: dict[str, int] = {}
+        for row in cursor:
+            tags = json.loads(row["tags"])
+            for tag in tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+        return sorted(
+            [{"tag": t, "count": c} for t, c in tag_counts.items()],
+            key=lambda x: (-x["count"], x["tag"])
+        )
+
+    def add_tags(self, chunk_id: str, tags: list[str]) -> bool:
+        """
+        Add tags to a chunk.
+
+        Args:
+            chunk_id: The chunk_id to modify
+            tags: List of tags to add
+
+        Returns:
+            True if successful, False if chunk not found
+        """
+        conn = self._get_conn()
+
+        cursor = conn.execute(
+            "SELECT id, tags FROM chunks WHERE chunk_id = ?",
+            (chunk_id,)
+        )
+        row = cursor.fetchone()
+
+        if not row:
+            return False
+
+        existing = json.loads(row["tags"]) if row["tags"] else []
+        new_tags = list(set(existing + tags))
+
+        conn.execute(
+            "UPDATE chunks SET tags = ? WHERE id = ?",
+            (json.dumps(new_tags), row["id"])
+        )
+        conn.commit()
+        return True
+
+    def remove_tags(self, chunk_id: str, tags: list[str]) -> bool:
+        """
+        Remove tags from a chunk.
+
+        Args:
+            chunk_id: The chunk_id to modify
+            tags: List of tags to remove
+
+        Returns:
+            True if successful, False if chunk not found
+        """
+        conn = self._get_conn()
+
+        cursor = conn.execute(
+            "SELECT id, tags FROM chunks WHERE chunk_id = ?",
+            (chunk_id,)
+        )
+        row = cursor.fetchone()
+
+        if not row:
+            return False
+
+        existing = json.loads(row["tags"]) if row["tags"] else []
+        new_tags = [t for t in existing if t not in tags]
+
+        conn.execute(
+            "UPDATE chunks SET tags = ? WHERE id = ?",
+            (json.dumps(new_tags) if new_tags else None, row["id"])
+        )
+        conn.commit()
+        return True
+
+    def tag_chunks(
+        self,
+        tags: list[str],
+        corpus: Optional[str] = None,
+        book: Optional[str] = None,
+        chunk_ids: Optional[list[str]] = None,
+    ) -> int:
+        """
+        Add tags to multiple chunks at once.
+
+        Args:
+            tags: Tags to add
+            corpus: Filter by corpus
+            book: Filter by book slug
+            chunk_ids: Specific chunk IDs to tag
+
+        Returns:
+            Number of chunks modified
+        """
+        conn = self._get_conn()
+
+        # Build query to find chunks
+        sql = """
+            SELECT c.id, c.tags FROM chunks c
+            JOIN books b ON c.book_id = b.id
+            WHERE 1=1
+        """
+        params: list = []
+
+        if corpus:
+            sql += " AND b.corpus = ?"
+            params.append(corpus)
+        if book:
+            sql += " AND b.slug = ?"
+            params.append(book)
+        if chunk_ids:
+            placeholders = ",".join("?" * len(chunk_ids))
+            sql += f" AND c.chunk_id IN ({placeholders})"
+            params.extend(chunk_ids)
+
+        cursor = conn.execute(sql, params)
+        count = 0
+
+        for row in cursor:
+            existing = json.loads(row["tags"]) if row["tags"] else []
+            new_tags = list(set(existing + tags))
+            conn.execute(
+                "UPDATE chunks SET tags = ? WHERE id = ?",
+                (json.dumps(new_tags), row["id"])
+            )
+            count += 1
+
+        conn.commit()
+        return count
+
+    def get_chunks_by_tag(
+        self,
+        tag: str,
+        corpus: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[Chunk]:
+        """
+        Get all chunks with a specific tag.
+
+        Args:
+            tag: Tag to search for
+            corpus: Optional corpus filter
+            limit: Maximum chunks to return
+
+        Returns:
+            List of Chunk objects
+        """
+        conn = self._get_conn()
+
+        sql = """
+            SELECT c.*, b.title as book_title, b.slug as book_slug,
+                   b.filename as book_file, b.corpus
+            FROM chunks c
+            JOIN books b ON c.book_id = b.id
+            WHERE c.tags IS NOT NULL
+        """
+        params: list = []
+
+        if corpus:
+            sql += " AND b.corpus = ?"
+            params.append(corpus)
+
+        sql += " LIMIT ?"
+        params.append(limit * 10)  # Fetch extra since we filter in Python
+
+        cursor = conn.execute(sql, params)
+        chunks = []
+
+        for row in cursor:
+            if len(chunks) >= limit:
+                break
+
+            chunk_tags = json.loads(row["tags"]) if row["tags"] else []
+            if tag not in chunk_tags:
+                continue
+
+            metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+
+            chunks.append(Chunk(
+                id=row["chunk_id"],
+                content=row["content"],
+                book_title=row["book_title"],
+                book_slug=row["book_slug"],
+                book_file=row["book_file"],
+                chapter_title=row["chapter_title"],
+                chapter_num=row["chapter_num"],
+                page_start=row["page_start"],
+                page_end=row["page_end"],
+                paragraph=row["paragraph"],
+                content_chars=row["content_chars"],
+                content_hash=row["content_hash"],
+                tags=chunk_tags,
+                metadata=metadata,
+            ))
+
+        return chunks

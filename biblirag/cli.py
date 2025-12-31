@@ -84,6 +84,48 @@ def cmd_schema(args):
     print_schema()
 
 
+def cmd_tags(args):
+    """List or manage tags."""
+    lib = Library(args.db)
+
+    if args.format == "json":
+        tags = lib.list_tags(corpus=args.corpus)
+        print(json.dumps(tags, indent=2))
+    else:
+        tags = lib.list_tags(corpus=args.corpus)
+        if not tags:
+            print("No tags found.")
+        else:
+            for t in tags:
+                print(f"{t['tag']}: {t['count']} chunks")
+
+    lib.close()
+
+
+def cmd_tag_add(args):
+    """Add tags to chunks."""
+    lib = Library(args.db)
+
+    tags = [t.strip() for t in args.tags.split(",")]
+
+    if args.chunk:
+        # Tag a specific chunk
+        if lib.add_tags(args.chunk, tags):
+            print(f"Added tags {tags} to chunk {args.chunk}")
+        else:
+            print(f"Chunk not found: {args.chunk}")
+    else:
+        # Tag multiple chunks by corpus/book
+        count = lib.tag_chunks(
+            tags,
+            corpus=args.corpus,
+            book=args.book,
+        )
+        print(f"Added tags {tags} to {count} chunks")
+
+    lib.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="biblirag",
@@ -125,6 +167,20 @@ def main():
     # schema
     p_schema = subparsers.add_parser("schema", help="Show field schema")
     p_schema.set_defaults(func=cmd_schema)
+
+    # tags
+    p_tags = subparsers.add_parser("tags", help="List all tags")
+    p_tags.add_argument("--corpus", "-c", help="Filter by corpus")
+    p_tags.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_tags.set_defaults(func=cmd_tags)
+
+    # tag (add tags)
+    p_tag = subparsers.add_parser("tag", help="Add tags to chunks")
+    p_tag.add_argument("tags", help="Comma-separated tags to add")
+    p_tag.add_argument("--chunk", help="Specific chunk ID to tag")
+    p_tag.add_argument("--corpus", "-c", help="Tag all chunks in corpus")
+    p_tag.add_argument("--book", "-b", help="Tag all chunks in book")
+    p_tag.set_defaults(func=cmd_tag_add)
 
     args = parser.parse_args()
 
