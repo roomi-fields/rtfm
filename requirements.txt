@@ -1,0 +1,20 @@
+# PDF Library Indexer - Dependencies
+
+# PDF extraction (Marker)
+marker-pdf>=1.0.0
+
+# Database
+# SQLite is built-in, no extra dependency needed
+
+# CLI and utilities
+click>=8.0.0
+rich>=13.0.0
+
+# Text processing
+tiktoken>=0.5.0  # Token counting (OpenAI tokenizer, works offline)
+
+# Optional: Alternative tokenizers
+# transformers  # For other tokenizer models
+
+# Development
+pytest>=7.0.0
