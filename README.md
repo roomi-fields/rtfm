@@ -238,6 +238,7 @@ biblirag includes parsers for common document formats. Parsers are auto-detected
 | Parser | Extensions | Description |
 |--------|------------|-------------|
 | `markdown` | `.md`, `.markdown` | Markdown files with header-based chunking |
+| `pdf` | `.pdf` | PDF files (requires `pip install biblirag[pdf]`) |
 | `legifrance` | `.xml` | French legal codes in LEGI XML format |
 | `bofip` | `.html`, `.htm` | French tax doctrine (BOFiP) HTML files |
 
@@ -255,6 +256,23 @@ lib.ingest("document.md", corpus="docs")
 # author: Jane Doe
 # ---
 # # Content starts here
+```
+
+### PDF Parser
+
+Parses PDF files using `pdftext` (fast) or `marker-pdf` (high quality).
+
+```python
+# Install PDF support
+# pip install biblirag[pdf]
+
+# Basic usage (uses pdftext backend)
+lib.ingest("document.pdf", corpus="docs")
+
+# Use marker backend for complex PDFs
+from biblirag.parsers.pdf import PDFParser
+parser = PDFParser(backend='marker')
+lib.ingest("complex.pdf", corpus="docs", parser=parser)
 ```
 
 ### Legifrance XML Parser
