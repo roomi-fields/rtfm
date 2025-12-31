@@ -126,6 +126,82 @@ def cmd_tag_add(args):
     lib.close()
 
 
+def cmd_versions(args):
+    """List versioned articles or show version history."""
+    lib = Library(args.db)
+
+    if args.article:
+        # Show history for a specific article
+        history = lib.get_article_history(args.article)
+        if not history:
+            print(f"No versions found for: {args.article}")
+        elif args.format == "json":
+            print(json.dumps(history, indent=2, default=str))
+        else:
+            print(f"Version history for {args.article}:")
+            for v in history:
+                date_range = f"{v['date_debut'] or '?'} - {v['date_fin'] or 'current'}"
+                etat = v.get('etat', '')
+                print(f"  v{v['version_num']}: {date_range} [{etat}]")
+                if v.get('texte_modificateur'):
+                    print(f"       Modified by: {v['texte_modificateur'][:60]}...")
+    else:
+        # List all versioned articles
+        articles = lib.list_versioned_articles(corpus=args.corpus)
+        if not articles:
+            print("No versioned articles found.")
+        elif args.format == "json":
+            print(json.dumps(articles, indent=2))
+        else:
+            for a in articles:
+                print(f"{a['article_ref']}: {a['version_count']} versions")
+
+    lib.close()
+
+
+def cmd_version_at(args):
+    """Get article content at a specific date."""
+    lib = Library(args.db)
+
+    result = lib.get_article_at_date(args.article, args.date)
+
+    if not result:
+        print(f"No version found for {args.article} at {args.date}")
+    elif args.format == "json":
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        v = result
+        print(f"Article: {args.article} (v{v['version_num']})")
+        print(f"Period: {v['date_debut']} - {v['date_fin'] or 'current'}")
+        print(f"State: {v['etat']}")
+        if v.get('texte_modificateur'):
+            print(f"Modified by: {v['texte_modificateur']}")
+        print(f"\n{v['content']}")
+
+    lib.close()
+
+
+def cmd_compare_versions(args):
+    """Compare two versions of an article."""
+    lib = Library(args.db)
+
+    result = lib.compare_versions(args.article, args.v1, args.v2)
+
+    if "error" in result:
+        print(f"Error: {result['error']}")
+    elif args.format == "json":
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        v1_data, v2_data = result['v1'], result['v2']
+        print(f"Comparing {args.article}: v{args.v1} vs v{args.v2}")
+        print(f"\nVersion {args.v1}: {v1_data['date_debut']} - {v1_data['date_fin'] or 'current'}")
+        print(f"Version {args.v2}: {v2_data['date_debut']} - {v2_data['date_fin'] or 'current'}")
+        print(f"\nCharacters: {result['chars_v1']} -> {result['chars_v2']} ({result['chars_diff']:+d})")
+        print(f"Content changed: {'Yes' if result['content_changed'] else 'No'}")
+
+    lib.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="biblirag",
@@ -181,6 +257,28 @@ def main():
     p_tag.add_argument("--corpus", "-c", help="Tag all chunks in corpus")
     p_tag.add_argument("--book", "-b", help="Tag all chunks in book")
     p_tag.set_defaults(func=cmd_tag_add)
+
+    # versions (list versioned articles or show history)
+    p_versions = subparsers.add_parser("versions", help="List versioned articles or show history")
+    p_versions.add_argument("--article", "-a", help="Show history for specific article (e.g., CGI-39-decies-A)")
+    p_versions.add_argument("--corpus", "-c", help="Filter by corpus")
+    p_versions.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_versions.set_defaults(func=cmd_versions)
+
+    # version-at (get article at specific date)
+    p_version_at = subparsers.add_parser("version-at", help="Get article at specific date")
+    p_version_at.add_argument("article", help="Article reference (e.g., CGI-39-decies-A)")
+    p_version_at.add_argument("date", help="Date in YYYY-MM-DD format")
+    p_version_at.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_version_at.set_defaults(func=cmd_version_at)
+
+    # compare-versions (compare two versions)
+    p_compare = subparsers.add_parser("compare-versions", help="Compare two article versions")
+    p_compare.add_argument("article", help="Article reference (e.g., CGI-39-decies-A)")
+    p_compare.add_argument("v1", type=int, help="First version number")
+    p_compare.add_argument("v2", type=int, help="Second version number")
+    p_compare.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_compare.set_defaults(func=cmd_compare_versions)
 
     args = parser.parse_args()
 

@@ -525,6 +525,124 @@ def lien_legifrance(article, code="cgi"):
 
 See `biblirag/schema.py` for the full schema and examples.
 
+## Tag Management
+
+Tags allow you to categorize and filter chunks.
+
+### Python API
+
+```python
+lib = Library("library.db")
+
+# Add tags to a specific chunk
+lib.add_tags(chunk_id, ["fiscal", "important"])
+
+# Remove tags from a chunk
+lib.remove_tags(chunk_id, ["important"])
+
+# Tag all chunks in a corpus or book
+count = lib.tag_chunks(["legal", "2024"], corpus="cgi")
+count = lib.tag_chunks(["reviewed"], book="tax-guide")
+
+# List all tags with counts
+tags = lib.list_tags()
+# [{"tag": "fiscal", "count": 150}, {"tag": "legal", "count": 200}]
+
+# List tags for a specific corpus
+tags = lib.list_tags(corpus="cgi")
+
+# Get chunks by tag
+chunks = lib.get_chunks_by_tag("important")
+
+# Search with tag filter
+results = lib.search("amortissement", tags=["fiscal"])
+```
+
+### CLI
+
+```bash
+# List all tags
+biblirag tags --db library.db
+
+# List tags for a corpus
+biblirag tags --corpus cgi
+
+# Add tags to a specific chunk
+biblirag tag "fiscal,important" --chunk chunk-id-here
+
+# Tag all chunks in a corpus
+biblirag tag "legal,2024" --corpus cgi
+
+# Tag all chunks in a book
+biblirag tag "reviewed" --book tax-guide
+```
+
+## Article Versioning
+
+Track different versions of legal articles over time - essential for legal research to know which version of a law was applicable at a given date.
+
+### Python API
+
+```python
+lib = Library("library.db")
+
+# Add a version record
+version_id = lib.add_article_version(
+    article_ref="CGI-39-decies-A",      # Stable identifier
+    chunk_id=chunk_id,                   # Link to chunk content
+    version_num=1,
+    date_debut="2020-01-01",
+    date_fin="2023-12-31",               # None if current
+    etat="MODIFIE",                      # VIGUEUR, MODIFIE, ABROGE
+    texte_modificateur="Loi 2019-1479",  # Modifying law
+)
+
+# Get version history for an article
+history = lib.get_article_history("CGI-39-decies-A")
+# Returns list of versions ordered by version_num
+
+# Get the version applicable at a specific date
+version = lib.get_article_at_date("CGI-39-decies-A", "2022-06-15")
+
+# List all versioned articles
+articles = lib.list_versioned_articles(corpus="cgi")
+# [{"article_ref": "CGI-39", "version_count": 3}, ...]
+
+# Compare two versions
+diff = lib.compare_versions("CGI-39-decies-A", 1, 2)
+# {"v1": {...}, "v2": {...}, "chars_diff": 150, "content_changed": True}
+```
+
+### CLI
+
+```bash
+# List all versioned articles
+biblirag versions --db library.db
+
+# Show version history for an article
+biblirag versions --article CGI-39-decies-A
+
+# Get article at a specific date
+biblirag version-at CGI-39-decies-A 2022-06-15
+
+# Compare two versions
+biblirag compare-versions CGI-39-decies-A 1 2
+```
+
+### Automatic Extraction
+
+When ingesting Légifrance XML files, the parser automatically extracts version metadata:
+
+```python
+lib.ingest("cgi.xml", corpus="cgi", metadata={"code": "cgi"})
+
+# Each chunk will have metadata including:
+# - article_ref: "CGI-39" (stable identifier for versioning)
+# - date_debut, date_fin: validity period
+# - etat: VIGUEUR, MODIFIE, ABROGE, PERIME
+# - texte_modificateur: modifying law reference
+```
+
 ## Architecture
 
 ```

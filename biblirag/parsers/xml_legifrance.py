@@ -35,6 +35,21 @@ def slugify(text: str) -> str:
     return text.strip('-')[:50]
 
 
+def make_article_ref(code: str, article_num: str) -> str:
+    """
+    Create a stable article reference for versioning.
+
+    Examples:
+        make_article_ref("cgi", "39 decies A") -> "CGI-39-decies-A"
+        make_article_ref("code civil", "1234") -> "CODE-CIVIL-1234"
+    """
+    code_clean = re.sub(r'[^\w\s]', '', code).strip().upper()
+    code_clean = re.sub(r'\s+', '-', code_clean)
+    art_clean = re.sub(r'[^\w\s]', '', article_num).strip()
+    art_clean = re.sub(r'\s+', '-', art_clean)
+    return f"{code_clean}-{art_clean}"
+
+
 def content_hash(text: str) -> str:
     """Generate a short hash of content."""
     return hashlib.md5(text.encode()).hexdigest()[:12]
@@ -299,13 +314,19 @@ class XMLLegiFranceParser(BaseParser):
             chapter_title = f"Article {art_num}"
 
         # Build extended metadata for legal_fr namespace
+        code_name = doc_meta.get('code') or metadata.get('code', '')
+        article_ref = make_article_ref(code_name, art_num) if code_name else None
+
         legal_metadata = {
             "legal_fr": {
                 "numero_article": art_num,
-                "code": doc_meta.get('code', metadata.get('code', '')),
+                "article_ref": article_ref,  # Stable ID for versioning
+                "code": code_name,
                 "date_debut": art_meta.get('date_debut'),
                 "date_fin": art_meta.get('date_fin'),
+                "date_publication": doc_meta.get('date_publi') or art_meta.get('date_publication'),
                 "etat": art_meta.get('etat', 'VIGUEUR'),
+                "texte_modificateur": art_meta.get('texte_modificateur'),  # "Loi 2023-1322..."
                 "cid": art_meta.get('cid', ''),
                 "id_article": art_meta.get('id', ''),
             }
@@ -377,11 +398,23 @@ class XMLLegiFranceParser(BaseParser):
             self._get_element_text(article, 'META/META_SPEC/META_ARTICLE/DATE_FIN') or
             article.get('fin', '')
         )
+        meta['date_publication'] = (
+            self._get_element_text(article, 'META/META_SPEC/META_ARTICLE/DATE_PUBLI') or
+            self._get_element_text(article, 'META/META_COMMUN/DATE_PUBLI') or
+            ''
+        )
 
         # State (VIGUEUR, ABROGE, etc.)
         meta['etat'] = (
             self._get_element_text(article, 'META/META_SPEC/META_ARTICLE/ETAT') or
             article.get('etat', 'VIGUEUR')
+        )
+
+        # Modification text (law/decree that modified this article)
+        meta['texte_modificateur'] = (
+            self._get_element_text(article, 'META/META_SPEC/META_ARTICLE/ORIGINE_PUBLI') or
+            self._get_element_text(article, 'NOTA') or  # Often contains modification info
+            ''
         )
 
         # References to other articles

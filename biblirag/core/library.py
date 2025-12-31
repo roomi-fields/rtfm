@@ -57,6 +57,27 @@ CREATE TABLE IF NOT EXISTS chunks (
     FOREIGN KEY (chapter_id) REFERENCES chapters(id)
 );
 
+-- Article versions table (for legal text versioning)
+CREATE TABLE IF NOT EXISTS article_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_ref TEXT NOT NULL,       -- stable identifier: "CGI-39-decies-A"
+    chunk_id INTEGER NOT NULL,       -- link to chunk content
+    version_num INTEGER NOT NULL,    -- version number (1, 2, 3...)
+    date_debut DATE,                 -- effective start date
+    date_fin DATE,                   -- effective end date (NULL = current)
+    date_publication DATE,           -- publication date (JO)
+    etat TEXT,                       -- VIGUEUR, ABROGE, MODIFIE, PERIME
+    texte_modificateur TEXT,         -- "Loi 2023-1322 du 29/12/2023"
+    previous_id INTEGER,             -- previous version ID
+    FOREIGN KEY (chunk_id) REFERENCES chunks(id),
+    FOREIGN KEY (previous_id) REFERENCES article_versions(id)
+);
+
+-- Indexes for version queries
+CREATE INDEX IF NOT EXISTS idx_versions_article ON article_versions(article_ref);
+CREATE INDEX IF NOT EXISTS idx_versions_dates ON article_versions(date_debut, date_fin);
+CREATE INDEX IF NOT EXISTS idx_versions_chunk ON article_versions(chunk_id);
+
 -- FTS5 virtual table for full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     content,
@@ -771,3 +792,295 @@ class Library:
             ))
 
         return chunks
+
+    # =========================================================================
+    # Article versioning
+    # =========================================================================
+
+    def add_article_version(
+        self,
+        article_ref: str,
+        chunk_id: str,
+        version_num: int,
+        date_debut: Optional[str] = None,
+        date_fin: Optional[str] = None,
+        date_publication: Optional[str] = None,
+        etat: Optional[str] = None,
+        texte_modificateur: Optional[str] = None,
+        previous_id: Optional[int] = None,
+    ) -> int:
+        """
+        Add a version record for an article.
+
+        Args:
+            article_ref: Stable article identifier (e.g., "CGI-39-decies-A")
+            chunk_id: The chunk_id containing the article text
+            version_num: Version number (1, 2, 3...)
+            date_debut: Effective start date (YYYY-MM-DD)
+            date_fin: Effective end date (YYYY-MM-DD), None if current
+            date_publication: Publication date
+            etat: Status (VIGUEUR, ABROGE, MODIFIE, PERIME)
+            texte_modificateur: Modifying law reference
+            previous_id: ID of previous version record
+
+        Returns:
+            ID of the created version record
+        """
+        conn = self._get_conn()
+
+        # Get the internal chunk ID
+        cursor = conn.execute(
+            "SELECT id FROM chunks WHERE chunk_id = ?",
+            (chunk_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError(f"Chunk not found: {chunk_id}")
+
+        internal_chunk_id = row["id"]
+
+        cursor = conn.execute(
+            """INSERT INTO article_versions
+               (article_ref, chunk_id, version_num, date_debut, date_fin,
+                date_publication, etat, texte_modificateur, previous_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (article_ref, internal_chunk_id, version_num, date_debut, date_fin,
+             date_publication, etat, texte_modificateur, previous_id)
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+    def get_article_history(
+        self,
+        article_ref: str,
+    ) -> list[dict]:
+        """
+        Get version history for an article.
+
+        Args:
+            article_ref: Article identifier (e.g., "CGI-39-decies-A")
+
+        Returns:
+            List of version records, oldest first
+        """
+        conn = self._get_conn()
+
+        cursor = conn.execute(
+            """SELECT av.*, c.chunk_id, c.content, c.chapter_title
+               FROM article_versions av
+               JOIN chunks c ON av.chunk_id = c.id
+               WHERE av.article_ref = ?
+               ORDER BY av.version_num ASC""",
+            (article_ref,)
+        )
+
+        return [
+            {
+                "id": row["id"],
+                "article_ref": row["article_ref"],
+                "chunk_id": row["chunk_id"],
+                "version_num": row["version_num"],
+                "date_debut": row["date_debut"],
+                "date_fin": row["date_fin"],
+                "date_publication": row["date_publication"],
+                "etat": row["etat"],
+                "texte_modificateur": row["texte_modificateur"],
+                "previous_id": row["previous_id"],
+                "content": row["content"],
+                "title": row["chapter_title"],
+            }
+            for row in cursor.fetchall()
+        ]
+
+    def get_article_at_date(
+        self,
+        article_ref: str,
+        date: str,
+    ) -> Optional[dict]:
+        """
+        Get the version of an article that was in effect at a given date.
+
+        Args:
+            article_ref: Article identifier
+            date: Date to query (YYYY-MM-DD)
+
+        Returns:
+            Version record or None if no version was in effect
+        """
+        conn = self._get_conn()
+
+        cursor = conn.execute(
+            """SELECT av.*, c.chunk_id, c.content, c.chapter_title
+               FROM article_versions av
+               JOIN chunks c ON av.chunk_id = c.id
+               WHERE av.article_ref = ?
+                 AND av.date_debut <= ?
+                 AND (av.date_fin IS NULL OR av.date_fin >= ?)
+               ORDER BY av.version_num DESC
+               LIMIT 1""",
+            (article_ref, date, date)
+        )
+
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        return {
+            "id": row["id"],
+            "article_ref": row["article_ref"],
+            "chunk_id": row["chunk_id"],
+            "version_num": row["version_num"],
+            "date_debut": row["date_debut"],
+            "date_fin": row["date_fin"],
+            "date_publication": row["date_publication"],
+            "etat": row["etat"],
+            "texte_modificateur": row["texte_modificateur"],
+            "content": row["content"],
+            "title": row["chapter_title"],
+        }
+
+    def search_at_date(
+        self,
+        query: str,
+        date: str,
+        limit: int = 10,
+        corpus: Optional[str] = None,
+    ) -> SearchResults:
+        """
+        Search for articles that were in effect at a specific date.
+
+        Args:
+            query: Search query
+            date: Date to query (YYYY-MM-DD)
+            limit: Maximum results
+            corpus: Optional corpus filter
+
+        Returns:
+            SearchResults with only versions valid at the given date
+        """
+        # First do a regular search
+        results = self.search(query, limit=limit * 3, corpus=corpus)
+
+        # Filter to only include chunks that have a valid version at the date
+        conn = self._get_conn()
+        filtered_results = []
+
+        for r in results:
+            # Check if this chunk has a version valid at the date
+            cursor = conn.execute(
+                """SELECT 1 FROM article_versions av
+                   JOIN chunks c ON av.chunk_id = c.id
+                   WHERE c.chunk_id = ?
+                     AND av.date_debut <= ?
+                     AND (av.date_fin IS NULL OR av.date_fin >= ?)""",
+                (r.chunk.id, date, date)
+            )
+            if cursor.fetchone():
+                filtered_results.append(r)
+                if len(filtered_results) >= limit:
+                    break
+
+        # Re-rank
+        for i, r in enumerate(filtered_results):
+            r.rank = i + 1
+
+        return SearchResults(
+            results=filtered_results,
+            query=f"{query} (at {date})",
+            total_found=len(filtered_results),
+        )
+
+    def list_versioned_articles(
+        self,
+        corpus: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        List all articles that have version history.
+
+        Returns:
+            List of articles with version counts
+        """
+        conn = self._get_conn()
+
+        if corpus:
+            cursor = conn.execute(
+                """SELECT av.article_ref,
+                          COUNT(*) as version_count,
+                          MIN(av.date_debut) as first_version,
+                          MAX(av.date_debut) as latest_version
+                   FROM article_versions av
+                   JOIN chunks c ON av.chunk_id = c.id
+                   JOIN books b ON c.book_id = b.id
+                   WHERE b.corpus = ?
+                   GROUP BY av.article_ref
+                   ORDER BY av.article_ref""",
+                (corpus,)
+            )
+        else:
+            cursor = conn.execute(
+                """SELECT article_ref,
+                          COUNT(*) as version_count,
+                          MIN(date_debut) as first_version,
+                          MAX(date_debut) as latest_version
+                   FROM article_versions
+                   GROUP BY article_ref
+                   ORDER BY article_ref"""
+            )
+
+        return [dict(row) for row in cursor.fetchall()]
+
+    def compare_versions(
+        self,
+        article_ref: str,
+        v1: int,
+        v2: int,
+    ) -> dict:
+        """
+        Compare two versions of an article.
+
+        Args:
+            article_ref: Article identifier
+            v1: First version number
+            v2: Second version number
+
+        Returns:
+            Dict with both versions and diff info
+        """
+        conn = self._get_conn()
+
+        versions = {}
+        for v in [v1, v2]:
+            cursor = conn.execute(
+                """SELECT av.*, c.content, c.chapter_title
+                   FROM article_versions av
+                   JOIN chunks c ON av.chunk_id = c.id
+                   WHERE av.article_ref = ? AND av.version_num = ?""",
+                (article_ref, v)
+            )
+            row = cursor.fetchone()
+            if row:
+                versions[v] = {
+                    "version_num": row["version_num"],
+                    "date_debut": row["date_debut"],
+                    "date_fin": row["date_fin"],
+                    "etat": row["etat"],
+                    "texte_modificateur": row["texte_modificateur"],
+                    "content": row["content"],
+                    "title": row["chapter_title"],
+                }
+
+        if len(versions) != 2:
+            return {"error": "One or both versions not found", "versions": versions}
+
+        # Simple diff: content changed?
+        content_changed = versions[v1]["content"] != versions[v2]["content"]
+
+        return {
+            "article_ref": article_ref,
+            "v1": versions[v1],
+            "v2": versions[v2],
+            "content_changed": content_changed,
+            "chars_v1": len(versions[v1]["content"]),
+            "chars_v2": len(versions[v2]["content"]),
+            "chars_diff": len(versions[v2]["content"]) - len(versions[v1]["content"]),
+        }
