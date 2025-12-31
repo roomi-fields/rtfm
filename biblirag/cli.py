@@ -202,6 +202,61 @@ def cmd_compare_versions(args):
     lib.close()
 
 
+def cmd_embed(args):
+    """Generate embeddings for chunks."""
+    lib = Library(args.db)
+
+    stats = lib.generate_embeddings(
+        corpus=args.corpus,
+        batch_size=args.batch_size,
+        force=args.force,
+        show_progress=True,
+    )
+
+    print(f"Embedded: {stats['embedded']} chunks")
+    lib.close()
+
+
+def cmd_embed_stats(args):
+    """Show embedding statistics."""
+    lib = Library(args.db)
+    stats = lib.get_embedding_stats()
+
+    print(f"Chunks:    {stats['total_chunks']}")
+    print(f"Embedded:  {stats['embedded']} ({stats['coverage']})")
+    if stats['models']:
+        print(f"Models:    {stats['models']}")
+
+    lib.close()
+
+
+def cmd_semantic_search(args):
+    """Search using semantic similarity."""
+    lib = Library(args.db)
+
+    if args.hybrid:
+        results = lib.hybrid_search(
+            args.query,
+            limit=args.limit,
+            corpus=args.corpus,
+        )
+    else:
+        results = lib.semantic_search(
+            args.query,
+            limit=args.limit,
+            corpus=args.corpus,
+        )
+
+    if args.format == "json":
+        print(results.to_json())
+    else:
+        for r in results:
+            print(f"\n[{r.rank}] {r.source} - score: {r.score:.3f}")
+            print(f"    {r.content[:200]}...")
+
+    lib.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="biblirag",
@@ -279,6 +334,26 @@ def main():
     p_compare.add_argument("v2", type=int, help="Second version number")
     p_compare.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_compare.set_defaults(func=cmd_compare_versions)
+
+    # embed (generate embeddings)
+    p_embed = subparsers.add_parser("embed", help="Generate embeddings for chunks")
+    p_embed.add_argument("--corpus", "-c", help="Only embed chunks in this corpus")
+    p_embed.add_argument("--batch-size", type=int, default=32, help="Batch size")
+    p_embed.add_argument("--force", action="store_true", help="Re-generate all embeddings")
+    p_embed.set_defaults(func=cmd_embed)
+
+    # embed-stats (show embedding statistics)
+    p_embed_stats = subparsers.add_parser("embed-stats", help="Show embedding statistics")
+    p_embed_stats.set_defaults(func=cmd_embed_stats)
+
+    # semantic-search (search using embeddings)
+    p_semantic = subparsers.add_parser("semantic-search", help="Search using semantic similarity")
+    p_semantic.add_argument("query", help="Search query")
+    p_semantic.add_argument("--limit", "-l", type=int, default=10)
+    p_semantic.add_argument("--corpus", "-c", help="Filter by corpus")
+    p_semantic.add_argument("--hybrid", action="store_true", help="Use hybrid FTS5 + semantic search")
+    p_semantic.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_semantic.set_defaults(func=cmd_semantic_search)
 
     args = parser.parse_args()
 

@@ -78,6 +78,18 @@ CREATE INDEX IF NOT EXISTS idx_versions_article ON article_versions(article_ref)
 CREATE INDEX IF NOT EXISTS idx_versions_dates ON article_versions(date_debut, date_fin);
 CREATE INDEX IF NOT EXISTS idx_versions_chunk ON article_versions(chunk_id);
 
+-- Chunk embeddings table (for semantic search)
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chunk_id INTEGER NOT NULL UNIQUE,
+    model TEXT NOT NULL,              -- model name for future upgrades
+    embedding BLOB NOT NULL,          -- binary float32 array
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_embeddings_chunk ON chunk_embeddings(chunk_id);
+
 -- FTS5 virtual table for full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     content,
@@ -1084,3 +1096,293 @@ class Library:
             "chars_v2": len(versions[v2]["content"]),
             "chars_diff": len(versions[v2]["content"]) - len(versions[v1]["content"]),
         }
+
+    # ==================== Embeddings ====================
+
+    def generate_embeddings(
+        self,
+        corpus: Optional[str] = None,
+        batch_size: int = 32,
+        model: str = "paraphrase-multilingual-MiniLM-L12-v2",
+        force: bool = False,
+        show_progress: bool = True,
+    ) -> dict:
+        """
+        Generate embeddings for chunks.
+
+        Args:
+            corpus: Only process chunks in this corpus (None = all)
+            batch_size: Number of chunks to embed at once
+            model: Sentence transformer model name
+            force: Re-generate even if embedding exists
+            show_progress: Show progress bar
+
+        Returns:
+            Stats dict with counts
+        """
+        from biblirag.core.embeddings import (
+            embed_texts, embedding_to_bytes, DEFAULT_MODEL
+        )
+
+        model = model or DEFAULT_MODEL
+        conn = self._get_conn()
+
+        # Get chunks to embed
+        if force:
+            if corpus:
+                cursor = conn.execute(
+                    """SELECT c.id, c.content FROM chunks c
+                       JOIN books b ON c.book_id = b.id
+                       WHERE b.corpus = ?""",
+                    (corpus,)
+                )
+            else:
+                cursor = conn.execute("SELECT id, content FROM chunks")
+        else:
+            if corpus:
+                cursor = conn.execute(
+                    """SELECT c.id, c.content FROM chunks c
+                       JOIN books b ON c.book_id = b.id
+                       LEFT JOIN chunk_embeddings e ON c.id = e.chunk_id
+                       WHERE b.corpus = ? AND e.id IS NULL""",
+                    (corpus,)
+                )
+            else:
+                cursor = conn.execute(
+                    """SELECT c.id, c.content FROM chunks c
+                       LEFT JOIN chunk_embeddings e ON c.id = e.chunk_id
+                       WHERE e.id IS NULL"""
+                )
+
+        chunks = cursor.fetchall()
+
+        if not chunks:
+            return {"embedded": 0, "skipped": 0}
+
+        # Process in batches
+        total = len(chunks)
+        embedded = 0
+
+        if show_progress:
+            print(f"Generating embeddings for {total} chunks...")
+
+        for i in range(0, total, batch_size):
+            batch = chunks[i:i + batch_size]
+            ids = [c["id"] for c in batch]
+            texts = [c["content"] for c in batch]
+
+            # Generate embeddings
+            embeddings = embed_texts(texts, model, batch_size=batch_size)
+
+            # Store in database
+            for chunk_id, emb in zip(ids, embeddings):
+                emb_bytes = embedding_to_bytes(emb)
+
+                if force:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO chunk_embeddings
+                           (chunk_id, model, embedding) VALUES (?, ?, ?)""",
+                        (chunk_id, model, emb_bytes)
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO chunk_embeddings
+                           (chunk_id, model, embedding) VALUES (?, ?, ?)""",
+                        (chunk_id, model, emb_bytes)
+                    )
+                embedded += 1
+
+            conn.commit()
+
+            if show_progress and (i + batch_size) % 100 == 0:
+                print(f"  [{i + batch_size}/{total}] embedded...")
+
+        if show_progress:
+            print(f"Done. Embedded {embedded} chunks.")
+
+        return {"embedded": embedded, "total": total}
+
+    def get_embedding_stats(self) -> dict:
+        """Get statistics about embeddings."""
+        conn = self._get_conn()
+
+        total_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        embedded = conn.execute("SELECT COUNT(*) FROM chunk_embeddings").fetchone()[0]
+
+        models = conn.execute(
+            "SELECT model, COUNT(*) as count FROM chunk_embeddings GROUP BY model"
+        ).fetchall()
+
+        return {
+            "total_chunks": total_chunks,
+            "embedded": embedded,
+            "coverage": f"{100 * embedded / total_chunks:.1f}%" if total_chunks > 0 else "0%",
+            "models": {r["model"]: r["count"] for r in models},
+        }
+
+    def semantic_search(
+        self,
+        query: str,
+        limit: int = 10,
+        corpus: Optional[str] = None,
+        model: str = "paraphrase-multilingual-MiniLM-L12-v2",
+    ) -> SearchResults:
+        """
+        Search using semantic similarity (embeddings).
+
+        Args:
+            query: Search query
+            limit: Maximum results
+            corpus: Filter by corpus
+            model: Model to use for query embedding
+
+        Returns:
+            SearchResults ordered by similarity
+        """
+        from biblirag.core.embeddings import (
+            embed_text, bytes_to_embedding, cosine_similarity_batch
+        )
+        import numpy as np
+
+        conn = self._get_conn()
+
+        # Get query embedding
+        query_emb = embed_text(query, model)
+
+        # Get all embeddings (with chunk data)
+        if corpus:
+            cursor = conn.execute(
+                """SELECT c.*, e.embedding, b.title as book_title, b.corpus
+                   FROM chunks c
+                   JOIN chunk_embeddings e ON c.id = e.chunk_id
+                   JOIN books b ON c.book_id = b.id
+                   WHERE b.corpus = ?""",
+                (corpus,)
+            )
+        else:
+            cursor = conn.execute(
+                """SELECT c.*, e.embedding, b.title as book_title, b.corpus
+                   FROM chunks c
+                   JOIN chunk_embeddings e ON c.id = e.chunk_id
+                   JOIN books b ON c.book_id = b.id"""
+            )
+
+        rows = cursor.fetchall()
+
+        if not rows:
+            return SearchResults(results=[], query=query, total_found=0)
+
+        # Compute similarities
+        embeddings = np.array([bytes_to_embedding(r["embedding"]) for r in rows])
+        similarities = cosine_similarity_batch(query_emb, embeddings)
+
+        # Get top results
+        top_indices = np.argsort(similarities)[::-1][:limit]
+
+        results = []
+        for rank, idx in enumerate(top_indices, 1):
+            row = rows[idx]
+            score = float(similarities[idx])
+
+            chunk = Chunk(
+                id=row["chunk_id"],
+                content=row["content"],
+                book_title=row["book_title"],
+                book_slug=row["chunk_id"].rsplit("-", 1)[0] if row["chunk_id"] else "",
+                chapter_title=row["chapter_title"],
+                chapter_num=row["chapter_num"],
+                page_start=row["page_start"] or 1,
+                page_end=row["page_end"] or 1,
+                paragraph=row["paragraph"] or 1,
+                content_chars=row["content_chars"] or len(row["content"]),
+                content_hash=row["content_hash"],
+                tags=json.loads(row["tags"]) if row["tags"] else None,
+                metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+            )
+
+            results.append(SearchResult(chunk=chunk, score=score, rank=rank))
+
+        return SearchResults(results=results, query=query, total_found=len(rows))
+
+    def hybrid_search(
+        self,
+        query: str,
+        limit: int = 10,
+        corpus: Optional[str] = None,
+        fts_weight: float = 0.3,
+        semantic_weight: float = 0.7,
+        model: str = "paraphrase-multilingual-MiniLM-L12-v2",
+    ) -> SearchResults:
+        """
+        Hybrid search combining FTS5 and semantic similarity.
+
+        Args:
+            query: Search query
+            limit: Maximum results
+            corpus: Filter by corpus
+            fts_weight: Weight for FTS5 score (0-1)
+            semantic_weight: Weight for semantic score (0-1)
+            model: Model for semantic search
+
+        Returns:
+            SearchResults with combined scoring
+        """
+        from biblirag.core.embeddings import (
+            embed_text, bytes_to_embedding, cosine_similarity
+        )
+
+        # Get FTS results (more than limit to have candidates)
+        fts_results = self.search(query, limit=limit * 3, corpus=corpus)
+
+        if not fts_results:
+            # Fall back to pure semantic search
+            return self.semantic_search(query, limit=limit, corpus=corpus, model=model)
+
+        # Get query embedding
+        query_emb = embed_text(query, model)
+
+        conn = self._get_conn()
+
+        # Score each FTS result with semantic similarity
+        scored_results = []
+        max_fts_score = max(r.score for r in fts_results) if fts_results else 1
+
+        for fts_result in fts_results:
+            # Get embedding for this chunk
+            cursor = conn.execute(
+                """SELECT embedding FROM chunk_embeddings
+                   WHERE chunk_id = (SELECT id FROM chunks WHERE chunk_id = ?)""",
+                (fts_result.chunk.id,)
+            )
+            row = cursor.fetchone()
+
+            if row:
+                emb = bytes_to_embedding(row["embedding"])
+                semantic_score = cosine_similarity(query_emb, emb)
+            else:
+                semantic_score = 0.0
+
+            # Normalize FTS score to 0-1 range
+            fts_norm = fts_result.score / max_fts_score if max_fts_score > 0 else 0
+
+            # Combined score
+            combined = (fts_weight * fts_norm) + (semantic_weight * semantic_score)
+
+            scored_results.append((combined, fts_result))
+
+        # Sort by combined score and take top results
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+
+        results = []
+        for rank, (score, fts_result) in enumerate(scored_results[:limit], 1):
+            results.append(SearchResult(
+                chunk=fts_result.chunk,
+                score=score,
+                rank=rank
+            ))
+
+        return SearchResults(
+            results=results,
+            query=query,
+            total_found=len(scored_results)
+        )

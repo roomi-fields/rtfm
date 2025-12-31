@@ -5,6 +5,8 @@ Local document library with semantic search - like NotebookLM but local and exte
 ## Features
 
 - **Full-text search** with SQLite FTS5 (porter stemming)
+- **Semantic search** with sentence embeddings (multilingual MiniLM)
+- **Hybrid search** combining FTS5 keywords and semantic similarity
 - **Pluggable parsers** for Markdown, XML (Legifrance), HTML (BOFiP)
 - **Multi-corpus support** for organizing documents
 - **Python API** for integration into your apps
@@ -643,13 +645,87 @@ lib.ingest("cgi.xml", corpus="cgi", metadata={"code": "cgi"})
 # - texte_modificateur: modifying law reference
 ```
 
+## Semantic Search (Embeddings)
+
+biblirag supports semantic search using sentence embeddings, allowing you to find conceptually similar content even without exact keyword matches.
+
+### Installation
+
+```bash
+# Install with embedding support
+pip install sentence-transformers
+```
+
+### Generating Embeddings
+
+```python
+lib = Library("library.db")
+
+# Generate embeddings for all chunks (one-time, idempotent)
+stats = lib.generate_embeddings(show_progress=True)
+print(f"Embedded: {stats['embedded']} chunks")
+
+# Generate for a specific corpus only
+lib.generate_embeddings(corpus="cgi")
+
+# Force regeneration (if model changed)
+lib.generate_embeddings(force=True)
+
+# Check embedding coverage
+stats = lib.get_embedding_stats()
+# {'total_chunks': 3250, 'embedded': 3250, 'coverage': '100.0%', 'models': 'paraphrase-multilingual-MiniLM-L12-v2'}
+```
+
+### Semantic Search
+
+```python
+# Pure semantic search - finds conceptually similar content
+results = lib.semantic_search("tax deductions for investments", limit=10)
+
+# Hybrid search - combines FTS5 keywords + semantic similarity
+# Best of both worlds: exact matches + semantic understanding
+results = lib.hybrid_search("amortissement fiscal", limit=10)
+
+# Filter by corpus
+results = lib.semantic_search("depreciation rules", corpus="cgi")
+```
+
+### CLI
+
+```bash
+# Generate embeddings
+biblirag embed --db library.db
+biblirag embed --corpus cgi --batch-size 64
+
+# Check embedding stats
+biblirag embed-stats --db library.db
+
+# Semantic search
+biblirag semantic-search "tax deductions" --db library.db
+biblirag semantic-search "depreciation" --limit 5 --corpus cgi
+
+# Hybrid search (FTS5 + semantic)
+biblirag semantic-search "amortissement" --hybrid
+```
+
+### Model
+
+The default model is `paraphrase-multilingual-MiniLM-L12-v2`:
+- **Multilingual**: French, English, German, Spanish, etc.
+- **Fast**: 384-dimensional embeddings
+- **Local**: Runs entirely on your machine
+- **Free**: Open source, no API costs
+
+Embeddings are stored in the `chunk_embeddings` table as BLOB (float32 arrays).
+
 ## Architecture
 
 ```
 biblirag/
 ├── core/
 │   ├── library.py      # Main Library class
-│   └── models.py       # Chunk, SearchResult, SearchResults
+│   ├── models.py       # Chunk, SearchResult, SearchResults
+│   └── embeddings.py   # Embedding utilities
 ├── parsers/
 │   ├── base.py         # BaseParser, ParserRegistry
 │   ├── markdown.py     # Markdown parser
