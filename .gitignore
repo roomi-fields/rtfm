@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 env/
 .env
 *.egg-info/
@@ -44,3 +45,5 @@ htmlcov/
 # Test PDFs (copyrighted content)
 biblitest/
 *.pdf
+.venv/
+tests/real_*.html

@@ -337,7 +337,9 @@ class XMLLegiFranceParser(BaseParser):
         meta = {}
 
         # Try common metadata paths
-        meta_elem = root.find('.//META') or root.find('.//meta')
+        meta_elem = root.find('.//META')
+        if meta_elem is None:
+            meta_elem = root.find('.//meta')
         if meta_elem is not None:
             meta['titre'] = self._get_element_text(meta_elem, 'META_SPEC/META_TEXTE_VERSION/TITRE') or \
                            self._get_element_text(meta_elem, 'TITRE') or \
