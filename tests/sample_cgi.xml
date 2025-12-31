@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CODE nature="CODE" id="LEGITEXT000006069577">
+  <META>
+    <META_COMMUN>
+      <ID>LEGITEXT000006069577</ID>
+      <DATE_PUBLI>1950-04-06</DATE_PUBLI>
+    </META_COMMUN>
+    <META_SPEC>
+      <META_TEXTE_VERSION>
+        <TITRE>Code général des impôts</TITRE>
+        <TITREFULL>Code général des impôts</TITREFULL>
+      </META_TEXTE_VERSION>
+    </META_SPEC>
+  </META>
+
+  <SECTION_TA id="LEGISCTA000006147163">
+    <TITRE_TA>Livre premier : Assiette et liquidation de l'impôt</TITRE_TA>
+
+    <SECTION_TA id="LEGISCTA000006162526">
+      <TITRE_TA>Première partie : Impôts d'État</TITRE_TA>
+
+      <ARTICLE id="LEGIARTI000006302546" num="39 decies A" debut="2015-08-08" etat="VIGUEUR">
+        <META>
+          <META_SPEC>
+            <META_ARTICLE>
+              <DATE_DEBUT>2015-08-08</DATE_DEBUT>
+              <ETAT>VIGUEUR</ETAT>
+            </META_ARTICLE>
+          </META_SPEC>
+        </META>
+        <BLOC_TEXTUEL>
+          <CONTENU>
+            I. – Les entreprises soumises à l'impôt sur les sociétés ou à l'impôt sur le revenu selon un régime réel d'imposition peuvent déduire de leur résultat imposable une somme égale à 40 % de la valeur d'origine des biens inscrits à l'actif immobilisé, hors frais financiers, affectés à leur activité industrielle.
+
+            Cette déduction s'applique aux biens acquis, fabriqués ou pris en crédit-bail à compter du 15 avril 2015 et jusqu'au 14 avril 2017.
+
+            II. – La déduction est répartie linéairement sur la durée normale d'utilisation des biens.
+          </CONTENU>
+        </BLOC_TEXTUEL>
+        <LIENS>
+          <LIEN cidtexte="LEGIARTI000006302547" type="CITATION">Article 39 decies B</LIEN>
+          <LIEN cidtexte="LEGIARTI000006302600" type="CITATION">Article 44 quinquies</LIEN>
+        </LIENS>
+      </ARTICLE>
+
+      <ARTICLE id="LEGIARTI000006302547" num="39 decies B" debut="2016-01-01" etat="VIGUEUR">
+        <META>
+          <META_SPEC>
+            <META_ARTICLE>
+              <DATE_DEBUT>2016-01-01</DATE_DEBUT>
+              <ETAT>VIGUEUR</ETAT>
+            </META_ARTICLE>
+          </META_SPEC>
+        </META>
+        <BLOC_TEXTUEL>
+          <CONTENU>
+            Les PME au sens du droit de l'Union européenne peuvent bénéficier d'une déduction supplémentaire de 20 % dans les conditions prévues à l'article 39 decies A.
+
+            Cette disposition s'applique aux investissements réalisés dans les zones de revitalisation rurale.
+          </CONTENU>
+        </BLOC_TEXTUEL>
+        <LIENS>
+          <LIEN cidtexte="LEGIARTI000006302546" type="CITATION">Article 39 decies A</LIEN>
+        </LIENS>
+      </ARTICLE>
+
+      <ARTICLE id="LEGIARTI000006302600" num="44 quinquies" debut="1988-01-01" fin="2020-12-31" etat="ABROGE">
+        <META>
+          <META_SPEC>
+            <META_ARTICLE>
+              <DATE_DEBUT>1988-01-01</DATE_DEBUT>
+              <DATE_FIN>2020-12-31</DATE_FIN>
+              <ETAT>ABROGE</ETAT>
+            </META_ARTICLE>
+          </META_SPEC>
+        </META>
+        <BLOC_TEXTUEL>
+          <CONTENU>
+            Les entreprises créées dans les zones de revitalisation rurale bénéficient d'une exonération d'impôt sur les bénéfices pendant les deux premières années d'activité.
+
+            (Article abrogé par la loi de finances 2021)
+          </CONTENU>
+        </BLOC_TEXTUEL>
+      </ARTICLE>
+
+    </SECTION_TA>
+  </SECTION_TA>
+</CODE>
