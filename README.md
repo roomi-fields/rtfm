@@ -744,8 +744,8 @@ biblirag uses SQLite with FTS5 for full-text search. The database supports:
 - **Automatic triggers** to keep the FTS index in sync
 
 ```python
-# Shared database on network storage
-lib = Library(r"\\server\share\biblirag\library.db")
+# Default location: db/library.db
+lib = Library("db/library.db")
 
 # Database is automatically created with proper schema
 ```
