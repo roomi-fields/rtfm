@@ -369,20 +369,23 @@ def cmd_semantic_search(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        prog="rtfm",
-        description="Local document library with semantic search"
-    )
-    parser.add_argument(
+    # Shared --db argument inherited by every subcommand
+    db_parent = argparse.ArgumentParser(add_help=False)
+    db_parent.add_argument(
         "--db", "-d",
         default="library.db",
         help="Path to database file (default: library.db)"
     )
 
+    parser = argparse.ArgumentParser(
+        prog="rtfm",
+        description="RTFM — Read The F***ing Manual",
+    )
+
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # search
-    p_search = subparsers.add_parser("search", help="Search the library")
+    p_search = subparsers.add_parser("search", help="Search the library", parents=[db_parent])
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--limit", "-l", type=int, default=10)
     p_search.add_argument("--corpus", "-c", help="Filter by corpus")
@@ -392,17 +395,17 @@ def main():
     p_search.set_defaults(func=cmd_search)
 
     # stats
-    p_stats = subparsers.add_parser("stats", help="Show library statistics")
+    p_stats = subparsers.add_parser("stats", help="Show library statistics", parents=[db_parent])
     p_stats.set_defaults(func=cmd_stats)
 
     # books
-    p_books = subparsers.add_parser("books", help="List books")
+    p_books = subparsers.add_parser("books", help="List books", parents=[db_parent])
     p_books.add_argument("--corpus", "-c", help="Filter by corpus")
     p_books.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_books.set_defaults(func=cmd_books)
 
     # corpora
-    p_corpora = subparsers.add_parser("corpora", help="List corpora")
+    p_corpora = subparsers.add_parser("corpora", help="List corpora", parents=[db_parent])
     p_corpora.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_corpora.set_defaults(func=cmd_corpora)
 
@@ -411,13 +414,13 @@ def main():
     p_schema.set_defaults(func=cmd_schema)
 
     # tags
-    p_tags = subparsers.add_parser("tags", help="List all tags")
+    p_tags = subparsers.add_parser("tags", help="List all tags", parents=[db_parent])
     p_tags.add_argument("--corpus", "-c", help="Filter by corpus")
     p_tags.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_tags.set_defaults(func=cmd_tags)
 
     # tag (add tags)
-    p_tag = subparsers.add_parser("tag", help="Add tags to chunks")
+    p_tag = subparsers.add_parser("tag", help="Add tags to chunks", parents=[db_parent])
     p_tag.add_argument("tags", help="Comma-separated tags to add")
     p_tag.add_argument("--chunk", help="Specific chunk ID to tag")
     p_tag.add_argument("--corpus", "-c", help="Tag all chunks in corpus")
@@ -425,21 +428,21 @@ def main():
     p_tag.set_defaults(func=cmd_tag_add)
 
     # versions (list versioned articles or show history)
-    p_versions = subparsers.add_parser("versions", help="List versioned articles or show history")
+    p_versions = subparsers.add_parser("versions", help="List versioned articles or show history", parents=[db_parent])
     p_versions.add_argument("--article", "-a", help="Show history for specific article (e.g., CGI-39-decies-A)")
     p_versions.add_argument("--corpus", "-c", help="Filter by corpus")
     p_versions.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_versions.set_defaults(func=cmd_versions)
 
     # version-at (get article at specific date)
-    p_version_at = subparsers.add_parser("version-at", help="Get article at specific date")
+    p_version_at = subparsers.add_parser("version-at", help="Get article at specific date", parents=[db_parent])
     p_version_at.add_argument("article", help="Article reference (e.g., CGI-39-decies-A)")
     p_version_at.add_argument("date", help="Date in YYYY-MM-DD format")
     p_version_at.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_version_at.set_defaults(func=cmd_version_at)
 
     # compare-versions (compare two versions)
-    p_compare = subparsers.add_parser("compare-versions", help="Compare two article versions")
+    p_compare = subparsers.add_parser("compare-versions", help="Compare two article versions", parents=[db_parent])
     p_compare.add_argument("article", help="Article reference (e.g., CGI-39-decies-A)")
     p_compare.add_argument("v1", type=int, help="First version number")
     p_compare.add_argument("v2", type=int, help="Second version number")
@@ -447,18 +450,18 @@ def main():
     p_compare.set_defaults(func=cmd_compare_versions)
 
     # embed (generate embeddings)
-    p_embed = subparsers.add_parser("embed", help="Generate embeddings for chunks")
+    p_embed = subparsers.add_parser("embed", help="Generate embeddings for chunks", parents=[db_parent])
     p_embed.add_argument("--corpus", "-c", help="Only embed chunks in this corpus")
     p_embed.add_argument("--batch-size", type=int, default=32, help="Batch size")
     p_embed.add_argument("--force", action="store_true", help="Re-generate all embeddings")
     p_embed.set_defaults(func=cmd_embed)
 
     # embed-stats (show embedding statistics)
-    p_embed_stats = subparsers.add_parser("embed-stats", help="Show embedding statistics")
+    p_embed_stats = subparsers.add_parser("embed-stats", help="Show embedding statistics", parents=[db_parent])
     p_embed_stats.set_defaults(func=cmd_embed_stats)
 
     # semantic-search (search using embeddings)
-    p_semantic = subparsers.add_parser("semantic-search", help="Search using semantic similarity")
+    p_semantic = subparsers.add_parser("semantic-search", help="Search using semantic similarity", parents=[db_parent])
     p_semantic.add_argument("query", help="Search query")
     p_semantic.add_argument("--limit", "-l", type=int, default=10)
     p_semantic.add_argument("--corpus", "-c", help="Filter by corpus")
@@ -467,7 +470,7 @@ def main():
     p_semantic.set_defaults(func=cmd_semantic_search)
 
     # sync
-    p_sync = subparsers.add_parser("sync", help="Sync files into the library")
+    p_sync = subparsers.add_parser("sync", help="Sync files into the library", parents=[db_parent])
     p_sync.add_argument("path", nargs="?", default=".", help="Directory to sync")
     p_sync.add_argument("--corpus", "-c", default="default")
     p_sync.add_argument("--extensions", "-e", help="Comma-separated extensions (e.g. md,py,pdf)")
@@ -476,7 +479,7 @@ def main():
     p_sync.add_argument("--files", nargs="+", help="Specific files to sync (for git hooks)")
     p_sync.set_defaults(func=cmd_sync)
 
-    # init
+    # init (has its own --db default)
     p_init = subparsers.add_parser("init", help="Initialize RTFM for a project")
     p_init.add_argument("--db", "-d", default=".rtfm/library.db",
                          help="Database path (default: .rtfm/library.db)")
@@ -486,7 +489,7 @@ def main():
     p_init.set_defaults(func=cmd_init)
 
     # ask (traceable RAG)
-    p_ask = subparsers.add_parser("ask", help="Poser une question (RAG tracable)")
+    p_ask = subparsers.add_parser("ask", help="Poser une question (RAG tracable)", parents=[db_parent])
     p_ask.add_argument("question", help="Question a poser")
     p_ask.add_argument("--limit", "-l", type=int, default=10)
     p_ask.add_argument("--corpus", "-c", help="Filtrer par corpus")
