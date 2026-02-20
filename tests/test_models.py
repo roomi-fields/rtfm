@@ -1,8 +1,8 @@
-"""Tests for biblirag.core.models."""
+"""Tests for rtfm.core.models."""
 
 import json
 import pytest
-from biblirag.core.models import Chunk, SearchResult, SearchResults
+from rtfm.core.models import Chunk, SearchResult, SearchResults
 
 
 class TestChunk:

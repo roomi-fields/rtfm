@@ -1,11 +1,11 @@
 """
-Schema descriptor for biblirag.
+Schema descriptor for rtfm.
 
-Documents all fields used by biblirag core.
+Documents all fields used by rtfm core.
 External applications can freely use the `metadata` dict for custom fields.
 """
 
-# Fields used by biblirag core - DO NOT use these names in metadata
+# Fields used by rtfm core - DO NOT use these names in metadata
 CORE_CHUNK_FIELDS = {
     # Identity
     "id": "Unique chunk identifier (str)",
@@ -94,11 +94,11 @@ def print_schema():
     print("BIBLIRAG SCHEMA")
     print("=" * 60)
 
-    print("\n## Chunk Fields (reserved by biblirag)")
+    print("\n## Chunk Fields (reserved by rtfm)")
     for field, desc in CORE_CHUNK_FIELDS.items():
         print(f"  {field:20} {desc}")
 
-    print("\n## Book Fields (reserved by biblirag)")
+    print("\n## Book Fields (reserved by rtfm)")
     for field, desc in CORE_BOOK_FIELDS.items():
         print(f"  {field:20} {desc}")
 

@@ -6,8 +6,8 @@ import hashlib
 from pathlib import Path
 from typing import Iterator, Optional
 
-from biblirag.core.models import Chunk
-from biblirag.parsers.base import BaseParser, ParserRegistry
+from rtfm.core.models import Chunk
+from rtfm.parsers.base import BaseParser, ParserRegistry
 
 
 # Chunk sizing

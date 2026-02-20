@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI for querying the biblirag library."""
+"""CLI for querying the rtfm library."""
 
 import argparse
 import sqlite3
@@ -303,7 +303,7 @@ def list_subjects(db_path: Optional[Path] = None) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Query the biblirag library",
+        description="Query the rtfm library",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

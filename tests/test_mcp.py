@@ -1,0 +1,149 @@
+"""Tests for rtfm.mcp server tools.
+
+These tests call the tool functions directly (not via MCP transport)
+to verify the business logic.
+"""
+
+import os
+import pytest
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+from rtfm import Library
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def mcp_db(tmp_path):
+    """Create a temporary DB and point RTFM_DB at it."""
+    db_path = tmp_path / "test.db"
+    lib = Library(db_path)
+
+    # Ingest a small markdown file so we have searchable content
+    md = tmp_path / "doc.md"
+    md.write_text(
+        "# Philosophy\n\n"
+        "The nature of consciousness is a profound topic that has been explored by many thinkers. "
+        "Self-inquiry is a method taught by Ramana Maharshi. "
+        "It involves asking 'Who am I?' to discover the true nature of the self.\n\n"
+        "## Meditation\n\n"
+        "Meditation is a practice that helps calm the mind and develop awareness. "
+        "Through regular practice, one can experience deeper states of consciousness "
+        "and gain insight into the nature of reality.\n"
+    )
+    lib.ingest(md, corpus="test")
+    lib.close()
+
+    # Set env var for MCP module
+    with patch.dict(os.environ, {"RTFM_DB": str(db_path)}):
+        # Reset the module-level singleton
+        import rtfm.mcp as mcp_mod
+        mcp_mod._library = None
+        yield db_path
+        mcp_mod._library = None
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────
+
+class TestMCPSearch:
+    def test_search_returns_results(self, mcp_db):
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search("consciousness self-inquiry")
+        assert "Found" in result or "result" in result.lower()
+        assert "consciousness" in result.lower() or "self" in result.lower()
+
+    def test_search_no_results(self, mcp_db):
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search("xyznonexistent123456")
+        assert "No results" in result
+
+    def test_search_fts_mode(self, mcp_db):
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search("meditation", search_type="fts")
+        assert "meditation" in result.lower() or "No results" in result
+
+
+class TestMCPStats:
+    def test_stats(self, mcp_db):
+        from rtfm.mcp import rtfm_stats
+        result = rtfm_stats()
+        assert "Chunks:" in result
+        assert "Books:" in result
+
+
+class TestMCPTags:
+    def test_tags_empty(self, mcp_db):
+        from rtfm.mcp import rtfm_tags
+        result = rtfm_tags()
+        assert "No tags" in result or "tag" in result.lower()
+
+
+class TestMCPBooks:
+    def test_books(self, mcp_db):
+        from rtfm.mcp import rtfm_books
+        result = rtfm_books()
+        assert "chunk" in result.lower()
+
+    def test_books_with_corpus(self, mcp_db):
+        from rtfm.mcp import rtfm_books
+        result = rtfm_books(corpus="nonexistent")
+        assert "No books" in result
+
+
+class TestMCPIngest:
+    def test_ingest(self, mcp_db, tmp_path):
+        from rtfm.mcp import rtfm_ingest
+        f = tmp_path / "new.txt"
+        f.write_text("New content for ingestion test.\n" * 10)
+        result = rtfm_ingest(str(f))
+        assert "Ingested" in result
+        assert "chunks" in result.lower()
+
+    def test_ingest_missing_file(self, mcp_db):
+        from rtfm.mcp import rtfm_ingest
+        result = rtfm_ingest("/nonexistent/file.txt")
+        assert "not found" in result.lower() or "Error" in result
+
+
+class TestMCPTagChunks:
+    def test_tag_chunks(self, mcp_db):
+        from rtfm.mcp import rtfm_tag_chunks
+
+        # Get a chunk ID from the DB
+        lib = Library(mcp_db)
+        books = lib.list_books()
+        assert books, "Should have at least one book"
+
+        conn = lib._get_conn()
+        cursor = conn.execute("SELECT chunk_id FROM chunks LIMIT 1")
+        row = cursor.fetchone()
+        assert row, "Should have at least one chunk"
+        chunk_id = row["chunk_id"]
+        lib.close()
+
+        # Reset singleton since we opened a new connection
+        import rtfm.mcp as mcp_mod
+        mcp_mod._library = None
+
+        result = rtfm_tag_chunks(chunk_id, "philosophy,meditation")
+        assert "Added tags" in result
+
+
+class TestMCPRemove:
+    def test_remove_not_found(self, mcp_db):
+        from rtfm.mcp import rtfm_remove
+        result = rtfm_remove("nonexistent.txt")
+        assert "Not found" in result
+
+
+class TestMCPSync:
+    def test_sync(self, mcp_db, tmp_path):
+        from rtfm.mcp import rtfm_sync
+
+        # Create a file to sync
+        (tmp_path / "synctest.txt").write_text("Hello from sync test.\n" * 10)
+
+        result = rtfm_sync(str(tmp_path), corpus="sync-test")
+        assert "Sync complete" in result

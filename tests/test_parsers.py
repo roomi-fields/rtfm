@@ -1,13 +1,13 @@
-"""Tests for biblirag parsers."""
+"""Tests for rtfm parsers."""
 
 import pytest
 from pathlib import Path
-from biblirag.parsers.base import ParserRegistry
-from biblirag.parsers.xml_legifrance import (
+from rtfm.parsers.base import ParserRegistry
+from rtfm.parsers.xml_legifrance import (
     XMLLegiFranceParser,
     lien_legifrance,
 )
-from biblirag.parsers.html_bofip import (
+from rtfm.parsers.html_bofip import (
     HTMLBOFiPParser,
     extract_cgi_references,
     parse_boi_identifier,

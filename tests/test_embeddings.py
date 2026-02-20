@@ -12,7 +12,7 @@ class TestEmbeddingsModule:
 
     def test_embed_text(self):
         """Test embedding a single text."""
-        from biblirag.core.embeddings import embed_text
+        from rtfm.core.embeddings import embed_text
 
         embedding = embed_text("Hello world")
         assert isinstance(embedding, np.ndarray)
@@ -21,7 +21,7 @@ class TestEmbeddingsModule:
 
     def test_embed_texts_batch(self):
         """Test embedding multiple texts."""
-        from biblirag.core.embeddings import embed_texts
+        from rtfm.core.embeddings import embed_texts
 
         texts = ["Hello world", "Bonjour le monde", "Hola mundo"]
         embeddings = embed_texts(texts)
@@ -30,7 +30,7 @@ class TestEmbeddingsModule:
 
     def test_embedding_serialization(self):
         """Test converting embeddings to/from bytes."""
-        from biblirag.core.embeddings import (
+        from rtfm.core.embeddings import (
             embed_text, embedding_to_bytes, bytes_to_embedding
         )
 
@@ -42,7 +42,7 @@ class TestEmbeddingsModule:
 
     def test_cosine_similarity(self):
         """Test cosine similarity calculation."""
-        from biblirag.core.embeddings import embed_text, cosine_similarity
+        from rtfm.core.embeddings import embed_text, cosine_similarity
 
         emb1 = embed_text("The cat sat on the mat")
         emb2 = embed_text("A cat is sitting on a rug")
@@ -57,7 +57,7 @@ class TestEmbeddingsModule:
 
     def test_cosine_similarity_batch(self):
         """Test batch cosine similarity."""
-        from biblirag.core.embeddings import (
+        from rtfm.core.embeddings import (
             embed_text, embed_texts, cosine_similarity_batch
         )
 

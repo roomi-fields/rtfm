@@ -1,12 +1,12 @@
 """
-PDF parser for biblirag.
+PDF parser for rtfm.
 
 Supports two extraction modes:
 - pdftext: Fast, basic text extraction (default)
 - marker: High-quality extraction with layout awareness (optional)
 
 Install dependencies:
-    pip install biblirag[pdf]
+    pip install rtfm[pdf]
     # or
     pip install pdftext marker-pdf
 """
@@ -16,8 +16,8 @@ import hashlib
 from pathlib import Path
 from typing import Iterator, Optional
 
-from biblirag.core.models import Chunk
-from biblirag.parsers.base import BaseParser, ParserRegistry
+from rtfm.core.models import Chunk
+from rtfm.parsers.base import BaseParser, ParserRegistry
 
 
 # Chunk sizing (same as markdown parser)

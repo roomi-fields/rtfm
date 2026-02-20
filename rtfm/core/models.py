@@ -1,8 +1,11 @@
-"""Data models for biblirag."""
+"""Data models for rtfm."""
 
 from dataclasses import dataclass, field, asdict
-from typing import Optional, Any
+from typing import Optional, Any, TYPE_CHECKING
 import json
+
+if TYPE_CHECKING:
+    pass
 
 
 @dataclass
@@ -171,3 +174,118 @@ class SearchResults:
 
         lines.append("</search_results>")
         return "\n".join(lines)
+
+
+# =========================================================================
+# RAG Answer models (traceable generation)
+# =========================================================================
+
+
+@dataclass
+class Citation:
+    """A verifiable citation linking to a source chunk."""
+
+    ref: int          # reference number [1], [2]...
+    chunk: Chunk      # full source chunk
+    quote: str        # relevant excerpt from the chunk
+    score: float      # original search score
+
+    def to_dict(self) -> dict:
+        return {
+            "ref": self.ref,
+            "source": self.chunk.source,
+            "page": self.chunk.page,
+            "quote": self.quote,
+            "score": self.score,
+        }
+
+
+@dataclass
+class GroundingResult:
+    """Result of grounding verification for a single citation."""
+
+    similarity: float   # cosine similarity between claim and cited chunk
+    grounded: bool      # True if similarity >= threshold
+    method: str         # "embedding" or "llm-judge"
+
+    def to_dict(self) -> dict:
+        return {
+            "similarity": round(self.similarity, 4),
+            "grounded": self.grounded,
+            "method": self.method,
+        }
+
+
+@dataclass
+class Answer:
+    """Generated answer with traceable citations."""
+
+    text: str                                        # answer with [1], [2]...
+    citations: list[Citation]                        # verified sources
+    sources: SearchResults                           # raw search results
+
+    # Level 0
+    sufficient_context: bool                         # do sources cover the question?
+    confidence_note: str                             # explanation if insufficient
+
+    # Level 2
+    grounding_scores: dict[int, GroundingResult] = field(default_factory=dict)
+    ungrounded_claims: list[str] = field(default_factory=list)
+
+    @property
+    def grounding_score(self) -> float:
+        """Global grounding score (0-1)."""
+        if not self.grounding_scores:
+            return 0.0
+        grounded = sum(1 for g in self.grounding_scores.values() if g.grounded)
+        return grounded / len(self.grounding_scores)
+
+    def to_markdown(self) -> str:
+        """Export as readable markdown with sources."""
+        lines = []
+
+        if not self.sufficient_context:
+            lines.append(f"> **Contexte insuffisant** : {self.confidence_note}")
+            return "\n".join(lines)
+
+        lines.append(self.text)
+        lines.append("")
+        lines.append("---")
+        lines.append("### Sources")
+        for c in self.citations:
+            lines.append(f"- **[{c.ref}]** {c.chunk.source} ({c.chunk.page})")
+            if c.quote:
+                short_quote = c.quote[:150] + "..." if len(c.quote) > 150 else c.quote
+                lines.append(f"  > {short_quote}")
+
+        if self.grounding_scores:
+            score_pct = f"{self.grounding_score * 100:.0f}%"
+            lines.append(f"\n**Grounding** : {score_pct}")
+            if self.ungrounded_claims:
+                lines.append(f"\n**Claims non verifies ({len(self.ungrounded_claims)})** :")
+                for claim in self.ungrounded_claims:
+                    lines.append(f"- {claim}")
+
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        """Export as JSON-serializable dict."""
+        d = {
+            "text": self.text,
+            "sufficient_context": self.sufficient_context,
+            "confidence_note": self.confidence_note,
+            "citations": [c.to_dict() for c in self.citations],
+            "grounding_score": round(self.grounding_score, 4),
+        }
+        if self.grounding_scores:
+            d["grounding_details"] = {
+                str(ref): g.to_dict()
+                for ref, g in self.grounding_scores.items()
+            }
+        if self.ungrounded_claims:
+            d["ungrounded_claims"] = self.ungrounded_claims
+        return d
+
+    def to_json(self) -> str:
+        """Export as JSON string."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)

@@ -93,7 +93,7 @@ def search_openlibrary(title: str, author: str = "") -> Optional[dict]:
     url = f"{OPENLIBRARY_SEARCH_URL}?{urllib.parse.urlencode(params)}"
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "biblirag/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "rtfm/1.0"})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode('utf-8'))
 

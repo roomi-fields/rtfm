@@ -1,4 +1,4 @@
-# biblirag
+# RTFM
 
 Local document library with semantic search - like NotebookLM but local and extensible.
 
@@ -7,7 +7,9 @@ Local document library with semantic search - like NotebookLM but local and exte
 - **Full-text search** with SQLite FTS5 (porter stemming)
 - **Semantic search** with sentence embeddings (multilingual MiniLM)
 - **Hybrid search** combining FTS5 keywords and semantic similarity
-- **Pluggable parsers** for Markdown, XML (Legifrance), HTML (BOFiP)
+- **Incremental sync** — keeps the DB up-to-date when files change, with git hook support
+- **MCP server** — exposes search/sync/tag to Claude Code via the Model Context Protocol
+- **Pluggable parsers** for Markdown, XML (Legifrance), HTML (BOFiP), plain text, and source code
 - **Multi-corpus support** for organizing documents
 - **Python API** for integration into your apps
 - **CLI** for command-line operations
@@ -22,6 +24,9 @@ pip install -e .
 
 # With PDF support (optional)
 pip install -e ".[pdf]"
+
+# With MCP server (for Claude Code integration)
+pip install -e ".[mcp]"
 ```
 
 ## Quick Start
@@ -29,7 +34,7 @@ pip install -e ".[pdf]"
 ### Creating a Library
 
 ```python
-from biblirag import Library
+from rtfm import Library
 
 # Create or open a library (creates the file if it doesn't exist)
 lib = Library("my_library.db")
@@ -41,7 +46,7 @@ lib = Library("existing_library.db", create=False)
 ### Ingesting Documents
 
 ```python
-from biblirag import Library
+from rtfm import Library
 
 lib = Library("my_library.db")
 
@@ -66,7 +71,7 @@ stats = lib.ingest(
 ### Searching
 
 ```python
-from biblirag import Library
+from rtfm import Library
 
 lib = Library("my_library.db")
 
@@ -121,7 +126,7 @@ prompt_context = results.to_prompt(max_chars=8000)
 Example LLM integration:
 
 ```python
-from biblirag import Library
+from rtfm import Library
 
 lib = Library("knowledge_base.db")
 results = lib.search("capital gains tax", limit=5)
@@ -163,40 +168,105 @@ for book in lib.list_books(corpus="legal"):
 lib.delete_book("outdated-document-slug")
 ```
 
+### Incremental Sync
+
+Keep a library in sync with a directory — only changed files are re-indexed.
+
+```python
+from rtfm import Library
+
+lib = Library("project.db")
+
+# Full sync of a directory
+result = lib.sync(".", corpus="my-project")
+print(result)  # SyncResult(+3 ~1 -0 =42)
+
+# Dry run (preview changes without modifying the DB)
+result = lib.sync(".", corpus="my-project", dry_run=True)
+
+# Limit to specific extensions
+result = lib.sync(".", corpus="docs", extensions={".md", ".txt"})
+```
+
+The sync tracks file hashes in an `indexed_files` table. On each run it computes a diff (added/modified/removed) and only processes what changed.
+
+## MCP Server (Claude Code Integration)
+
+rtfm ships an MCP server that lets Claude Code search, sync, and tag your documents directly.
+
+### Setup
+
+```bash
+# Install with MCP support
+pip install -e ".[mcp]"
+
+# Register the server in Claude Code
+claude mcp add rtfm -- python -m rtfm.mcp
+```
+
+Or add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "rtfm": {
+      "command": "python",
+      "args": ["-m", "rtfm.mcp"],
+      "env": {
+        "RTFM_DB": "db/library.db"
+      }
+    }
+  }
+}
+```
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `rtfm_search` | Search the library (FTS, semantic, or hybrid) |
+| `rtfm_stats` | Get library statistics |
+| `rtfm_tags` | List all tags |
+| `rtfm_books` | List indexed documents |
+| `rtfm_sync` | Sync a directory (incremental) |
+| `rtfm_ingest` | Ingest a single file |
+| `rtfm_tag_chunks` | Add tags to specific chunks |
+| `rtfm_remove` | Remove a file from the index |
+
 ## CLI Usage
 
-biblirag includes a command-line interface for common operations.
+rtfm includes a command-line interface for common operations.
 
 ### Search
 
 ```bash
 # Basic search
-biblirag search "depreciation" --db library.db
+rtfm search "depreciation" --db library.db
 
 # Limit results
-biblirag search "article 39" --limit 5
+rtfm search "article 39" --limit 5
 
 # Filter by corpus
-biblirag search "tax deduction" --corpus cgi
+rtfm search "tax deduction" --corpus cgi
 
 # Filter by book
-biblirag search "amortissement" --book code-general-impots
+rtfm search "amortissement" --book code-general-impots
 
 # Output formats
-biblirag search "query" --format text      # Default: human-readable
-biblirag search "query" --format json      # JSON output
-biblirag search "query" --format markdown  # Markdown output
-biblirag search "query" --format prompt    # LLM-ready format
+rtfm search "query" --format text      # Default: human-readable
+rtfm search "query" --format json      # JSON output
+rtfm search "query" --format markdown  # Markdown output
+rtfm search "query" --format prompt    # LLM-ready format
 
 # Control max chars for prompt format
-biblirag search "query" --format prompt --max-chars 4000
+rtfm search "query" --format prompt --max-chars 4000
 ```
 
 ### Statistics
 
 ```bash
 # Show library statistics
-biblirag stats --db library.db
+rtfm stats --db library.db
 # Output:
 # Books:         10
 # Chunks:        3250
@@ -209,40 +279,64 @@ biblirag stats --db library.db
 
 ```bash
 # List all books
-biblirag books --db library.db
+rtfm books --db library.db
 
 # List books in a specific corpus
-biblirag books --corpus legal
+rtfm books --corpus legal
 
 # Output as JSON
-biblirag books --format json
+rtfm books --format json
 
 # List all corpora
-biblirag corpora --db library.db
+rtfm corpora --db library.db
 
 # Output as JSON
-biblirag corpora --format json
+rtfm corpora --format json
+```
+
+### Sync and Init
+
+```bash
+# Initialize rtfm for the current project (first sync + optional git hook)
+rtfm init --db project.db --corpus my-project
+rtfm init --db project.db --install-hook  # also installs a git pre-push hook
+
+# Incremental sync (only changed files are re-indexed)
+rtfm sync . --db project.db --corpus my-project
+
+# Dry run — see what would change without touching the DB
+rtfm sync . --db project.db --dry-run
+
+# Sync specific files only (used by git hooks)
+rtfm sync --files src/main.py README.md --db project.db
+
+# Limit to specific extensions
+rtfm sync . --extensions md,py,txt
+
+# Skip embedding generation (faster)
+rtfm sync . --no-embeddings
 ```
 
 ### View Schema
 
 ```bash
 # Display field schema documentation
-biblirag schema
+rtfm schema
 ```
 
 ## Parsers
 
-biblirag includes parsers for common document formats. Parsers are auto-detected based on file extension.
+rtfm includes parsers for common document formats. Parsers are auto-detected based on file extension.
 
 ### Available Parsers
 
 | Parser | Extensions | Description |
 |--------|------------|-------------|
 | `markdown` | `.md`, `.markdown` | Markdown files with header-based chunking |
-| `pdf` | `.pdf` | PDF files (requires `pip install biblirag[pdf]`) |
+| `pdf` | `.pdf` | PDF files (requires `pip install rtfm[pdf]`) |
 | `legifrance` | `.xml` | French legal codes in LEGI XML format |
 | `bofip` | `.html`, `.htm` | French tax doctrine (BOFiP) HTML files |
+| `plaintext` | `.py`, `.js`, `.ts`, `.txt`, `.sh`, `.rs`, `.go`, ... | Source code and plain text (~500 char chunks at line boundaries) |
 
 ### Markdown Parser
 
@@ -266,13 +360,13 @@ Parses PDF files using `pdftext` (fast) or `marker-pdf` (high quality).
 
 ```python
 # Install PDF support
-# pip install biblirag[pdf]
+# pip install rtfm[pdf]
 
 # Basic usage (uses pdftext backend)
 lib.ingest("document.pdf", corpus="docs")
 
 # Use marker backend for complex PDFs
-from biblirag.parsers.pdf import PDFParser
+from rtfm.parsers.pdf import PDFParser
 parser = PDFParser(backend='marker')
 lib.ingest("complex.pdf", corpus="docs", parser=parser)
 ```
@@ -312,8 +406,8 @@ lib.ingest("boi-is-base-10.html", corpus="bofip")
 Create custom parsers by extending `BaseParser`:
 
 ```python
-from biblirag.parsers.base import BaseParser, ParserRegistry
-from biblirag.core.models import Chunk
+from rtfm.parsers.base import BaseParser, ParserRegistry
+from rtfm.core.models import Chunk
 
 @ParserRegistry.register
 class MyCustomParser(BaseParser):
@@ -351,7 +445,7 @@ class MyCustomParser(BaseParser):
 
 ### Library
 
-Main class for interacting with a biblirag database.
+Main class for interacting with a rtfm database.
 
 ```python
 class Library:
@@ -505,10 +599,10 @@ class SearchResults:
 
 ## Extended Metadata
 
-biblirag supports domain-specific metadata through the `metadata` field:
+rtfm supports domain-specific metadata through the `metadata` field:
 
 ```python
-from biblirag import METADATA_EXAMPLES
+from rtfm import METADATA_EXAMPLES
 
 # Example for French legal documents
 chunk.metadata = {
@@ -525,7 +619,7 @@ def lien_legifrance(article, code="cgi"):
     return f"https://legifrance.gouv.fr/search?query=article+{article}+{code}"
 ```
 
-See `biblirag/schema.py` for the full schema and examples.
+See `rtfm/schema.py` for the full schema and examples.
 
 ## Tag Management
 
@@ -564,19 +658,19 @@ results = lib.search("amortissement", tags=["fiscal"])
 
 ```bash
 # List all tags
-biblirag tags --db library.db
+rtfm tags --db library.db
 
 # List tags for a corpus
-biblirag tags --corpus cgi
+rtfm tags --corpus cgi
 
 # Add tags to a specific chunk
-biblirag tag "fiscal,important" --chunk chunk-id-here
+rtfm tag "fiscal,important" --chunk chunk-id-here
 
 # Tag all chunks in a corpus
-biblirag tag "legal,2024" --corpus cgi
+rtfm tag "legal,2024" --corpus cgi
 
 # Tag all chunks in a book
-biblirag tag "reviewed" --book tax-guide
+rtfm tag "reviewed" --book tax-guide
 ```
 
 ## Article Versioning
@@ -619,16 +713,16 @@ diff = lib.compare_versions("CGI-39-decies-A", 1, 2)
 
 ```bash
 # List all versioned articles
-biblirag versions --db library.db
+rtfm versions --db library.db
 
 # Show version history for an article
-biblirag versions --article CGI-39-decies-A
+rtfm versions --article CGI-39-decies-A
 
 # Get article at a specific date
-biblirag version-at CGI-39-decies-A 2022-06-15
+rtfm version-at CGI-39-decies-A 2022-06-15
 
 # Compare two versions
-biblirag compare-versions CGI-39-decies-A 1 2
+rtfm compare-versions CGI-39-decies-A 1 2
 ```
 
 ### Automatic Extraction
@@ -647,7 +741,7 @@ lib.ingest("cgi.xml", corpus="cgi", metadata={"code": "cgi"})
 
 ## Semantic Search (Embeddings)
 
-biblirag supports semantic search using sentence embeddings, allowing you to find conceptually similar content even without exact keyword matches.
+rtfm supports semantic search using sentence embeddings, allowing you to find conceptually similar content even without exact keyword matches.
 
 ### Installation
 
@@ -694,18 +788,18 @@ results = lib.semantic_search("depreciation rules", corpus="cgi")
 
 ```bash
 # Generate embeddings
-biblirag embed --db library.db
-biblirag embed --corpus cgi --batch-size 64
+rtfm embed --db library.db
+rtfm embed --corpus cgi --batch-size 64
 
 # Check embedding stats
-biblirag embed-stats --db library.db
+rtfm embed-stats --db library.db
 
 # Semantic search
-biblirag semantic-search "tax deductions" --db library.db
-biblirag semantic-search "depreciation" --limit 5 --corpus cgi
+rtfm semantic-search "tax deductions" --db library.db
+rtfm semantic-search "depreciation" --limit 5 --corpus cgi
 
 # Hybrid search (FTS5 + semantic)
-biblirag semantic-search "amortissement" --hybrid
+rtfm semantic-search "amortissement" --hybrid
 ```
 
 ### Model
@@ -721,23 +815,26 @@ Embeddings are stored in the `chunk_embeddings` table as BLOB (float32 arrays).
 ## Architecture
 
 ```
-biblirag/
+rtfm/
 ├── core/
 │   ├── library.py      # Main Library class
 │   ├── models.py       # Chunk, SearchResult, SearchResults
-│   └── embeddings.py   # Embedding utilities
+│   ├── embeddings.py   # Embedding utilities
+│   └── sync.py         # Incremental sync logic
 ├── parsers/
 │   ├── base.py         # BaseParser, ParserRegistry
 │   ├── markdown.py     # Markdown parser
+│   ├── plaintext.py    # Plain text / source code parser
 │   ├── xml_legifrance.py  # Legifrance XML parser
 │   └── html_bofip.py   # BOFiP HTML parser
-├── cli.py              # Command-line interface
+├── cli.py              # Command-line interface (search, sync, init, ...)
+├── mcp.py              # MCP server (stdio transport for Claude Code)
 └── schema.py           # Field documentation
 ```
 
 ## Database
 
-biblirag uses SQLite with FTS5 for full-text search. The database supports:
+rtfm uses SQLite with FTS5 for full-text search. The database supports:
 
 - **WAL mode** for concurrent read access
 - **Porter stemming** for better search matching

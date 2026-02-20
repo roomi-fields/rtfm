@@ -24,8 +24,8 @@ from typing import Iterator, Optional
 from html.parser import HTMLParser
 from datetime import datetime
 
-from biblirag.core.models import Chunk
-from biblirag.parsers.base import BaseParser, ParserRegistry
+from rtfm.core.models import Chunk
+from rtfm.parsers.base import BaseParser, ParserRegistry
 
 
 def slugify(text: str) -> str:

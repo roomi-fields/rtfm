@@ -1,7 +1,7 @@
 """Tests for tag management."""
 
 import pytest
-from biblirag import Library
+from rtfm import Library
 
 
 class TestTagManagement:

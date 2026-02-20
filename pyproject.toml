@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "biblirag"
+name = "rtfm"
 version = "0.1.0"
-description = "Local document library with semantic search - like NotebookLM but local and extensible"
+description = "Read The F***ing Manual — Claude Code plugin for indexed project knowledge"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "roomi-fields" }
 ]
-keywords = ["rag", "search", "documents", "library", "fts5", "sqlite"]
+keywords = ["rag", "search", "documents", "library", "fts5", "sqlite", "claude-code", "plugin"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -31,21 +31,24 @@ pdf = [
     "pdftext>=0.3.0",
     "marker-pdf>=0.2.0",
 ]
+mcp = [
+    "mcp>=1.0.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
 ]
 
 [project.scripts]
-biblirag = "biblirag.cli:main"
+rtfm = "rtfm.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/roomi-fields/biblirag"
-Repository = "https://github.com/roomi-fields/biblirag"
-Issues = "https://github.com/roomi-fields/biblirag/issues"
+Homepage = "https://github.com/roomi-fields/rtfm"
+Repository = "https://github.com/roomi-fields/rtfm"
+Issues = "https://github.com/roomi-fields/rtfm/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["biblirag"]
+packages = ["rtfm"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

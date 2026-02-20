@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Iterator, Optional, Type
-from biblirag.core.models import Chunk
+from rtfm.core.models import Chunk
 
 
 class BaseParser(ABC):

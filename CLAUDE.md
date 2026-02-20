@@ -1,7 +1,8 @@
-# biblirag - Project Context
+# RTFM - Project Context
 
 ## Overview
-Local document library with semantic search - a local alternative to NotebookLM.
+Read The F***ing Manual — Claude Code plugin for indexed project knowledge.
+Local document library with semantic search, MCP server, and plugin architecture.
 
 ## Database
 - **Location**: `db/library.db` (local SQLite)
@@ -13,23 +14,31 @@ Local document library with semantic search - a local alternative to NotebookLM.
 - **Semantic search**: Sentence embeddings (paraphrase-multilingual-MiniLM-L12-v2)
 - **Hybrid search**: Combines FTS5 + semantic similarity
 - **Tagging**: Auto-generated via Gemini Flash
+- **MCP server**: Exposes search/sync/context tools to Claude Code
+- **Plugin**: Auto-configures CLAUDE.md + .mcp.json for any project
 
 ## Architecture
 ```
-biblirag/
+rtfm/
 ├── core/
 │   ├── library.py      # Main Library class
 │   ├── models.py       # Chunk, SearchResult, SearchResults
-│   └── embeddings.py   # Embedding utilities
-├── parsers/            # Document parsers (markdown, pdf, xml, html)
+│   ├── embeddings.py   # Embedding utilities
+│   ├── sync.py         # Incremental sync
+│   ├── ask.py          # Traceable RAG
+│   └── llm.py          # Gemini LLM client
+├── plugin/
+│   ├── claude_md.py    # CLAUDE.md injection
+│   ├── discover.py     # Project scanner
+│   ├── install.py      # rtfm init orchestration
+│   └── hooks.py        # Claude Code hooks
+├── parsers/            # Document parsers (markdown, pdf, xml, html, plaintext)
 ├── cli.py              # Command-line interface
+├── mcp.py              # MCP server
 └── schema.py           # Field documentation
 
 config/
 └── settings.py         # DB path, chunk settings
-
-src/
-└── tagger.py           # Gemini-based auto-tagger
 
 db/
 └── library.db          # Main database (3250 chunks)
@@ -38,20 +47,27 @@ db/
 ## Common Commands
 ```bash
 # Search
-biblirag search "query" --db db/library.db
+rtfm search "query" --db db/library.db
 
 # Semantic search
-biblirag semantic-search "query" --db db/library.db
+rtfm semantic-search "query" --db db/library.db
 
 # Stats
-biblirag stats --db db/library.db
+rtfm stats --db db/library.db
 
 # Generate embeddings
-biblirag embed --db db/library.db
+rtfm embed --db db/library.db
+
+# Initialize in a project
+rtfm init --no-embeddings
 
 # Tag with Gemini
 GEMINI_API_KEY="..." python src/tagger.py -d db/library.db
 ```
+
+## Environment Variables
+- `RTFM_DB` — path to SQLite database (used by MCP server)
+- `GEMINI_API_KEY` — for RAG and tagging
 
 ## API Key
 Gemini API key is stored in `/mnt/d/Claude/optimisaiton-fiscale/.env`
@@ -62,6 +78,9 @@ Gemini API key is stored in `/mnt/d/Claude/optimisaiton-fiscale/.env`
 ```
 
 ## Recent Changes
+- Renamed from biblirag to rtfm
+- Plugin architecture (claude_md, discover, install, hooks)
+- MCP tools: rtfm_discover, rtfm_context
 - Semantic search with sentence embeddings (MiniLM multilingual)
 - Hybrid search (FTS5 + semantic)
 - Gemini Flash tagger (batch mode, 10 chunks/request)

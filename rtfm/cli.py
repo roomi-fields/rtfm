@@ -1,11 +1,11 @@
-"""Command-line interface for biblirag."""
+"""Command-line interface for rtfm."""
 
 import argparse
 import json
 import sys
 from pathlib import Path
 
-from biblirag.core.library import Library
+from rtfm.core.library import Library
 
 
 def cmd_search(args):
@@ -79,8 +79,8 @@ def cmd_corpora(args):
 
 
 def cmd_schema(args):
-    """Show biblirag schema."""
-    from biblirag.schema import print_schema
+    """Show rtfm schema."""
+    from rtfm.schema import print_schema
     print_schema()
 
 
@@ -230,6 +230,137 @@ def cmd_embed_stats(args):
     lib.close()
 
 
+def cmd_ask(args):
+    """Ask a question (traceable RAG)."""
+    lib = Library(args.db)
+
+    answer = lib.ask(
+        args.question,
+        limit=args.limit,
+        corpus=args.corpus,
+        search_mode=args.search_mode,
+        check_context=not args.no_context_check,
+        verify=not args.no_verify,
+        deep_verify=args.deep_verify,
+    )
+
+    if args.format == "json":
+        print(answer.to_json())
+    elif args.format == "markdown":
+        print(answer.to_markdown())
+    else:
+        # Default: text format
+        if not answer.sufficient_context:
+            print(f"Contexte insuffisant : {answer.confidence_note}")
+            lib.close()
+            return
+
+        print(answer.text)
+        print()
+        print("--- Sources ---")
+        for c in answer.citations:
+            print(f"  [{c.ref}] {c.chunk.source} ({c.chunk.page})")
+
+        if answer.grounding_scores:
+            score_pct = f"{answer.grounding_score * 100:.0f}%"
+            print(f"\nGrounding : {score_pct}")
+            if answer.ungrounded_claims:
+                print(f"Claims non verifies : {len(answer.ungrounded_claims)}")
+                for claim in answer.ungrounded_claims:
+                    print(f"  - {claim}")
+
+    lib.close()
+
+
+def cmd_sync(args):
+    """Sync files into the library."""
+    from rtfm.core.sync import sync, scan_directory
+
+    root = Path(args.path).resolve()
+    lib = Library(args.db)
+
+    extensions = None
+    if args.extensions:
+        extensions = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
+                      for e in args.extensions.split(",")}
+
+    files_list = None
+    if args.files:
+        files_list = args.files
+
+    if args.dry_run:
+        print(f"Dry run — scanning {root} ...")
+
+    result = sync(
+        library=lib,
+        root=root,
+        corpus=args.corpus,
+        extensions=extensions,
+        dry_run=args.dry_run,
+        generate_embeddings=not args.no_embeddings,
+        files=files_list,
+    )
+
+    prefix = "[dry-run] " if args.dry_run else ""
+    print(f"{prefix}Added:     {result.added}")
+    print(f"{prefix}Modified:  {result.modified}")
+    print(f"{prefix}Removed:   {result.removed}")
+    print(f"{prefix}Unchanged: {result.unchanged}")
+    if result.errors:
+        print(f"Errors: {len(result.errors)}")
+        for e in result.errors:
+            print(f"  - {e}")
+
+    lib.close()
+
+
+def cmd_init(args):
+    """Initialize rtfm for a project."""
+    from rtfm.plugin.install import init_project
+
+    root = Path(".").resolve()
+
+    print(f"Initializing RTFM in {root} ...")
+
+    summary = init_project(
+        project_root=root,
+        db_path=args.db if args.db != ".rtfm/library.db" else None,
+        corpus=args.corpus,
+        install_hook=args.install_hook,
+        no_embeddings=args.no_embeddings,
+    )
+
+    print(f"Database: {summary['db_path']}")
+    info = summary["discover"]
+    print(f"Project: {info['total_files']} files, languages: {', '.join(info['languages']) or 'none detected'}")
+    print(f".mcp.json: {summary['mcp_json']}")
+    print(f"CLAUDE.md: {summary['claude_md']}")
+    print(f"Hook: {summary['hook']}")
+    sync_info = summary["sync"]
+    print(f"Synced: {sync_info['added']} entry-point files")
+    print("Done.")
+
+
+def _install_git_hook(root: Path, db_path: Path):
+    """Install a git pre-push hook that triggers rtfm sync."""
+    hooks_dir = root / ".git" / "hooks"
+    if not hooks_dir.exists():
+        print("Warning: .git/hooks not found — skipping hook install.")
+        return
+
+    hook_path = hooks_dir / "pre-push"
+    hook_content = f"""#!/bin/sh
+# rtfm incremental sync — installed by `rtfm init`
+changed=$(git diff --name-only @{{push}}.. 2>/dev/null || git diff --name-only HEAD~1)
+if [ -n "$changed" ]; then
+    rtfm sync --files $changed --db {db_path} --no-embeddings
+fi
+"""
+    hook_path.write_text(hook_content)
+    hook_path.chmod(0o755)
+    print(f"Installed git hook: {hook_path}")
+
+
 def cmd_semantic_search(args):
     """Search using semantic similarity."""
     lib = Library(args.db)
@@ -259,7 +390,7 @@ def cmd_semantic_search(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="biblirag",
+        prog="rtfm",
         description="Local document library with semantic search"
     )
     parser.add_argument(
@@ -354,6 +485,37 @@ def main():
     p_semantic.add_argument("--hybrid", action="store_true", help="Use hybrid FTS5 + semantic search")
     p_semantic.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_semantic.set_defaults(func=cmd_semantic_search)
+
+    # sync
+    p_sync = subparsers.add_parser("sync", help="Sync files into the library")
+    p_sync.add_argument("path", nargs="?", default=".", help="Directory to sync")
+    p_sync.add_argument("--corpus", "-c", default="default")
+    p_sync.add_argument("--extensions", "-e", help="Comma-separated extensions (e.g. md,py,pdf)")
+    p_sync.add_argument("--dry-run", action="store_true", help="Show what would change")
+    p_sync.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
+    p_sync.add_argument("--files", nargs="+", help="Specific files to sync (for git hooks)")
+    p_sync.set_defaults(func=cmd_sync)
+
+    # init
+    p_init = subparsers.add_parser("init", help="Initialize RTFM for a project")
+    p_init.add_argument("--db", "-d", default=".rtfm/library.db",
+                         help="Database path (default: .rtfm/library.db)")
+    p_init.add_argument("--corpus", "-c", default="default")
+    p_init.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
+    p_init.add_argument("--install-hook", action="store_true", help="Install Claude Code hook")
+    p_init.set_defaults(func=cmd_init)
+
+    # ask (traceable RAG)
+    p_ask = subparsers.add_parser("ask", help="Poser une question (RAG tracable)")
+    p_ask.add_argument("question", help="Question a poser")
+    p_ask.add_argument("--limit", "-l", type=int, default=10)
+    p_ask.add_argument("--corpus", "-c", help="Filtrer par corpus")
+    p_ask.add_argument("--search-mode", choices=["fts", "semantic", "hybrid"], default="hybrid")
+    p_ask.add_argument("--format", "-f", choices=["text", "json", "markdown"], default="text")
+    p_ask.add_argument("--no-context-check", action="store_true", help="Desactiver le niveau 0")
+    p_ask.add_argument("--no-verify", action="store_true", help="Desactiver la verification grounding")
+    p_ask.add_argument("--deep-verify", action="store_true", help="Verification LLM-as-judge (niveau 2+)")
+    p_ask.set_defaults(func=cmd_ask)
 
     args = parser.parse_args()
 

@@ -2,7 +2,7 @@
 
 import pytest
 from datetime import date
-from biblirag import Library
+from rtfm import Library
 
 
 class TestArticleVersioning:

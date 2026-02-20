@@ -1,9 +1,9 @@
-"""Pytest fixtures for biblirag tests."""
+"""Pytest fixtures for rtfm tests."""
 
 import pytest
 import tempfile
 from pathlib import Path
-from biblirag import Library
+from rtfm import Library
 
 
 @pytest.fixture

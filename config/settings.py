@@ -22,3 +22,11 @@ MARKER_LANGS = ["en", "fr"]  # Languages to detect
 # Chunk settings
 MAX_CHUNK_TOKENS = 512  # Max tokens per chunk for LLM injection
 MIN_CHUNK_TOKENS = 50   # Minimum tokens to consider a valid chunk
+
+# LLM settings (Gemini)
+GEMINI_MODEL = "gemini-2.0-flash-exp"
+LLM_TEMPERATURE = 0.2
+LLM_MAX_OUTPUT_TOKENS = 2048
+LLM_TIMEOUT = 30
+GROUNDING_THRESHOLD = 0.5   # Cosine similarity threshold for grounding check
+CONTEXT_MAX_CHARS = 6000    # Max chars sent to LLM as context

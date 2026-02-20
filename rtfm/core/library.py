@@ -1,4 +1,4 @@
-"""Main Library class - the public API for biblirag."""
+"""Main Library class - the public API for rtfm."""
 
 import json
 import sqlite3
@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Optional, Iterator
 from datetime import datetime
 
-from biblirag.core.models import Chunk, SearchResult, SearchResults
-from biblirag.parsers.base import BaseParser, ParserRegistry
+from rtfm.core.models import Chunk, SearchResult, SearchResults
+from rtfm.parsers.base import BaseParser, ParserRegistry
 
 
 # Default schema with extended metadata support
@@ -127,6 +127,18 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
            NEW.chapter_title;
 END;
 
+-- Indexed files tracking (for incremental sync)
+CREATE TABLE IF NOT EXISTS indexed_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filepath TEXT UNIQUE NOT NULL,
+    file_hash TEXT NOT NULL,
+    corpus TEXT DEFAULT 'default',
+    book_slug TEXT,
+    indexed_at TEXT,
+    file_size INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_indexed_filepath ON indexed_files(filepath);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_chunks_book ON chunks(book_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_chapter ON chunks(chapter_id);
@@ -141,7 +153,7 @@ class Library:
     A document library with full-text search.
 
     Usage:
-        from biblirag import Library
+        from rtfm import Library
 
         lib = Library("path/to/library.db")
         results = lib.search("query", limit=10)
@@ -211,6 +223,24 @@ class Library:
 
         if "metadata" not in chunk_cols:
             conn.execute("ALTER TABLE chunks ADD COLUMN metadata TEXT")
+
+        # Create indexed_files table if missing
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='indexed_files'"
+        )
+        if not cursor.fetchone():
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS indexed_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filepath TEXT UNIQUE NOT NULL,
+                    file_hash TEXT NOT NULL,
+                    corpus TEXT DEFAULT 'default',
+                    book_slug TEXT,
+                    indexed_at TEXT,
+                    file_size INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_indexed_filepath ON indexed_files(filepath);
+            """)
 
     def close(self):
         """Close database connection."""
@@ -1120,7 +1150,7 @@ class Library:
         Returns:
             Stats dict with counts
         """
-        from biblirag.core.embeddings import (
+        from rtfm.core.embeddings import (
             embed_texts, embedding_to_bytes, DEFAULT_MODEL
         )
 
@@ -1239,7 +1269,7 @@ class Library:
         Returns:
             SearchResults ordered by similarity
         """
-        from biblirag.core.embeddings import (
+        from rtfm.core.embeddings import (
             embed_text, bytes_to_embedding, cosine_similarity_batch
         )
         import numpy as np
@@ -1327,7 +1357,7 @@ class Library:
         Returns:
             SearchResults with combined scoring
         """
-        from biblirag.core.embeddings import (
+        from rtfm.core.embeddings import (
             embed_text, bytes_to_embedding, cosine_similarity
         )
 
@@ -1385,4 +1415,144 @@ class Library:
             results=results,
             query=query,
             total_found=len(scored_results)
+        )
+
+    # =========================================================================
+    # File tracking (for incremental sync)
+    # =========================================================================
+
+    def list_indexed_files(self) -> dict[str, dict]:
+        """Return {filepath: {file_hash, corpus, book_slug, indexed_at, file_size}}."""
+        conn = self._get_conn()
+        cursor = conn.execute(
+            "SELECT filepath, file_hash, corpus, book_slug, indexed_at, file_size "
+            "FROM indexed_files"
+        )
+        return {
+            row["filepath"]: {
+                "file_hash": row["file_hash"],
+                "corpus": row["corpus"],
+                "book_slug": row["book_slug"],
+                "indexed_at": row["indexed_at"],
+                "file_size": row["file_size"],
+            }
+            for row in cursor.fetchall()
+        }
+
+    def update_indexed_file(
+        self, filepath: str, file_hash: str, corpus: str,
+        book_slug: str, file_size: int = 0,
+    ):
+        """Insert or update the tracking entry for an indexed file."""
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO indexed_files (filepath, file_hash, corpus, book_slug, indexed_at, file_size)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(filepath) DO UPDATE SET
+                   file_hash = excluded.file_hash,
+                   corpus = excluded.corpus,
+                   book_slug = excluded.book_slug,
+                   indexed_at = excluded.indexed_at,
+                   file_size = excluded.file_size""",
+            (filepath, file_hash, corpus, book_slug,
+             datetime.now().isoformat(), file_size),
+        )
+        conn.commit()
+
+    def remove_file(self, filepath: str) -> bool:
+        """Remove a file from the index: chunks + book + tracking."""
+        conn = self._get_conn()
+
+        # Find the book_slug from tracking
+        cursor = conn.execute(
+            "SELECT book_slug FROM indexed_files WHERE filepath = ?",
+            (filepath,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False
+
+        book_slug = row["book_slug"]
+
+        # Delete book and its chunks
+        if book_slug:
+            self.delete_book(book_slug)
+
+        # Remove tracking entry
+        conn.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
+        conn.commit()
+        return True
+
+    def sync(
+        self,
+        root: str | Path,
+        corpus: str = "default",
+        extensions: set[str] | None = None,
+        exclude_dirs: set[str] | None = None,
+        dry_run: bool = False,
+        generate_embeddings: bool = True,
+    ) -> dict:
+        """Convenience method that delegates to sync module."""
+        from rtfm.core.sync import sync as _sync
+        return _sync(
+            library=self,
+            root=Path(root),
+            corpus=corpus,
+            extensions=extensions,
+            exclude_dirs=exclude_dirs,
+            dry_run=dry_run,
+            generate_embeddings=generate_embeddings,
+        )
+
+    # =========================================================================
+    # RAG: Ask (traceable generation)
+    # =========================================================================
+
+    def ask(
+        self,
+        question: str,
+        limit: int = 10,
+        corpus: Optional[str] = None,
+        search_mode: str = "hybrid",
+        check_context: bool = True,
+        verify: bool = True,
+        deep_verify: bool = False,
+        llm_config: Optional["LLMConfig"] = None,
+    ) -> "Answer":
+        """Ask a question and get a traceable answer with citations.
+
+        Combines search + LLM generation + grounding verification.
+
+        Args:
+            question: Question to answer.
+            limit: Number of search results to retrieve.
+            corpus: Filter by corpus name.
+            search_mode: "fts", "semantic", or "hybrid".
+            check_context: Enable level 0 (sufficient context check).
+            verify: Enable level 2 embedding-based grounding.
+            deep_verify: Enable level 2 LLM-as-judge grounding.
+            llm_config: LLM configuration. Uses env defaults if None.
+
+        Returns:
+            Answer with citations and grounding info.
+        """
+        from rtfm.core.ask import ask as _ask
+        from rtfm.core.llm import LLMConfig
+
+        config = llm_config or LLMConfig.from_env()
+
+        # Retrieval
+        if search_mode == "hybrid":
+            results = self.hybrid_search(question, limit=limit, corpus=corpus)
+        elif search_mode == "semantic":
+            results = self.semantic_search(question, limit=limit, corpus=corpus)
+        else:
+            results = self.search(question, limit=limit, corpus=corpus)
+
+        # Generation + verification
+        return _ask(
+            question, results, config,
+            check_context=check_context,
+            verify=verify,
+            deep_verify=deep_verify,
         )

@@ -1,9 +1,9 @@
-"""Tests for biblirag.core.library."""
+"""Tests for rtfm.core.library."""
 
 import pytest
 from pathlib import Path
-from biblirag import Library
-from biblirag.core.models import Chunk
+from rtfm import Library
+from rtfm.core.models import Chunk
 
 
 class TestLibraryInit:
