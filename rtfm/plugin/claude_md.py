@@ -18,10 +18,11 @@ IMPORTANT: This project has a fully indexed knowledge base via RTFM MCP server.
 
 ### Rules (MUST follow):
 - **NEVER** start a task with Grep/Glob searches. Always `rtfm_context` or `rtfm_search` first
+- **NEVER** delegate context research to Explore/Task agents — they do NOT have access to RTFM. Do RTFM searches yourself directly
 - When asked about a topic, concept, or file: `rtfm_context("topic")` FIRST
 - When looking for how something works: `rtfm_search("how X works")` FIRST
 - When exploring the project structure: `rtfm_discover(".")` FIRST
-- Use `rtfm_stats` to check what's indexed
+- After external searches (Grep, web, etc.), use `rtfm_remember(content, title)` to save useful findings into the knowledge base
 - Grep/Glob are ONLY for: (a) RTFM returned nothing, or (b) you need exact line numbers for editing
 """
 

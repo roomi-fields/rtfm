@@ -271,6 +271,81 @@ def rtfm_remove(filepath: str) -> str:
     return f"Not found in index: {filepath}"
 
 
+# ── Knowledge capture ─────────────────────────────────────────────────────
+
+@mcp.tool()
+def rtfm_remember(
+    content: str,
+    title: str,
+    corpus: str = "learned",
+) -> str:
+    """Save discovered knowledge back into the RTFM index.
+
+    Use this AFTER external searches (Grep, web, Semantic Scholar, etc.)
+    to capture useful information so it's available for future queries.
+    This way knowledge accumulates and is never lost between sessions.
+
+    Args:
+        content: The text content to index (research findings, code snippets, notes).
+        title: A descriptive title for this piece of knowledge.
+        corpus: Corpus name (default: "learned").
+    """
+    import hashlib
+    from rtfm.core.models import Chunk
+
+    log("remember", f"title={title!r} corpus={corpus!r} chars={len(content)}")
+    lib = _get_library()
+
+    slug = hashlib.md5(title.encode()).hexdigest()[:10]
+
+    # Split long content into ~800 char chunks
+    chunks = []
+    if len(content) <= 1200:
+        chunks.append(Chunk(
+            id=f"learned-{slug}",
+            content=content,
+            book_title=title,
+            book_slug=slug,
+            page_start=1,
+            page_end=1,
+            content_chars=len(content),
+        ))
+    else:
+        parts = content.split("\n\n")
+        current = ""
+        page = 1
+        for part in parts:
+            if len(current) + len(part) > 800 and current:
+                chunks.append(Chunk(
+                    id=f"learned-{slug}-{page}",
+                    content=current.strip(),
+                    book_title=title,
+                    book_slug=slug,
+                    page_start=page,
+                    page_end=page,
+                    content_chars=len(current.strip()),
+                ))
+                page += 1
+                current = part
+            else:
+                current = current + "\n\n" + part if current else part
+        if current.strip():
+            chunks.append(Chunk(
+                id=f"learned-{slug}-{page}",
+                content=current.strip(),
+                book_title=title,
+                book_slug=slug,
+                page_start=page,
+                page_end=page,
+                content_chars=len(current.strip()),
+            ))
+
+    stats = lib.ingest_chunks(iter(chunks), corpus=corpus)
+    _embed_in_background(corpus=corpus)
+    log("remember", f"saved {stats['chunks']} chunks for {title!r}")
+    return f"Remembered: '{title}' — {stats['chunks']} chunks, {len(content):,} chars indexed in corpus '{corpus}'"
+
+
 # ── Plugin tools ──────────────────────────────────────────────────────────
 
 @mcp.tool()
