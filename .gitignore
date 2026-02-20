@@ -20,6 +20,13 @@ db/
 *.db-wal
 *.db-shm
 
+# RTFM runtime data
+.rtfm/
+logs/
+
+# Environment
+*.env
+
 # IDE
 .vscode/
 .idea/
@@ -45,5 +52,7 @@ htmlcov/
 # Test PDFs (copyrighted content)
 biblitest/
 *.pdf
-.venv/
 tests/real_*.html
+
+# Scratch/local scripts
+scripts/

@@ -1,87 +1,86 @@
-# RTFM - Project Context
+# RTFM — Project Context
 
-## Overview
-Read The F***ing Manual — Claude Code plugin for indexed project knowledge.
-Local document library with semantic search, MCP server, and plugin architecture.
+## What is RTFM?
 
-## Database
-- **Location**: `db/library.db` (local SQLite)
-- **Content**: 3250 chunks, 100% tagged
-- **Corpus**: Spiritual/philosophical texts (Nisargadatta, Ramana, etc.)
+Project intelligence layer for AI coding agents. Indexes entire projects (code, docs, legal, data) and serves surgical context via MCP. Not a task manager — a knowledge layer that complements tools like GSD, Taskmaster, and Claude Flow.
 
-## Key Features
-- **FTS5 search**: Full-text search with porter stemming
-- **Semantic search**: Sentence embeddings (paraphrase-multilingual-MiniLM-L12-v2)
-- **Hybrid search**: Combines FTS5 + semantic similarity
-- **Tagging**: Auto-generated via Gemini Flash
-- **MCP server**: Exposes search/sync/context tools to Claude Code
-- **Plugin**: Auto-configures CLAUDE.md + .mcp.json for any project
+## Positioning
+
+- GSD/Taskmaster = HOW to work (workflow orchestration)
+- RTFM = WHAT the agent needs to know (project knowledge)
+- "GSD is the GPS. RTFM is the map."
 
 ## Architecture
+
 ```
 rtfm/
 ├── core/
-│   ├── library.py      # Main Library class
+│   ├── library.py      # Main Library class (SQLite + FTS5)
 │   ├── models.py       # Chunk, SearchResult, SearchResults
-│   ├── embeddings.py   # Embedding utilities
-│   ├── sync.py         # Incremental sync
-│   ├── ask.py          # Traceable RAG
-│   └── llm.py          # Gemini LLM client
+│   ├── embeddings.py   # Semantic search (MiniLM)
+│   ├── sync.py         # Incremental file sync
+│   ├── ask.py          # Traceable RAG (question answering)
+│   └── llm.py          # LLM client
+├── parsers/
+│   ├── base.py         # BaseParser, ParserRegistry
+│   ├── markdown.py     # Markdown (header-based)
+│   ├── python.py       # Python (AST-based)
+│   ├── latex.py        # LaTeX (section-based)
+│   ├── yaml_parser.py  # YAML (top-level keys)
+│   ├── json_parser.py  # JSON (keys/arrays)
+│   ├── shell.py        # Shell (function-aware)
+│   ├── pdf.py          # PDF (pdftext/marker)
+│   ├── xml_legifrance.py  # Legifrance XML
+│   ├── html_bofip.py   # BOFiP HTML
+│   └── plaintext.py    # Catch-all plain text
 ├── plugin/
-│   ├── claude_md.py    # CLAUDE.md injection
-│   ├── discover.py     # Project scanner
-│   ├── install.py      # rtfm init orchestration
-│   └── hooks.py        # Claude Code hooks
-├── parsers/            # Document parsers (markdown, pdf, xml, html, plaintext)
-├── cli.py              # Command-line interface
-├── mcp.py              # MCP server
+│   ├── claude_md.py    # CLAUDE.md injection for target projects
+│   ├── discover.py     # Fast project structure scan
+│   ├── install.py      # Orchestration for `rtfm init`
+│   └── hooks.py        # Claude Code auto-sync hook
+├── cli.py              # CLI (search, sync, init, status, embed, ...)
+├── mcp.py              # MCP server (background embeddings)
 └── schema.py           # Field documentation
-
-config/
-└── settings.py         # DB path, chunk settings
-
-db/
-└── library.db          # Main database (3250 chunks)
 ```
 
-## Common Commands
-```bash
-# Search
-rtfm search "query" --db db/library.db
+## Key Components
 
-# Semantic search
-rtfm semantic-search "query" --db db/library.db
+- `rtfm/core/library.py` — Main Library class (SQLite + FTS5)
+- `rtfm/core/sync.py` — Incremental file sync with hash tracking
+- `rtfm/core/embeddings.py` — Semantic search (paraphrase-multilingual-MiniLM-L12-v2)
+- `rtfm/mcp.py` — MCP server (search, context, discover, sync tools + background embeddings)
+- `rtfm/plugin/install.py` — `rtfm init` orchestration
+- `rtfm/plugin/discover.py` — Fast project structure scan (~1s)
+- `rtfm/parsers/` — 10 document parsers (markdown, python AST, latex, yaml, json, shell, pdf, xml, html, plaintext)
+- `rtfm/cli.py` — CLI interface
+
+## Common Dev Commands
+
+```bash
+# Run tests
+.venv/bin/pytest tests/ -v
+
+# Search locally
+rtfm search "query" --db db/library.db
 
 # Stats
 rtfm stats --db db/library.db
 
-# Generate embeddings
-rtfm embed --db db/library.db
+# Status (detailed)
+rtfm status --db db/library.db
 
-# Initialize in a project
+# Init in a project (for testing)
 rtfm init --no-embeddings
-
-# Tag with Gemini
-GEMINI_API_KEY="..." python src/tagger.py -d db/library.db
 ```
 
 ## Environment Variables
+
 - `RTFM_DB` — path to SQLite database (used by MCP server)
-- `GEMINI_API_KEY` — for RAG and tagging
 
-## API Key
-Gemini API key is stored in `/mnt/d/Claude/optimisaiton-fiscale/.env`
+## Design Principles
 
-## Tests
-```bash
-.venv/bin/pytest tests/ -v
-```
-
-## Recent Changes
-- Renamed from biblirag to rtfm
-- Plugin architecture (claude_md, discover, install, hooks)
-- MCP tools: rtfm_discover, rtfm_context
-- Semantic search with sentence embeddings (MiniLM multilingual)
-- Hybrid search (FTS5 + semantic)
-- Gemini Flash tagger (batch mode, 10 chunks/request)
-- 100% tagging coverage (3250 chunks)
+1. **Search-first** — Agent should search RTFM before grepping the filesystem
+2. **Progressive disclosure** — Serve minimal relevant context, not everything
+3. **Zero config** — `rtfm init` should just work
+4. **Incremental** — Only re-index what changed
+5. **Complementary** — Works WITH workflow tools, doesn't replace them

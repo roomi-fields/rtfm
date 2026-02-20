@@ -5,14 +5,18 @@ build-backend = "hatchling.build"
 [project]
 name = "rtfm"
 version = "0.1.0"
-description = "Read The F***ing Manual — Claude Code plugin for indexed project knowledge"
+description = "Read The Fucking Manual — Project intelligence for AI coding agents. Indexes code, docs, specs, and data. Serves surgical context via MCP."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "roomi-fields" }
 ]
-keywords = ["rag", "search", "documents", "library", "fts5", "sqlite", "claude-code", "plugin"]
+keywords = [
+    "mcp", "claude-code", "project-intelligence", "context", "rag",
+    "search", "indexing", "fts5", "sqlite", "embeddings",
+    "ai-agent", "knowledge-base", "developer-tools",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -21,6 +25,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
     "Topic :: Text Processing :: Indexing",
 ]
 
