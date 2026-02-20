@@ -1,6 +1,8 @@
 # RTFM
 
-Local document library with semantic search - like NotebookLM but local and extensible.
+**Read The F\*\*\*ing Manual** — a Claude Code plugin for indexed project knowledge.
+
+Local document library with semantic search. Stop grepping blindly — the knowledge is indexed.
 
 ## Features
 
@@ -190,17 +192,39 @@ result = lib.sync(".", corpus="docs", extensions={".md", ".txt"})
 
 The sync tracks file hashes in an `indexed_files` table. On each run it computes a diff (added/modified/removed) and only processes what changed.
 
-## MCP Server (Claude Code Integration)
+## Claude Code Plugin
 
-rtfm ships an MCP server that lets Claude Code search, sync, and tag your documents directly.
+RTFM is designed as a **Claude Code plugin** — not just a search library, but a system that gives the AI agent project awareness. When initialized in a project, Claude Code will search indexed knowledge BEFORE doing blind grep/glob searches.
 
-### Setup
+### Quick Setup
 
 ```bash
 # Install with MCP support
 pip install -e ".[mcp]"
 
-# Register the server in Claude Code
+# Initialize RTFM in your project
+cd /path/to/your-project
+rtfm init --no-embeddings
+```
+
+This creates:
+- `.rtfm/library.db` — SQLite database for indexed content
+- `.mcp.json` — registers the RTFM MCP server for Claude Code
+- `CLAUDE.md` — injects instructions telling Claude to use RTFM first
+
+### What `rtfm init` Does
+
+1. Creates the database in `.rtfm/library.db`
+2. Scans the project structure (languages, file types, entry points)
+3. Writes/merges `.mcp.json` with the RTFM server configuration
+4. Injects search-first instructions into `CLAUDE.md`
+5. Syncs entry-point documents (README, CLAUDE.md, pyproject.toml)
+
+### Manual Setup
+
+You can also register the MCP server manually:
+
+```bash
 claude mcp add rtfm -- python -m rtfm.mcp
 ```
 
@@ -213,18 +237,20 @@ Or add to your project's `.mcp.json`:
       "command": "python",
       "args": ["-m", "rtfm.mcp"],
       "env": {
-        "RTFM_DB": "db/library.db"
+        "RTFM_DB": ".rtfm/library.db"
       }
     }
   }
 }
 ```
 
-### Available Tools
+### Available MCP Tools
 
 | Tool | Description |
 |------|-------------|
 | `rtfm_search` | Search the library (FTS, semantic, or hybrid) |
+| `rtfm_context` | Get relevant context for a subject (use BEFORE Grep/Glob) |
+| `rtfm_discover` | Scan project structure (files, languages, entry points) |
 | `rtfm_stats` | Get library statistics |
 | `rtfm_tags` | List all tags |
 | `rtfm_books` | List indexed documents |
@@ -232,6 +258,39 @@ Or add to your project's `.mcp.json`:
 | `rtfm_ingest` | Ingest a single file |
 | `rtfm_tag_chunks` | Add tags to specific chunks |
 | `rtfm_remove` | Remove a file from the index |
+
+### rtfm_context — Progressive Disclosure
+
+The key tool that replaces blind grep searches:
+
+```
+rtfm_context("authentication flow")
+→ Returns the 5 most relevant chunks about authentication
+
+rtfm_context("src/auth.py")
+→ If the file isn't indexed, indexes it on-the-fly, then searches
+
+rtfm_context("rate limiting", scope="api")
+→ Scoped search within the "api" corpus
+```
+
+### rtfm_discover — Project Map
+
+Fast structural scan (~1 second) without indexing:
+
+```
+rtfm_discover(".")
+→ Project: /path/to/project
+  Files: 342 (2,100,000 bytes)
+  Languages: Python, TypeScript
+  File types:
+    code: 280
+    docs: 42
+    config: 20
+  Entry points:
+    README.md
+    pyproject.toml
+```
 
 ## CLI Usage
 

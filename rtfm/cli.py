@@ -274,7 +274,7 @@ def cmd_ask(args):
 
 def cmd_sync(args):
     """Sync files into the library."""
-    from rtfm.core.sync import sync, scan_directory
+    from rtfm.core.sync import sync
 
     root = Path(args.path).resolve()
     lib = Library(args.db)
@@ -339,26 +339,6 @@ def cmd_init(args):
     sync_info = summary["sync"]
     print(f"Synced: {sync_info['added']} entry-point files")
     print("Done.")
-
-
-def _install_git_hook(root: Path, db_path: Path):
-    """Install a git pre-push hook that triggers rtfm sync."""
-    hooks_dir = root / ".git" / "hooks"
-    if not hooks_dir.exists():
-        print("Warning: .git/hooks not found — skipping hook install.")
-        return
-
-    hook_path = hooks_dir / "pre-push"
-    hook_content = f"""#!/bin/sh
-# rtfm incremental sync — installed by `rtfm init`
-changed=$(git diff --name-only @{{push}}.. 2>/dev/null || git diff --name-only HEAD~1)
-if [ -n "$changed" ]; then
-    rtfm sync --files $changed --db {db_path} --no-embeddings
-fi
-"""
-    hook_path.write_text(hook_content)
-    hook_path.chmod(0o755)
-    print(f"Installed git hook: {hook_path}")
 
 
 def cmd_semantic_search(args):

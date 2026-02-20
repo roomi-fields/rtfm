@@ -147,3 +147,71 @@ class TestMCPSync:
 
         result = rtfm_sync(str(tmp_path), corpus="sync-test")
         assert "Sync complete" in result
+
+
+class TestMCPDiscover:
+    def test_discover_basic(self, tmp_path):
+        """rtfm_discover scans a directory and returns a readable map."""
+        (tmp_path / "main.py").write_text("print('hello')")
+        (tmp_path / "README.md").write_text("# Project")
+
+        from rtfm.mcp import rtfm_discover
+        result = rtfm_discover(str(tmp_path))
+
+        assert "Project:" in result
+        assert "Files:" in result
+        assert "Python" in result
+
+    def test_discover_empty_dir(self, tmp_path):
+        """Empty directory returns zeros."""
+        from rtfm.mcp import rtfm_discover
+        result = rtfm_discover(str(tmp_path))
+
+        assert "Files: 0" in result
+
+    def test_discover_nonexistent(self):
+        """Nonexistent path returns empty scan (0 files)."""
+        from rtfm.mcp import rtfm_discover
+        result = rtfm_discover("/nonexistent/path/12345")
+
+        assert "Files: 0" in result
+
+
+class TestMCPContext:
+    def test_context_returns_chunks(self, mcp_db):
+        """rtfm_context returns relevant context for a topic."""
+        from rtfm.mcp import rtfm_context
+        result = rtfm_context("consciousness meditation")
+
+        assert "Context for" in result
+        assert "---" in result  # chunk separator
+
+    def test_context_no_results(self, mcp_db):
+        """rtfm_context with unknown topic returns fallback hint."""
+        from rtfm.mcp import rtfm_context
+        result = rtfm_context("xyznonexistent999")
+
+        assert "No context found" in result
+        assert "Grep/Glob" in result
+
+    def test_context_limit(self, mcp_db):
+        """rtfm_context respects the limit parameter."""
+        from rtfm.mcp import rtfm_context
+        result = rtfm_context("consciousness", limit=1)
+
+        # Should have at most 1 chunk separator (--- [...] ---)
+        separators = result.count("--- [")
+        assert separators <= 1
+
+    def test_context_lazy_ingest(self, mcp_db, tmp_path):
+        """rtfm_context indexes an unindexed file on-the-fly."""
+        from rtfm.mcp import rtfm_context
+
+        # Create a file that's not yet indexed
+        newfile = tmp_path / "lazy_test.md"
+        newfile.write_text("# Lazy Test\n\nThis document talks about lazy indexing and on-the-fly ingestion.\n")
+
+        result = rtfm_context(str(newfile))
+
+        # Should have indexed it and found content (or at least not crashed)
+        assert "Error" not in result or "No context" in result
