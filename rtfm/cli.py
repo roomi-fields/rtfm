@@ -406,6 +406,22 @@ def cmd_init(args):
     print("Done.")
 
 
+def cmd_monitor(args):
+    """Tail the RTFM log file — shows live MCP and hook activity."""
+    import subprocess
+    log_path = Path(args.path)
+    if not log_path.exists():
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.touch()
+        print(f"Created {log_path} — waiting for activity...")
+    else:
+        print(f"Monitoring {log_path} — Ctrl+C to stop\n")
+    try:
+        subprocess.run(["tail", "-f", str(log_path)])
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
 def cmd_semantic_search(args):
     """Search using semantic similarity."""
     lib = Library(args.db)
@@ -557,6 +573,12 @@ def main():
     p_init.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
     p_init.add_argument("--no-hook", action="store_true", help="Don't install auto-sync hook")
     p_init.set_defaults(func=cmd_init)
+
+    # monitor
+    p_monitor = subparsers.add_parser("monitor", help="Tail the RTFM log (live MCP/hook activity)")
+    p_monitor.add_argument("--path", "-p", default=".rtfm/rtfm.log",
+                           help="Path to log file (default: .rtfm/rtfm.log)")
+    p_monitor.set_defaults(func=cmd_monitor)
 
     # ask (traceable RAG)
     p_ask = subparsers.add_parser("ask", help="Poser une question (RAG tracable)", parents=[db_parent])

@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import threading
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from rtfm.log import log
 
 mcp = FastMCP("rtfm")
 
@@ -78,6 +80,7 @@ def rtfm_search(
         corpus: Filter by corpus name (optional).
         search_type: One of "fts", "semantic", or "hybrid" (default).
     """
+    t0 = time.time()
     lib = _get_library()
 
     try:
@@ -90,6 +93,9 @@ def rtfm_search(
     except Exception:
         # Fallback to FTS if embeddings are not available
         results = lib.search(query, limit=limit, corpus=corpus)
+
+    elapsed = time.time() - t0
+    log("search", f"query={query!r} type={search_type} results={results.total_found} time={elapsed:.3f}s")
 
     if not results:
         return f"No results found for: {query}"
@@ -107,6 +113,7 @@ def rtfm_search(
 @mcp.tool()
 def rtfm_stats() -> str:
     """Get library statistics: total chunks, books, corpora, tag and embedding coverage."""
+    log("stats", "called")
     lib = _get_library()
     stats = lib.get_stats()
 
@@ -134,6 +141,7 @@ def rtfm_tags(corpus: str | None = None) -> str:
     Args:
         corpus: Filter by corpus name (optional).
     """
+    log("tags", f"corpus={corpus!r}")
     lib = _get_library()
     tags = lib.list_tags(corpus=corpus)
     if not tags:
@@ -149,6 +157,7 @@ def rtfm_books(corpus: str | None = None) -> str:
     Args:
         corpus: Filter by corpus name (optional).
     """
+    log("books", f"corpus={corpus!r}")
     lib = _get_library()
     books = lib.list_books(corpus=corpus)
     if not books:
@@ -175,6 +184,8 @@ def rtfm_sync(
         corpus: Corpus name for indexed documents (default: "default").
         extensions: Comma-separated file extensions to include (e.g. "md,py,pdf").
     """
+    t0 = time.time()
+    log("sync", f"path={path!r} corpus={corpus!r} ext={extensions!r}")
     lib = _get_library()
 
     ext_set = None
@@ -189,9 +200,13 @@ def rtfm_sync(
         generate_embeddings=False,  # Embeddings run in background thread
     )
 
+    elapsed = time.time() - t0
+    log("sync", f"+{result.added} ~{result.modified} -{result.removed} ={result.unchanged} time={elapsed:.3f}s")
+
     # Trigger background embeddings if new chunks were added
     if result.added or result.modified:
         _embed_in_background(corpus=corpus)
+        log("embed", f"triggered background embeddings for corpus={corpus!r}")
 
     return (
         f"Sync complete: +{result.added} added, ~{result.modified} modified, "
@@ -208,6 +223,7 @@ def rtfm_ingest(path: str, corpus: str = "default") -> str:
         path: Path to the file to ingest.
         corpus: Corpus name (default: "default").
     """
+    log("ingest", f"path={path!r} corpus={corpus!r}")
     lib = _get_library()
     p = Path(path)
     if not p.exists():
@@ -216,8 +232,10 @@ def rtfm_ingest(path: str, corpus: str = "default") -> str:
     try:
         stats = lib.ingest(p, corpus=corpus)
         _embed_in_background(corpus=corpus)
+        log("ingest", f"{p.name}: {stats['chunks']} chunks, {stats['chars']:,} chars")
         return f"Ingested {p.name}: {stats['chunks']} chunks, {stats['chars']:,} chars"
     except Exception as exc:
+        log("ingest", f"ERROR: {exc}")
         return f"Error ingesting {path}: {exc}"
 
 
@@ -229,6 +247,7 @@ def rtfm_tag_chunks(chunk_ids: str, tags: str) -> str:
         chunk_ids: Comma-separated chunk IDs to tag.
         tags: Comma-separated tags to add.
     """
+    log("tag", f"chunks={chunk_ids!r} tags={tags!r}")
     lib = _get_library()
 
     ids = [c.strip() for c in chunk_ids.split(",")]
@@ -245,6 +264,7 @@ def rtfm_remove(filepath: str) -> str:
     Args:
         filepath: The filepath (as tracked in the index) to remove.
     """
+    log("remove", f"filepath={filepath!r}")
     lib = _get_library()
     if lib.remove_file(filepath):
         return f"Removed: {filepath}"
@@ -265,10 +285,13 @@ def rtfm_discover(path: str = ".") -> str:
     """
     from rtfm.plugin.discover import discover, format_discover
 
+    log("discover", f"path={path!r}")
     try:
         info = discover(path)
+        log("discover", f"files={info['total_files']} languages={info['languages']}")
         return format_discover(info)
     except Exception as exc:
+        log("discover", f"ERROR: {exc}")
         return f"Error scanning {path}: {exc}"
 
 
@@ -289,6 +312,7 @@ def rtfm_context(
         scope: Optional corpus filter.
         limit: Maximum chunks to return (default 5).
     """
+    t0 = time.time()
     lib = _get_library()
 
     # If subject looks like a file path and exists, try lazy indexing
@@ -307,6 +331,9 @@ def rtfm_context(
         results = lib.hybrid_search(subject, limit=limit, corpus=scope)
     except Exception:
         results = lib.search(subject, limit=limit, corpus=scope)
+
+    elapsed = time.time() - t0
+    log("context", f"subject={subject!r} scope={scope!r} results={results.total_found} time={elapsed:.3f}s")
 
     if not results:
         return f"No context found for: {subject}\nTip: use Grep/Glob as fallback."
@@ -327,6 +354,7 @@ def rtfm_context(
 # ── entry point ───────────────────────────────────────────────────────────
 
 def main():
+    log("server", f"starting — RTFM_DB={os.environ.get('RTFM_DB', 'library.db')}")
     mcp.run(transport="stdio")
 
 

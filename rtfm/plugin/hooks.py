@@ -18,6 +18,15 @@ from pathlib import Path
 
 STALE_SECONDS = 30  # Re-sync at most every 30 seconds
 
+def _log(msg):
+    """Append to .rtfm/rtfm.log (inline, no imports)."""
+    try:
+        ts = time.strftime("%H:%M:%S")
+        with open(".rtfm/rtfm.log", "a") as f:
+            f.write(f"[{ts}]       hook | {msg}\n")
+    except Exception:
+        pass
+
 def main():
     rtfm_dir = Path(".rtfm")
     if not rtfm_dir.exists():
@@ -34,6 +43,7 @@ def main():
         try:
             last = float(stamp_file.read_text().strip())
             if now - last < STALE_SECONDS:
+                _log(f"throttled (last sync {now - last:.0f}s ago)")
                 return
         except (ValueError, OSError):
             pass
@@ -49,12 +59,14 @@ def main():
             pass
 
     # Quick incremental sync (no embeddings — fast)
+    _log(f"sync starting corpus={corpus!r}")
+    t0 = time.time()
     try:
         from rtfm.core.library import Library
         from rtfm.core.sync import sync
 
         lib = Library(str(db_path))
-        sync(
+        result = sync(
             library=lib,
             root=Path(".").resolve(),
             corpus=corpus,
@@ -62,8 +74,10 @@ def main():
         )
         lib.close()
         stamp_file.write_text(str(now))
-    except Exception:
-        pass  # Never block the user's prompt
+        elapsed = time.time() - t0
+        _log(f"sync done +{result.added} ~{result.modified} -{result.removed} ={result.unchanged} time={elapsed:.2f}s")
+    except Exception as e:
+        _log(f"sync ERROR: {e}")
 
 
 if __name__ == "__main__":
