@@ -123,7 +123,9 @@ def install_hook(project_root: str | Path, corpus: str = "default") -> str:
     user_prompt_hooks = hooks.get("UserPromptSubmit", [])
 
     # Clean up old hooks (both old and new format)
-    hook_cmd = f"python {hook_path.relative_to(project_root)}"
+    import sys
+    python = sys.executable
+    hook_cmd = f"{python} {hook_path.relative_to(project_root)}"
     cleaned = []
     for existing in user_prompt_hooks:
         # Old format: {"command": "..."}
