@@ -9,9 +9,9 @@ Local document library with semantic search. Stop grepping blindly — the knowl
 - **Full-text search** with SQLite FTS5 (porter stemming)
 - **Semantic search** with sentence embeddings (multilingual MiniLM)
 - **Hybrid search** combining FTS5 keywords and semantic similarity
-- **Incremental sync** — keeps the DB up-to-date when files change, with git hook support
+- **Incremental sync** — keeps the DB up-to-date when files change, with auto-sync hook
 - **MCP server** — exposes search/sync/tag to Claude Code via the Model Context Protocol
-- **Pluggable parsers** for Markdown, XML (Legifrance), HTML (BOFiP), plain text, and source code
+- **10 smart parsers** — Markdown, Python (AST), LaTeX, YAML, JSON, Shell, PDF, XML, HTML, plain text
 - **Multi-corpus support** for organizing documents
 - **Python API** for integration into your apps
 - **CLI** for command-line operations
@@ -211,6 +211,8 @@ This creates:
 - `.rtfm/library.db` — SQLite database for indexed content
 - `.mcp.json` — registers the RTFM MCP server for Claude Code
 - `CLAUDE.md` — injects instructions telling Claude to use RTFM first
+- `.claude/hooks/rtfm_sync.py` — auto-sync hook (runs on every prompt)
+- `.rtfm/` added to `.gitignore`
 
 ### What `rtfm init` Does
 
@@ -218,7 +220,9 @@ This creates:
 2. Scans the project structure (languages, file types, entry points)
 3. Writes/merges `.mcp.json` with the RTFM server configuration
 4. Injects search-first instructions into `CLAUDE.md`
-5. Syncs entry-point documents (README, CLAUDE.md, pyproject.toml)
+5. Installs a `UserPromptSubmit` hook for transparent auto-sync
+6. Adds `.rtfm/` to `.gitignore`
+7. Syncs entry-point documents (README, CLAUDE.md, pyproject.toml)
 
 ### Manual Setup
 
@@ -292,6 +296,15 @@ rtfm_discover(".")
     pyproject.toml
 ```
 
+### Auto-Sync Hook
+
+By default, `rtfm init` installs a `UserPromptSubmit` hook that keeps the index fresh automatically:
+
+- **On every prompt**: fast incremental FTS sync (typically <2s, throttled to 30s intervals)
+- **Embeddings**: generated in background by the MCP server (model stays cached in memory)
+
+This means you never need to manually run `rtfm sync` during a Claude Code session — the hook handles it. Use `--no-hook` during init to skip this.
+
 ## CLI Usage
 
 rtfm includes a command-line interface for common operations.
@@ -353,20 +366,24 @@ rtfm corpora --db library.db
 rtfm corpora --format json
 ```
 
-### Sync and Init
+### Init and Sync
 
 ```bash
-# Initialize rtfm for the current project (first sync + optional git hook)
-rtfm init --db project.db --corpus my-project
-rtfm init --db project.db --install-hook  # also installs a git pre-push hook
+# Initialize rtfm in your project (auto-sync hook installed by default)
+rtfm init --corpus my-project
+rtfm init --no-hook          # skip hook installation
+rtfm init --no-embeddings    # skip initial embedding generation
 
 # Incremental sync (only changed files are re-indexed)
 rtfm sync . --db project.db --corpus my-project
 
+# Force re-index all files (e.g. after adding new parsers)
+rtfm sync . --db project.db --force
+
 # Dry run — see what would change without touching the DB
 rtfm sync . --db project.db --dry-run
 
-# Sync specific files only (used by git hooks)
+# Sync specific files only
 rtfm sync --files src/main.py README.md --db project.db
 
 # Limit to specific extensions
@@ -374,6 +391,13 @@ rtfm sync . --extensions md,py,txt
 
 # Skip embedding generation (faster)
 rtfm sync . --no-embeddings
+```
+
+### Status
+
+```bash
+# Show library status: books, chunks, corpora, embeddings, parsers
+rtfm status --db library.db
 ```
 
 ### View Schema
@@ -385,32 +409,42 @@ rtfm schema
 
 ## Parsers
 
-rtfm includes parsers for common document formats. Parsers are auto-detected based on file extension.
+rtfm includes 10 smart parsers that chunk documents based on their structure. Parsers are auto-detected based on file extension.
 
 ### Available Parsers
 
-| Parser | Extensions | Description |
-|--------|------------|-------------|
-| `markdown` | `.md`, `.markdown` | Markdown files with header-based chunking |
-| `pdf` | `.pdf` | PDF files (requires `pip install rtfm[pdf]`) |
+| Parser | Extensions | Chunking Strategy |
+|--------|------------|-------------------|
+| `markdown` | `.md`, `.markdown` | Split by headers, YAML frontmatter extraction |
+| `python` | `.py` | AST-based: each class/function = 1 chunk |
+| `latex` | `.tex`, `.latex` | Split by `\section`, `\chapter`, etc. |
+| `yaml` | `.yaml`, `.yml` | Split by top-level keys |
+| `json` | `.json` | Split by top-level keys or array elements |
+| `shell` | `.sh`, `.bash`, `.zsh` | Function-aware: each function = 1 chunk |
+| `pdf` | `.pdf` | Page-based (requires `pip install rtfm[pdf]`) |
 | `legifrance` | `.xml` | French legal codes in LEGI XML format |
-| `bofip` | `.html`, `.htm` | French tax doctrine (BOFiP) HTML files |
-| `plaintext` | `.py`, `.js`, `.ts`, `.txt`, `.sh`, `.rs`, `.go`, ... | Source code and plain text (~500 char chunks at line boundaries) |
+| `bofip` | `.html`, `.htm` | French tax doctrine (BOFiP) HTML |
+| `plaintext` | `.js`, `.ts`, `.txt`, `.rs`, `.go`, ... | Line-boundary chunks (~500 chars) |
 
-### Markdown Parser
+### Smart Parsers
 
-Parses Markdown files, splitting content by headers into chunks.
+The smart parsers preserve semantic units — a Python function, a LaTeX section, or a shell function is never split across chunks:
 
 ```python
-# Automatic detection
-lib.ingest("document.md", corpus="docs")
+# Python: AST-based — each class/function becomes its own chunk
+lib.ingest("app.py", corpus="code")
 
-# Supports YAML frontmatter for metadata
-# ---
-# title: My Document
-# author: Jane Doe
-# ---
-# # Content starts here
+# LaTeX: sections are kept together
+lib.ingest("thesis.tex", corpus="docs")
+
+# YAML: each top-level key = 1 chunk
+lib.ingest("config.yaml", corpus="config")
+
+# JSON: each top-level key or array element = 1 chunk
+lib.ingest("data.json", corpus="data")
+
+# Shell: function-aware chunking
+lib.ingest("deploy.sh", corpus="scripts")
 ```
 
 ### PDF Parser
@@ -418,10 +452,7 @@ lib.ingest("document.md", corpus="docs")
 Parses PDF files using `pdftext` (fast) or `marker-pdf` (high quality).
 
 ```python
-# Install PDF support
 # pip install rtfm[pdf]
-
-# Basic usage (uses pdftext backend)
 lib.ingest("document.pdf", corpus="docs")
 
 # Use marker backend for complex PDFs
@@ -435,14 +466,9 @@ lib.ingest("complex.pdf", corpus="docs", parser=parser)
 Parses French legal XML files in LEGI format (from data.gouv.fr).
 
 ```python
-# Ingest a legal code XML file
 lib.ingest("code_general_impots.xml", corpus="cgi")
-
 # Each article becomes a chunk with legal metadata:
-# - numero_article: Article number (e.g., "39 decies A")
-# - code: Code identifier
-# - date_debut, date_fin: Validity dates
-# - etat: Status (VIGUEUR, ABROGE, etc.)
+# numero_article, code, date_debut, date_fin, etat
 ```
 
 ### BOFiP HTML Parser
@@ -450,14 +476,8 @@ lib.ingest("code_general_impots.xml", corpus="cgi")
 Parses HTML exports from the French tax doctrine database (bofip.impots.gouv.fr).
 
 ```python
-# Ingest BOFiP HTML file
 lib.ingest("boi-is-base-10.html", corpus="bofip")
-
-# Metadata includes:
-# - identifiant_boi: BOI identifier
-# - serie, division: Classification
-# - date_publication: Publication date
-# - references_cgi: Extracted CGI article references
+# Metadata: identifiant_boi, serie, division, date_publication
 ```
 
 ### Custom Parsers
@@ -882,12 +902,23 @@ rtfm/
 │   └── sync.py         # Incremental sync logic
 ├── parsers/
 │   ├── base.py         # BaseParser, ParserRegistry
-│   ├── markdown.py     # Markdown parser
-│   ├── plaintext.py    # Plain text / source code parser
-│   ├── xml_legifrance.py  # Legifrance XML parser
-│   └── html_bofip.py   # BOFiP HTML parser
-├── cli.py              # Command-line interface (search, sync, init, ...)
-├── mcp.py              # MCP server (stdio transport for Claude Code)
+│   ├── markdown.py     # Markdown (header-based)
+│   ├── python.py       # Python (AST-based)
+│   ├── latex.py        # LaTeX (section-based)
+│   ├── yaml_parser.py  # YAML (top-level keys)
+│   ├── json_parser.py  # JSON (keys/arrays)
+│   ├── shell.py        # Shell (function-aware)
+│   ├── pdf.py          # PDF (pdftext/marker)
+│   ├── xml_legifrance.py  # Legifrance XML
+│   ├── html_bofip.py   # BOFiP HTML
+│   └── plaintext.py    # Catch-all plain text
+├── plugin/
+│   ├── claude_md.py    # CLAUDE.md instruction injection
+│   ├── discover.py     # Fast project structure scan
+│   ├── install.py      # Orchestration for `rtfm init`
+│   └── hooks.py        # Claude Code auto-sync hook
+├── cli.py              # CLI (search, sync, init, status, ...)
+├── mcp.py              # MCP server (background embeddings)
 └── schema.py           # Field documentation
 ```
 

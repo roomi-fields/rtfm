@@ -77,7 +77,7 @@ def init_project(
     project_root: str | Path,
     db_path: Optional[str] = None,
     corpus: str = "default",
-    install_hook: bool = False,
+    install_hook: bool = True,
     no_embeddings: bool = False,
 ) -> dict:
     """Initialize RTFM in a project.
@@ -130,15 +130,35 @@ def init_project(
     claude_result = inject_claude_md(project_root)
     summary["claude_md"] = claude_result
 
-    # 5. Optionally install hook
-    if install_hook:
-        from rtfm.plugin.hooks import install_hook as _install
-        hook_result = _install(project_root)
-        summary["hook"] = hook_result
-    else:
+    # 5. Install auto-sync hook (default: yes)
+    if not install_hook:
         summary["hook"] = "skipped"
+    else:
+        from rtfm.plugin.hooks import install_hook as _install
+        hook_result = _install(project_root, corpus=corpus)
+        summary["hook"] = hook_result
 
-    # 6. Sync entry-point docs
+    # 6. Add .rtfm/ to .gitignore
+    gitignore_path = project_root / ".gitignore"
+    rtfm_pattern = ".rtfm/"
+    if gitignore_path.exists():
+        content = gitignore_path.read_text(encoding="utf-8")
+        if rtfm_pattern not in content:
+            with open(gitignore_path, "a", encoding="utf-8") as f:
+                if not content.endswith("\n"):
+                    f.write("\n")
+                f.write(f"\n# RTFM local database\n{rtfm_pattern}\n")
+            summary["gitignore"] = "appended"
+        else:
+            summary["gitignore"] = "already present"
+    else:
+        gitignore_path.write_text(
+            f"# RTFM local database\n{rtfm_pattern}\n",
+            encoding="utf-8",
+        )
+        summary["gitignore"] = "created"
+
+    # 7. Sync entry-point docs
     entry_files = []
     for ep in project_info["entry_points"]:
         ep_path = project_root / ep

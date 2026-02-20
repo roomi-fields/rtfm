@@ -67,10 +67,12 @@ class PlainTextParser(BaseParser):
     """Parser for plain text and source-code files."""
 
     extensions = [
-        ".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".java",
-        ".txt", ".cfg", ".toml", ".yaml", ".yml", ".sh", ".css",
-        ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".swift", ".kt",
-        ".r", ".sql", ".lua", ".pl", ".scala",
+        # Code (no dedicated parser yet)
+        ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".java",
+        ".css", ".c", ".cpp", ".h", ".hpp", ".rb", ".php",
+        ".swift", ".kt", ".r", ".sql", ".lua", ".pl", ".scala",
+        # Plain text and config
+        ".txt", ".cfg", ".toml",
     ]
     name = "plaintext"
 

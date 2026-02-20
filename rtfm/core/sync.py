@@ -16,7 +16,7 @@ import hashlib
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from rtfm.core.library import Library
@@ -27,8 +27,10 @@ DEFAULT_EXTENSIONS: set[str] = {
     ".md", ".txt", ".pdf", ".html", ".xml",
     ".py", ".js", ".ts", ".jsx", ".tsx",
     ".rs", ".go", ".java",
-    ".sh", ".css", ".toml", ".yaml", ".yml", ".cfg",
+    ".sh", ".bash", ".zsh",
+    ".css", ".toml", ".yaml", ".yml", ".cfg",
     ".c", ".cpp", ".h", ".rb", ".php",
+    ".json", ".tex", ".latex",
 }
 
 DEFAULT_EXCLUDE_DIRS: set[str] = {
@@ -158,6 +160,8 @@ def sync(
     dry_run: bool = False,
     generate_embeddings: bool = True,
     files: list[str] | None = None,
+    on_progress: "Callable[[str, str, str], None] | None" = None,
+    force: bool = False,
 ) -> SyncResult:
     """Orchestrate a full incremental sync.
 
@@ -178,6 +182,13 @@ def sync(
     files : list[str] | None
         If given, only sync these specific files (for git-hook mode).
         Paths are relative to *root*.
+    on_progress : callable | None
+        Optional callback ``(action, filepath, detail)`` called for each
+        file processed.  *action* is ``"add"``, ``"update"``, ``"remove"``,
+        ``"skip"``, ``"embed"``, or ``"error"``.
+    force : bool
+        If *True*, re-index all files even if their hash hasn't changed.
+        Useful after adding new parsers.
 
     Returns
     -------
@@ -197,11 +208,30 @@ def sync(
     else:
         files_on_disk = scan_directory(root, extensions, exclude_dirs)
 
-    # 2. Get DB state
-    indexed = library.list_indexed_files()
+    # 2. Get DB state (scoped to corpus to support multi-directory sync)
+    indexed = library.list_indexed_files(corpus=corpus)
 
     # 3. Compute diff
-    diff = compute_diff(files_on_disk, indexed, root)
+    if force:
+        # Force mode: treat all files as modified (re-index everything)
+        diff = SyncDiff()
+        for fpath in files_on_disk:
+            try:
+                rel = str(fpath.relative_to(root))
+            except ValueError:
+                rel = str(fpath)
+            if rel in indexed:
+                diff.modified.append(fpath)
+            else:
+                diff.added.append(fpath)
+        # Still detect removed files
+        seen = {str(f.relative_to(root)) if f.is_relative_to(root) else str(f)
+                for f in files_on_disk}
+        for db_path in indexed:
+            if db_path not in seen:
+                diff.removed.append(db_path)
+    else:
+        diff = compute_diff(files_on_disk, indexed, root)
 
     result.unchanged = diff.unchanged
 
@@ -231,10 +261,16 @@ def sync(
             )
             if fpath in diff.added:
                 result.added += 1
+                if on_progress:
+                    on_progress("add", rel, f"{stats.get('chunks', '?')} chunks")
             else:
                 result.modified += 1
+                if on_progress:
+                    on_progress("update", rel, f"{stats.get('chunks', '?')} chunks")
         except Exception as exc:
             result.errors.append(f"{rel}: {exc}")
+            if on_progress:
+                on_progress("error", rel, str(exc))
             print(f"[sync] error processing {rel}: {exc}", file=sys.stderr)
 
     # 5. Process removed
@@ -242,16 +278,27 @@ def sync(
         try:
             library.remove_file(rel)
             result.removed += 1
+            if on_progress:
+                on_progress("remove", rel, "removed")
         except Exception as exc:
             result.errors.append(f"{rel}: {exc}")
+            if on_progress:
+                on_progress("error", rel, str(exc))
             print(f"[sync] error removing {rel}: {exc}", file=sys.stderr)
 
     # 6. Embeddings (optional, may be slow)
     if generate_embeddings and (result.added or result.modified):
+        if on_progress:
+            on_progress("embed", "", "generating embeddings (this may take a while)...")
         try:
-            library.generate_embeddings(corpus=corpus, show_progress=False)
+            stats = library.generate_embeddings(corpus=corpus, show_progress=True)
+            if on_progress:
+                count = stats.get("embedded", 0)
+                on_progress("embed", "", f"done — {count} chunks embedded")
         except Exception as exc:
             result.errors.append(f"embeddings: {exc}")
+            if on_progress:
+                on_progress("error", "embeddings", str(exc))
             print(f"[sync] embedding error: {exc}", file=sys.stderr)
 
     return result

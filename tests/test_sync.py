@@ -255,6 +255,42 @@ class TestSync:
         books = sync_db.list_books()
         assert len(books) == 1
 
+    def test_on_progress_callback(self, sync_db, project_dir):
+        """on_progress is called for each file processed."""
+        events = []
+
+        def recorder(action, filepath, detail):
+            events.append((action, filepath, detail))
+
+        result = sync(
+            sync_db, project_dir,
+            corpus="test",
+            generate_embeddings=False,
+            on_progress=recorder,
+        )
+        # Should have one event per added file
+        assert len(events) == result.added
+        for action, filepath, detail in events:
+            assert action == "add"
+            assert filepath  # non-empty path
+            assert "chunks" in detail
+
+    def test_force_reindex(self, sync_db, project_dir):
+        """--force re-indexes files even if hash unchanged."""
+        # First sync
+        r1 = sync(sync_db, project_dir, corpus="test", generate_embeddings=False)
+        assert r1.added > 0
+
+        # Normal second sync: everything unchanged
+        r2 = sync(sync_db, project_dir, corpus="test", generate_embeddings=False)
+        assert r2.modified == 0
+        assert r2.unchanged > 0
+
+        # Force sync: everything re-processed as modified
+        r3 = sync(sync_db, project_dir, corpus="test", generate_embeddings=False, force=True)
+        assert r3.modified == r2.unchanged
+        assert r3.unchanged == 0
+
 
 # ── PlainTextParser ───────────────────────────────────────────────────────
 
@@ -286,7 +322,7 @@ class TestPlainTextParser:
             assert len(c) <= 1500  # generous upper bound
 
     def test_empty_file(self, tmp_path):
-        f = tmp_path / "empty.py"
+        f = tmp_path / "empty.txt"
         f.write_text("")
 
         parser = PlainTextParser()
@@ -294,21 +330,24 @@ class TestPlainTextParser:
         assert chunks == []
 
     def test_extract_metadata(self, tmp_path):
-        f = tmp_path / "utils.py"
+        f = tmp_path / "utils.cfg"
         f.write_text("# utility code\n")
 
         parser = PlainTextParser()
         meta = parser.extract_metadata(f)
-        assert meta["title"] == "utils.py"
+        assert meta["title"] == "utils.cfg"
         assert "book_slug" in meta
 
     def test_can_parse(self):
         parser = PlainTextParser()
-        assert parser.can_parse(Path("test.py"))
         assert parser.can_parse(Path("test.js"))
         assert parser.can_parse(Path("test.txt"))
         assert not parser.can_parse(Path("test.pdf"))
         assert not parser.can_parse(Path("test.md"))  # handled by MarkdownParser
+        assert not parser.can_parse(Path("test.py"))  # handled by PythonParser
+        assert not parser.can_parse(Path("test.sh"))  # handled by ShellParser
+        assert not parser.can_parse(Path("test.yaml"))  # handled by YAMLParser
+        assert not parser.can_parse(Path("test.json"))  # handled by JSONParser
 
 
 # ── Library sync method ──────────────────────────────────────────────────

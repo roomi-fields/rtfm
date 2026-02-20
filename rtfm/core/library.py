@@ -467,14 +467,14 @@ class Library:
                 """UPDATE books SET title = ?, filename = ?, corpus = ?,
                    metadata = ?, indexed_at = ? WHERE id = ?""",
                 (book_title, book_file, corpus,
-                 json.dumps(metadata), datetime.now().isoformat(), book_id)
+                 json.dumps(metadata, default=str), datetime.now().isoformat(), book_id)
             )
         else:
             cursor = conn.execute(
                 """INSERT INTO books (slug, title, filename, corpus, metadata, indexed_at)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (book_slug, book_title, book_file, corpus,
-                 json.dumps(metadata), datetime.now().isoformat())
+                 json.dumps(metadata, default=str), datetime.now().isoformat())
             )
             book_id = cursor.lastrowid
 
@@ -1224,10 +1224,12 @@ class Library:
 
             conn.commit()
 
-            if show_progress and (i + batch_size) % 100 == 0:
-                print(f"  [{i + batch_size}/{total}] embedded...")
+            if show_progress:
+                pct = min(100, (embedded * 100) // total)
+                print(f"\r  [{embedded}/{total}] {pct}% embedded...", end="", flush=True)
 
         if show_progress:
+            print(f"\r  [{embedded}/{total}] 100% embedded.   ")
             print(f"Done. Embedded {embedded} chunks.")
 
         return {"embedded": embedded, "total": total}
@@ -1421,13 +1423,23 @@ class Library:
     # File tracking (for incremental sync)
     # =========================================================================
 
-    def list_indexed_files(self) -> dict[str, dict]:
-        """Return {filepath: {file_hash, corpus, book_slug, indexed_at, file_size}}."""
+    def list_indexed_files(self, corpus: str | None = None) -> dict[str, dict]:
+        """Return {filepath: {file_hash, corpus, book_slug, indexed_at, file_size}}.
+
+        If *corpus* is given, only return files belonging to that corpus.
+        """
         conn = self._get_conn()
-        cursor = conn.execute(
-            "SELECT filepath, file_hash, corpus, book_slug, indexed_at, file_size "
-            "FROM indexed_files"
-        )
+        if corpus:
+            cursor = conn.execute(
+                "SELECT filepath, file_hash, corpus, book_slug, indexed_at, file_size "
+                "FROM indexed_files WHERE corpus = ?",
+                (corpus,),
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT filepath, file_hash, corpus, book_slug, indexed_at, file_size "
+                "FROM indexed_files"
+            )
         return {
             row["filepath"]: {
                 "file_hash": row["file_hash"],

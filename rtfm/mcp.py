@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -25,6 +26,7 @@ mcp = FastMCP("rtfm")
 # ── Library singleton ─────────────────────────────────────────────────────
 
 _library = None
+_embed_lock = threading.Lock()
 
 
 def _get_library():
@@ -35,6 +37,28 @@ def _get_library():
         db_path = os.environ.get("RTFM_DB", "library.db")
         _library = Library(db_path)
     return _library
+
+
+def _embed_in_background(corpus: str | None = None):
+    """Run embedding generation in a background thread.
+
+    Uses the cached MiniLM model (loaded once, stays in memory).
+    Thread-safe via _embed_lock — concurrent calls are skipped.
+    """
+    if not _embed_lock.acquire(blocking=False):
+        return  # Another embed is already running
+
+    def _run():
+        try:
+            lib = _get_library()
+            lib.generate_embeddings(corpus=corpus, show_progress=False)
+        except Exception:
+            pass  # Non-critical — FTS search still works
+        finally:
+            _embed_lock.release()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
 
 
 # ── Read tools ────────────────────────────────────────────────────────────
@@ -162,8 +186,12 @@ def rtfm_sync(
         root=Path(path),
         corpus=corpus,
         extensions=ext_set,
-        generate_embeddings=False,  # Don't block on embeddings in MCP
+        generate_embeddings=False,  # Embeddings run in background thread
     )
+
+    # Trigger background embeddings if new chunks were added
+    if result.added or result.modified:
+        _embed_in_background(corpus=corpus)
 
     return (
         f"Sync complete: +{result.added} added, ~{result.modified} modified, "
@@ -187,6 +215,7 @@ def rtfm_ingest(path: str, corpus: str = "default") -> str:
 
     try:
         stats = lib.ingest(p, corpus=corpus)
+        _embed_in_background(corpus=corpus)
         return f"Ingested {p.name}: {stats['chunks']} chunks, {stats['chars']:,} chars"
     except Exception as exc:
         return f"Error ingesting {path}: {exc}"

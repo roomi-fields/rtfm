@@ -272,6 +272,60 @@ def cmd_ask(args):
     lib.close()
 
 
+def cmd_status(args):
+    """Show detailed RTFM status."""
+    lib = Library(args.db)
+
+    stats = lib.get_stats()
+    print(f"Database:      {args.db}")
+    print(f"Books:         {stats['books']}")
+    print(f"Chunks:        {stats['chunks']}")
+    print(f"Total chars:   {stats['total_chars']:,}")
+    print(f"Tagged chunks: {stats['tagged_chunks']}")
+
+    # Corpora breakdown
+    corpora = lib.list_corpora()
+    if corpora:
+        print(f"\nCorpora ({len(corpora)}):")
+        for c in corpora:
+            print(f"  {c['corpus']}: {c['book_count']} books, {c['total_chunks']} chunks")
+
+    # Embedding coverage
+    try:
+        emb = lib.get_embedding_stats()
+        print(f"\nEmbeddings:    {emb['embedded']}/{emb['total_chunks']} ({emb['coverage']})")
+        if emb.get('models'):
+            print(f"Model:         {emb['models']}")
+    except Exception:
+        print("\nEmbeddings:    n/a")
+
+    # Indexed files summary
+    indexed = lib.list_indexed_files()
+    if indexed:
+        from datetime import datetime
+        dates = []
+        for info in indexed.values():
+            if info.get("indexed_at"):
+                try:
+                    dates.append(info["indexed_at"])
+                except Exception:
+                    pass
+        if dates:
+            last_sync = max(dates)
+            print(f"\nIndexed files: {len(indexed)}")
+            print(f"Last sync:     {last_sync}")
+    else:
+        print(f"\nIndexed files: 0")
+
+    # Parsers available
+    from rtfm.parsers.base import ParserRegistry
+    exts = ParserRegistry.list_extensions()
+    print(f"\nParsers:       {len(set(ParserRegistry.list_parsers().values()))} registered")
+    print(f"Extensions:    {', '.join(sorted(exts))}")
+
+    lib.close()
+
+
 def cmd_sync(args):
     """Sync files into the library."""
     from rtfm.core.sync import sync
@@ -291,6 +345,15 @@ def cmd_sync(args):
     if args.dry_run:
         print(f"Dry run — scanning {root} ...")
 
+    symbols = {"add": "+", "update": "~", "remove": "-", "error": "!", "embed": "*", "skip": "."}
+
+    def _progress(action: str, filepath: str, detail: str) -> None:
+        sym = symbols.get(action, "?")
+        if filepath:
+            print(f"  {sym} {filepath}  ({detail})")
+        else:
+            print(f"  {sym} {detail}")
+
     result = sync(
         library=lib,
         root=root,
@@ -299,6 +362,8 @@ def cmd_sync(args):
         dry_run=args.dry_run,
         generate_embeddings=not args.no_embeddings,
         files=files_list,
+        on_progress=_progress,
+        force=args.force,
     )
 
     prefix = "[dry-run] " if args.dry_run else ""
@@ -326,7 +391,7 @@ def cmd_init(args):
         project_root=root,
         db_path=args.db if args.db != ".rtfm/library.db" else None,
         corpus=args.corpus,
-        install_hook=args.install_hook,
+        install_hook=not args.no_hook,
         no_embeddings=args.no_embeddings,
     )
 
@@ -469,6 +534,10 @@ def main():
     p_semantic.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_semantic.set_defaults(func=cmd_semantic_search)
 
+    # status
+    p_status = subparsers.add_parser("status", help="Show RTFM status", parents=[db_parent])
+    p_status.set_defaults(func=cmd_status)
+
     # sync
     p_sync = subparsers.add_parser("sync", help="Sync files into the library", parents=[db_parent])
     p_sync.add_argument("path", nargs="?", default=".", help="Directory to sync")
@@ -476,6 +545,7 @@ def main():
     p_sync.add_argument("--extensions", "-e", help="Comma-separated extensions (e.g. md,py,pdf)")
     p_sync.add_argument("--dry-run", action="store_true", help="Show what would change")
     p_sync.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
+    p_sync.add_argument("--force", action="store_true", help="Re-index all files (ignore hash cache)")
     p_sync.add_argument("--files", nargs="+", help="Specific files to sync (for git hooks)")
     p_sync.set_defaults(func=cmd_sync)
 
@@ -485,7 +555,7 @@ def main():
                          help="Database path (default: .rtfm/library.db)")
     p_init.add_argument("--corpus", "-c", default="default")
     p_init.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
-    p_init.add_argument("--install-hook", action="store_true", help="Install Claude Code hook")
+    p_init.add_argument("--no-hook", action="store_true", help="Don't install auto-sync hook")
     p_init.set_defaults(func=cmd_init)
 
     # ask (traceable RAG)
