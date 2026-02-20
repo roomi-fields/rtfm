@@ -6,13 +6,23 @@ from pathlib import Path
 
 RTFM_MARKER = "## RTFM"
 
-RTFM_TEMPLATE = """## RTFM — Project Knowledge Base
+RTFM_TEMPLATE = """## RTFM — Project Knowledge Base (MANDATORY)
 
-This project uses RTFM for indexed project knowledge. Rules:
-- For understanding a concept/module/feature, use rtfm_search BEFORE Grep/Glob
-- When starting work on a file, use rtfm_context(subject) for relevant context
-- DO NOT do broad grep searches to understand the project; search RTFM first
-- If rtfm returns no results, THEN fallback to Grep/Glob
+IMPORTANT: This project has a fully indexed knowledge base via RTFM MCP server.
+
+### MANDATORY workflow for EVERY task:
+
+1. **BEFORE using Grep or Glob**, you MUST call `rtfm_context("subject")` or `rtfm_search("query")` first
+2. RTFM returns relevant chunks from ALL project files (code, docs, data) in milliseconds
+3. Only fall back to Grep/Glob if RTFM returns no results
+
+### Rules (MUST follow):
+- **NEVER** start a task with Grep/Glob searches. Always `rtfm_context` or `rtfm_search` first
+- When asked about a topic, concept, or file: `rtfm_context("topic")` FIRST
+- When looking for how something works: `rtfm_search("how X works")` FIRST
+- When exploring the project structure: `rtfm_discover(".")` FIRST
+- Use `rtfm_stats` to check what's indexed
+- Grep/Glob are ONLY for: (a) RTFM returned nothing, or (b) you need exact line numbers for editing
 """
 
 
