@@ -122,18 +122,30 @@ def install_hook(project_root: str | Path, corpus: str = "default") -> str:
     hooks = settings.get("hooks", {})
     user_prompt_hooks = hooks.get("UserPromptSubmit", [])
 
-    # Clean up old hooks
+    # Clean up old hooks (both old and new format)
     hook_cmd = f"python {hook_path.relative_to(project_root)}"
     cleaned = []
     for existing in user_prompt_hooks:
+        # Old format: {"command": "..."}
         cmd = existing.get("command", "")
-        if "rtfm_discover" in cmd or "rtfm_sync" in cmd:
+        if cmd and ("rtfm_discover" in cmd or "rtfm_sync" in cmd):
+            continue
+        # New format: {"matcher": {}, "hooks": [...]}
+        inner_hooks = existing.get("hooks", [])
+        if any("rtfm_sync" in h.get("command", "") for h in inner_hooks):
             continue
         cleaned.append(existing)
 
+    # New Claude Code hook format with matcher
     cleaned.append({
-        "command": hook_cmd,
-        "timeout": 10000,
+        "matcher": {},
+        "hooks": [
+            {
+                "type": "command",
+                "command": hook_cmd,
+                "timeout": 10000,
+            }
+        ],
     })
 
     hooks["UserPromptSubmit"] = cleaned
