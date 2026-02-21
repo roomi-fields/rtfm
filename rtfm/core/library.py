@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     content TEXT NOT NULL,
     content_chars INTEGER,
     content_hash TEXT,
+    line_start INTEGER,  -- First line in source file (1-indexed)
+    line_end INTEGER,    -- Last line in source file (1-indexed)
     tags TEXT,  -- JSON array
     metadata TEXT,  -- JSON blob for extended metadata
     FOREIGN KEY (book_id) REFERENCES books(id),
@@ -139,6 +141,13 @@ CREATE TABLE IF NOT EXISTS indexed_files (
 );
 CREATE INDEX IF NOT EXISTS idx_indexed_filepath ON indexed_files(filepath);
 
+-- Sync roots tracking (absolute project roots per corpus)
+CREATE TABLE IF NOT EXISTS sync_roots (
+    corpus TEXT PRIMARY KEY,
+    root_path TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_chunks_book ON chunks(book_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_chapter ON chunks(chapter_id);
@@ -223,6 +232,10 @@ class Library:
 
         if "metadata" not in chunk_cols:
             conn.execute("ALTER TABLE chunks ADD COLUMN metadata TEXT")
+        if "line_start" not in chunk_cols:
+            conn.execute("ALTER TABLE chunks ADD COLUMN line_start INTEGER")
+        if "line_end" not in chunk_cols:
+            conn.execute("ALTER TABLE chunks ADD COLUMN line_end INTEGER")
 
         # Create indexed_files table if missing
         cursor = conn.execute(
@@ -240,6 +253,19 @@ class Library:
                     file_size INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_indexed_filepath ON indexed_files(filepath);
+            """)
+
+        # Create sync_roots table if missing
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='sync_roots'"
+        )
+        if not cursor.fetchone():
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS sync_roots (
+                    corpus TEXT PRIMARY KEY,
+                    root_path TEXT NOT NULL,
+                    updated_at TEXT DEFAULT (datetime('now'))
+                );
             """)
 
     def close(self):
@@ -294,7 +320,8 @@ class Library:
             SELECT
                 c.id, c.chunk_id, c.book_id, c.chapter_id, c.chapter_num,
                 c.chapter_title, c.page_start, c.page_end, c.paragraph,
-                c.content, c.content_chars, c.content_hash, c.tags, c.metadata,
+                c.content, c.content_chars, c.content_hash,
+                c.line_start, c.line_end, c.tags, c.metadata,
                 b.title as book_title, b.slug as book_slug, b.filename as book_file,
                 b.corpus,
                 bm25(chunks_fts) as score
@@ -354,6 +381,8 @@ class Library:
                 page_start=row["page_start"],
                 page_end=row["page_end"],
                 paragraph=row["paragraph"],
+                line_start=row["line_start"],
+                line_end=row["line_end"],
                 content_chars=row["content_chars"],
                 content_hash=row["content_hash"],
                 tags=chunk_tags,
@@ -514,12 +543,13 @@ class Library:
                 """INSERT INTO chunks
                    (chunk_id, book_id, chapter_id, chapter_num, chapter_title,
                     page_start, page_end, paragraph, content, content_chars,
-                    content_hash, tags, metadata)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    content_hash, line_start, line_end, tags, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (chunk.id, book_id, chapter_id, chunk.chapter_num,
                  chunk.chapter_title, chunk.page_start, chunk.page_end,
                  chunk.paragraph, chunk.content, chunk.content_chars,
-                 chunk.content_hash, tags_json, metadata_json)
+                 chunk.content_hash, chunk.line_start, chunk.line_end,
+                 tags_json, metadata_json)
             )
 
             stats["chunks"] += 1
@@ -1326,6 +1356,8 @@ class Library:
                 page_start=row["page_start"] or 1,
                 page_end=row["page_end"] or 1,
                 paragraph=row["paragraph"] or 1,
+                line_start=row["line_start"],
+                line_end=row["line_end"],
                 content_chars=row["content_chars"] or len(row["content"]),
                 content_hash=row["content_hash"],
                 tags=json.loads(row["tags"]) if row["tags"] else None,
@@ -1494,6 +1526,64 @@ class Library:
         conn.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
         conn.commit()
         return True
+
+    def move_file(self, old_filepath: str, new_filepath: str, new_slug: str) -> bool:
+        """Update tracking for a moved file (same content, new path).
+
+        Updates the indexed_files tracking and renames the book slug.
+        Chunks are linked by book_id (FK) so they follow automatically.
+        """
+        conn = self._get_conn()
+
+        # Get old tracking info
+        cursor = conn.execute(
+            "SELECT book_slug, file_hash, corpus, file_size FROM indexed_files WHERE filepath = ?",
+            (old_filepath,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False
+
+        old_slug = row["book_slug"]
+
+        # Update books table (slug + filename)
+        if old_slug:
+            conn.execute(
+                "UPDATE books SET slug = ?, filename = ? WHERE slug = ?",
+                (new_slug, new_filepath, old_slug)
+            )
+
+        # Replace tracking entry
+        conn.execute("DELETE FROM indexed_files WHERE filepath = ?", (old_filepath,))
+        conn.execute(
+            """INSERT INTO indexed_files (filepath, file_hash, corpus, book_slug, indexed_at, file_size)
+               VALUES (?, ?, ?, ?, datetime('now'), ?)""",
+            (new_filepath, row["file_hash"], row["corpus"], new_slug, row["file_size"])
+        )
+        conn.commit()
+        return True
+
+    def set_sync_root(self, corpus: str, root_path: str):
+        """Store the absolute root path for a corpus (used to resolve file paths)."""
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO sync_roots (corpus, root_path, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(corpus) DO UPDATE SET
+                   root_path = excluded.root_path,
+                   updated_at = excluded.updated_at""",
+            (corpus, root_path),
+        )
+        conn.commit()
+
+    def get_sync_root(self, corpus: str) -> str | None:
+        """Return the stored absolute root path for a corpus, or None."""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT root_path FROM sync_roots WHERE corpus = ?",
+            (corpus,),
+        ).fetchone()
+        return row["root_path"] if row else None
 
     def sync(
         self,

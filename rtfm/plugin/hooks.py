@@ -1,9 +1,92 @@
-"""Claude Code hooks for RTFM — auto-sync on prompt submit."""
+"""Claude Code hooks for RTFM — auto-sync on prompt + final sync on stop."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+
+
+# ── Final sync (Stop hook) ───────────────────────────────────────────────
+
+STOP_SYNC_SCRIPT = r'''#!/usr/bin/env python3
+"""RTFM Stop hook — final sync to catch files created/modified this turn.
+
+The UserPromptSubmit hook syncs every 30s, but the last Write/Edit may
+happen right before the agent stops. This hook runs a final sync to
+ensure everything is indexed.
+"""
+import json, sys, time
+from pathlib import Path
+
+def _log(msg):
+    try:
+        ts = time.strftime("%H:%M:%S")
+        with open(".rtfm/rtfm.log", "a") as f:
+            f.write(f"[{ts}]       hook | {msg}\n")
+    except Exception:
+        pass
+
+def main():
+    rtfm_dir = Path(".rtfm")
+    if not rtfm_dir.exists():
+        return
+
+    db_path = rtfm_dir / "library.db"
+    if not db_path.exists():
+        return
+
+    # Read sources from config
+    config_path = rtfm_dir / "config.json"
+    sources = []
+    default_corpus = "default"
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text())
+            sources = cfg.get("sources", [])
+            default_corpus = cfg.get("corpus", "default")
+        except Exception:
+            pass
+
+    if not sources:
+        sources = [{"path": str(Path(".").resolve()), "corpus": default_corpus}]
+
+    _log(f"stop-sync starting {len(sources)} source(s)")
+    t0 = time.time()
+    try:
+        from rtfm.core.library import Library
+        from rtfm.core.sync import sync
+
+        lib = Library(str(db_path))
+        total_added = total_modified = 0
+        for src in sources:
+            src_path = Path(src.get("path", ".")).resolve()
+            src_corpus = src.get("corpus", default_corpus)
+            ext_set = None
+            if src.get("extensions"):
+                ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
+                           for e in src["extensions"].split(",")}
+            result = sync(
+                library=lib,
+                root=src_path,
+                corpus=src_corpus,
+                extensions=ext_set,
+                generate_embeddings=False,
+            )
+            total_added += result.added
+            total_modified += result.modified
+        lib.close()
+        elapsed = time.time() - t0
+        _log(f"stop-sync done +{total_added} ~{total_modified} time={elapsed:.2f}s")
+    except Exception as e:
+        _log(f"stop-sync ERROR: {e}")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+# ── Sync hook (UserPromptSubmit) ─────────────────────────────────────────
 
 HOOK_SCRIPT = r'''#!/usr/bin/env python3
 """RTFM UserPromptSubmit hook — fast incremental FTS sync.
@@ -48,34 +131,52 @@ def main():
         except (ValueError, OSError):
             pass
 
-    # Read corpus from config
-    corpus = "default"
+    # Read sources from config
     config_path = rtfm_dir / "config.json"
+    sources = []
+    default_corpus = "default"
     if config_path.exists():
         try:
             cfg = json.loads(config_path.read_text())
-            corpus = cfg.get("corpus", "default")
+            sources = cfg.get("sources", [])
+            default_corpus = cfg.get("corpus", "default")
         except Exception:
             pass
 
-    # Quick incremental sync (no embeddings — fast)
-    _log(f"sync starting corpus={corpus!r}")
+    # Fallback: no sources configured, sync cwd with default corpus
+    if not sources:
+        sources = [{"path": str(Path(".").resolve()), "corpus": default_corpus}]
+
+    # Quick incremental sync for each source (no embeddings — fast)
+    _log(f"sync starting {len(sources)} source(s)")
     t0 = time.time()
     try:
         from rtfm.core.library import Library
         from rtfm.core.sync import sync
 
         lib = Library(str(db_path))
-        result = sync(
-            library=lib,
-            root=Path(".").resolve(),
-            corpus=corpus,
-            generate_embeddings=False,
-        )
+        total_added = total_modified = total_removed = 0
+        for src in sources:
+            src_path = Path(src.get("path", ".")).resolve()
+            src_corpus = src.get("corpus", default_corpus)
+            ext_set = None
+            if src.get("extensions"):
+                ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
+                           for e in src["extensions"].split(",")}
+            result = sync(
+                library=lib,
+                root=src_path,
+                corpus=src_corpus,
+                extensions=ext_set,
+                generate_embeddings=False,
+            )
+            total_added += result.added
+            total_modified += result.modified
+            total_removed += result.removed
         lib.close()
         stamp_file.write_text(str(now))
         elapsed = time.time() - t0
-        _log(f"sync done +{result.added} ~{result.modified} -{result.removed} ={result.unchanged} time={elapsed:.2f}s")
+        _log(f"sync done +{total_added} ~{total_modified} -{total_removed} time={elapsed:.2f}s ({len(sources)} sources)")
     except Exception as e:
         _log(f"sync ERROR: {e}")
 
@@ -86,13 +187,13 @@ if __name__ == "__main__":
 
 
 def install_hook(project_root: str | Path, corpus: str = "default") -> str:
-    """Install a Claude Code UserPromptSubmit hook for RTFM.
+    """Install Claude Code hooks for RTFM.
 
-    Writes the hook script to .claude/hooks/rtfm_sync.py and
-    registers it in .claude/settings.json.
+    Hooks installed:
+    1. UserPromptSubmit → rtfm_sync.py (incremental sync every 30s)
+    2. Stop → rtfm_stop_sync.py (final sync to catch last writes)
 
-    Also writes .rtfm/config.json with the corpus setting so the hook
-    knows which corpus to sync.
+    Also writes .rtfm/config.json with the corpus setting.
 
     Args:
         project_root: Project root directory.
@@ -101,14 +202,26 @@ def install_hook(project_root: str | Path, corpus: str = "default") -> str:
     Returns:
         One of "installed", "skipped" (if already present).
     """
+    import sys
+
     project_root = Path(project_root)
     claude_dir = project_root / ".claude"
     hooks_dir = claude_dir / "hooks"
 
-    # Write hook script
+    # Write hook scripts
     hooks_dir.mkdir(parents=True, exist_ok=True)
-    hook_path = hooks_dir / "rtfm_sync.py"
-    hook_path.write_text(HOOK_SCRIPT, encoding="utf-8")
+
+    sync_path = hooks_dir / "rtfm_sync.py"
+    sync_path.write_text(HOOK_SCRIPT, encoding="utf-8")
+
+    stop_sync_path = hooks_dir / "rtfm_stop_sync.py"
+    stop_sync_path.write_text(STOP_SYNC_SCRIPT, encoding="utf-8")
+
+    # Clean up old hook scripts
+    for old in ["rtfm_remember_reminder.py", "rtfm_remember_stamp.py"]:
+        old_path = hooks_dir / old
+        if old_path.exists():
+            old_path.unlink()
 
     # Write config with corpus
     rtfm_dir = project_root / ".rtfm"
@@ -134,38 +247,53 @@ def install_hook(project_root: str | Path, corpus: str = "default") -> str:
         settings = {}
 
     hooks = settings.get("hooks", {})
-    user_prompt_hooks = hooks.get("UserPromptSubmit", [])
-
-    # Clean up old hooks (both old and new format)
-    import sys
     python = sys.executable
-    hook_cmd = f"{python} {hook_path.relative_to(project_root)}"
-    cleaned = []
-    for existing in user_prompt_hooks:
-        # Old format: {"command": "..."}
-        cmd = existing.get("command", "")
-        if cmd and ("rtfm_discover" in cmd or "rtfm_sync" in cmd):
-            continue
-        # New format: {"hooks": [...]}
-        inner_hooks = existing.get("hooks", [])
-        if any("rtfm_sync" in h.get("command", "") for h in inner_hooks):
-            continue
-        cleaned.append(existing)
 
-    # Claude Code hook format (UserPromptSubmit has no matcher)
-    cleaned.append({
-        "hooks": [
-            {
-                "type": "command",
-                "command": hook_cmd,
-                "timeout": 10,
-            }
-        ],
+    def _clean_hooks(hook_list):
+        """Remove all RTFM hooks from a hook list."""
+        cleaned = []
+        for existing in hook_list:
+            cmd = existing.get("command", "")
+            if cmd and "rtfm" in cmd:
+                continue
+            inner = existing.get("hooks", [])
+            if any("rtfm" in h.get("command", "") for h in inner):
+                continue
+            cleaned.append(existing)
+        return cleaned
+
+    # 1. UserPromptSubmit → incremental sync (throttled every 30s)
+    ups = _clean_hooks(hooks.get("UserPromptSubmit", []))
+    ups.append({
+        "hooks": [{
+            "type": "command",
+            "command": f"{python} {sync_path.relative_to(project_root)}",
+            "timeout": 10,
+        }],
     })
+    hooks["UserPromptSubmit"] = ups
 
-    hooks["UserPromptSubmit"] = cleaned
+    # 2. Stop → final sync (catches files written since last sync)
+    stop = _clean_hooks(hooks.get("Stop", []))
+    stop.append({
+        "hooks": [{
+            "type": "command",
+            "command": f"{python} {stop_sync_path.relative_to(project_root)}",
+            "timeout": 15,
+        }],
+    })
+    hooks["Stop"] = stop
+
+    # Clean up old hooks that are no longer needed
+    for old_event in ["PostToolUse", "SessionStart"]:
+        if old_event in hooks:
+            cleaned = _clean_hooks(hooks[old_event])
+            if cleaned:
+                hooks[old_event] = cleaned
+            else:
+                del hooks[old_event]
+
     settings["hooks"] = hooks
-
     settings_path.write_text(
         json.dumps(settings, indent=2) + "\n",
         encoding="utf-8",

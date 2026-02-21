@@ -2,13 +2,18 @@
 
 ## What is RTFM?
 
-Project intelligence layer for AI coding agents. Indexes entire projects (code, docs, legal, data) and serves surgical context via MCP. Not a task manager — a knowledge layer that complements tools like GSD, Taskmaster, and Claude Flow.
+The open retrieval layer for AI coding agents. Indexes entire projects (code, docs, legal, research, data) and serves surgical context via MCP.
+
+Key differentiator: extensible parser architecture. Anyone can add support for any file format in ~50 lines of Python. Ships with 10 parsers, but the community can add any format.
+
+Not a task manager — a knowledge layer that complements GSD, Taskmaster, Claude Flow, and any workflow tool.
 
 ## Positioning
 
-- GSD/Taskmaster = HOW to work (workflow orchestration)
-- RTFM = WHAT the agent needs to know (project knowledge)
-- "GSD is the GPS. RTFM is the map."
+- Augment Context Engine / Sourcegraph = closed, code-only, enterprise pricing
+- RTFM = open source, multi-domain, extensible, free
+- "Augment indexes your code. RTFM indexes everything."
+- Works WITH workflow tools (GSD = GPS, RTFM = map)
 
 ## Architecture
 

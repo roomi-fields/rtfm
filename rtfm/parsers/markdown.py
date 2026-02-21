@@ -171,6 +171,8 @@ class MarkdownParser(BaseParser):
                     page_start=page_start,
                     page_end=page_end,
                     paragraph=para_num,
+                    line_start=section.get('line_start'),
+                    line_end=section.get('line_end'),
                     section_type=section.get('type', 'section'),
                     content_chars=len(chunk_text),
                     content_hash=content_hash(chunk_text),
@@ -189,16 +191,18 @@ class MarkdownParser(BaseParser):
             'num': None,
             'content_lines': [],
             'char_start': 0,
+            'line_start': 1,
         }
 
         char_pos = 0
-        for line in lines:
+        for line_num, line in enumerate(lines, 1):
             # Check for header
             header_match = re.match(r'^(#{1,6})\s+(.+)$', line)
             if header_match:
                 # Save previous section
                 if current_section['content_lines']:
                     current_section['content'] = '\n'.join(current_section['content_lines'])
+                    current_section['line_end'] = line_num - 1
                     if len(current_section['content'].strip()) > 100:
                         sections.append(current_section)
 
@@ -221,6 +225,7 @@ class MarkdownParser(BaseParser):
                     'num': num,
                     'content_lines': [],
                     'char_start': char_pos,
+                    'line_start': line_num,
                 }
             else:
                 current_section['content_lines'].append(line)
@@ -230,6 +235,7 @@ class MarkdownParser(BaseParser):
         # Save final section
         if current_section['content_lines']:
             current_section['content'] = '\n'.join(current_section['content_lines'])
+            current_section['line_end'] = len(lines)
             if len(current_section['content'].strip()) > 100:
                 sections.append(current_section)
 
@@ -242,6 +248,8 @@ class MarkdownParser(BaseParser):
                 'num': None,
                 'content': content,
                 'char_start': 0,
+                'line_start': 1,
+                'line_end': len(lines),
             }]
 
         return sections

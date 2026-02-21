@@ -65,6 +65,7 @@ def _extract_blocks(text: str) -> list[dict]:
                 "label": f"function {func_name}",
                 "content": func_text,
                 "lineno": line_start + 1,
+                "end_lineno": line_end + 1,
             })
             used_lines.update(range(line_start, line_end + 1))
 
@@ -81,6 +82,7 @@ def _extract_blocks(text: str) -> list[dict]:
             "label": "global",
             "content": global_text,
             "lineno": 1,
+            "end_lineno": len(lines),
         })
 
     # Sort by line number
@@ -93,6 +95,7 @@ def _extract_blocks(text: str) -> list[dict]:
             final.append(b)
         else:
             text = b["content"]
+            end_line = b.get("end_lineno", b["lineno"])
             part = 1
             while len(text) > MAX_CHUNK_CHARS:
                 cut = text.rfind("\n", 0, MAX_CHUNK_CHARS)
@@ -102,6 +105,7 @@ def _extract_blocks(text: str) -> list[dict]:
                     "label": b["label"],
                     "content": text[:cut].rstrip(),
                     "lineno": b["lineno"],
+                    "end_lineno": end_line,
                 })
                 text = text[cut:].lstrip("\n")
                 part += 1
@@ -110,6 +114,7 @@ def _extract_blocks(text: str) -> list[dict]:
                     "label": b["label"] + (" (cont.)" if part > 1 else ""),
                     "content": text,
                     "lineno": b["lineno"],
+                    "end_lineno": end_line,
                 })
 
     # Merge tiny global blocks only (never merge named functions)
@@ -166,6 +171,8 @@ class ShellParser(BaseParser):
                 page_start=block["lineno"],
                 page_end=block["lineno"],
                 paragraph=1,
+                line_start=block["lineno"],
+                line_end=block.get("end_lineno", block["lineno"]),
                 content_chars=len(chunk_text),
                 content_hash=_content_hash(chunk_text),
                 metadata=metadata.get("extended", {}),

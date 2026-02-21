@@ -23,6 +23,8 @@ class Chunk:
     chapter_title: Optional[str] = None
     chapter_num: Optional[int] = None
     paragraph: int = 1
+    line_start: Optional[int] = None  # First line in source file (1-indexed)
+    line_end: Optional[int] = None    # Last line in source file (1-indexed)
 
     # Hierarchy (optional)
     book_file: Optional[str] = None

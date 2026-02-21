@@ -1,73 +1,90 @@
 # RTFM — Read The Fucking Manual
 
-> Because your AI doesn't read the docs either.
+> The open retrieval layer for AI agents.
 
-<!-- TODO: [GIF DEMO — 15 seconds showing rtfm discover + rtfm context on a real project] -->
+<!-- TODO: [GIF DEMO — 15 seconds showing rtfm init + rtfm context] -->
 
-## The Problem
+## Why retrieval matters
 
-You have a large project. Code, docs, specs, legal texts, research papers, data.
-Claude Code sees none of it — it greps randomly, loses context every session, and hallucinates modules that don't exist.
+Augment Code just proved it: same model, same benchmark (SWE-bench Pro), **6 points higher** — just because of better context retrieval. Not a better model. Better retrieval.
 
-**Without RTFM:**
-- **Drift** — Agent hallucinates modules, rewrites existing code, ignores specs it never read
-- **Time waste** — 10 min/session re-explaining architecture and pointing to files
-- **Token burn** — Random grepping through 2GB = your API budget on fire
+Your AI coding agent is blind. It greps randomly through your project, loses context every session, hallucinates modules that don't exist. The fix isn't a smarter model — it's smarter retrieval.
 
-## The Fix
+**The problem with existing retrieval:**
 
-RTFM indexes your entire project — every file type, every domain — and serves Claude exactly what it needs, when it needs it.
+| | Augment | Sourcegraph | RTFM |
+|---|---|---|---|
+| Code indexing | Yes | Yes | Yes |
+| Docs, specs, markdown | No | No | Yes |
+| Legal / regulatory | No | No | Yes |
+| Research (LaTeX, PDF) | No | No | Yes |
+| Custom formats | No | No | Yes (50 lines) |
+| Open source | No | Partial | Yes (MIT) |
+| Self-hosted | No | Yes | Yes |
+| MCP native | Coming soon | Coming soon | Yes |
+| Install time | Enterprise onboarding | Enterprise onboarding | 30 seconds |
+| Price | $$$/month | $$$/month | Free |
 
-One command:
+RTFM is the open alternative. Any format, any domain, extensible by anyone.
+
+## What it does
+
+RTFM indexes your entire project — code, docs, specs, legal texts, research papers, data — and serves your AI agent exactly the context it needs, when it needs it.
 
 ```bash
-pip install -e ".[mcp]" && rtfm init
+cd your-project
+pip install rtfm-ai[mcp] && rtfm init
 ```
 
-Ask "how does auth work?" and RTFM pulls the relevant code, the architecture doc, AND the security spec. Cross-domain. Milliseconds.
+That's it. Claude Code now searches RTFM before grepping.
 
-| Metric              | Without RTFM | With RTFM | Improvement |
-|---------------------|--------------|-----------|-------------|
-| Tokens per task     | ~45K         | ~8K       | -82%        |
-| Context setup time  | ~10 min      | 0 sec     | -100%       |
-| Hallucination rate  | ~35%         | ~5%       | -86%        |
-| Cross-domain answers| Never        | Always    |             |
+### Benchmarks
 
-*Benchmarks from internal testing on a 4GB multi-domain project. Your mileage may vary.*
+Tested on identical article generation tasks (Claude Opus 4, musicology PhD project):
 
-## "How is this different from GSD / Taskmaster / Claude Flow?"
+| Metric | Without RTFM | With RTFM | Improvement |
+|---|---|---|---|
+| Cost per task | $22.61 | $11.14 | **-51%** |
+| Duration | 8m16s | 6m58s | **-16%** |
+| Tokens consumed | 8.21M | 3.22M | **-61%** |
+| Glob/Grep calls for research | 8+ | 0 | **-100%** |
+| Minor errors | 3 major | 3 minor (auto-corrected) | better quality |
 
-They plan work. We provide knowledge. **They're complementary.**
+*8 iterations (sessions A-H), same prompt, same model. [Detailed analysis](docs/benchmark-b10.md)*
 
-| Tool         | What it does                          | Analogy     |
-|-------------|----------------------------------------|-------------|
-| GSD          | Orchestrates phases & task execution  | The GPS     |
-| Taskmaster   | Breaks down & tracks tasks            | The foreman |
-| Claude Flow  | Manages agent workflows               | The manager |
-| **RTFM**     | **Indexes & serves project knowledge**| **The map** |
+## The plugin architecture
 
-**Without RTFM**, your workflow tool orchestrates an agent that hallucinates.
-**With RTFM**, your agent actually knows what it's building on.
+This is what makes RTFM different from everything else.
 
+Need to index a format nobody supports? Write a parser:
+
+```python
+from rtfm.parsers.base import BaseParser, ParserRegistry
+from rtfm.core.models import Chunk
+
+@ParserRegistry.register
+class FHIRParser(BaseParser):
+    """Parse HL7 FHIR medical records."""
+    extensions = ['.fhir.json']
+    name = "fhir"
+
+    def parse(self, path, metadata=None):
+        data = json.loads(path.read_text())
+        for entry in data.get('entry', []):
+            resource = entry.get('resource', {})
+            yield Chunk(
+                id=resource.get('id', str(uuid4())),
+                content=json.dumps(resource, indent=2),
+                book_title=f"FHIR {resource.get('resourceType', 'Unknown')}",
+                book_slug=resource.get('id', 'unknown'),
+                page_start=1,
+                page_end=1,
+            )
 ```
-                        +-----------------------------------------+
-                        |   GSD / Taskmaster / Claude Flow        |  <-- Workflow: WHAT to do
-                        +-----------------------------------------+
-                        |              RTFM                       |  <-- Knowledge: WHAT the agent needs to know
-                        +-----------------------------------------+
-                        |           Claude Code                   |  <-- Execution: DO the work
-                        +-----------------------------------------+
-```
 
-## Features
+50 lines. Now your medical AI agent understands FHIR records.
 
-### Indexing & Search
-
-Full-text search via SQLite FTS5 with porter stemming. Semantic search with sentence embeddings (multilingual MiniLM, 384 dims, runs locally). Hybrid mode combines both for best results — exact keyword matches plus conceptual similarity.
-
-### Smart Parsers
-
-10 parsers that chunk documents based on their structure, not arbitrary character counts:
+RTFM ships with 10 parsers out of the box:
 
 | Parser | Extensions | Strategy |
 |--------|------------|----------|
@@ -77,30 +94,52 @@ Full-text search via SQLite FTS5 with porter stemming. Semantic search with sent
 | YAML | `.yaml`, `.yml` | Split by top-level keys |
 | JSON | `.json` | Split by top-level keys or array elements |
 | Shell | `.sh`, `.bash`, `.zsh` | Function-aware chunking |
-| PDF | `.pdf` | Page-based (requires `pip install rtfm[pdf]`) |
+| PDF | `.pdf` | Page-based (requires `pip install rtfm-ai[pdf]`) |
 | Legifrance XML | `.xml` | French legal codes (LEGI format) |
 | BOFiP HTML | `.html` | French tax doctrine |
 | Plain text | `.js`, `.ts`, `.rs`, `.go`, ... | Line-boundary chunks (~500 chars) |
 
-### Claude Code Integration
+But the real power is that **you can add any format**. Financial data (XBRL), CAD files (STEP), music scores (MusicXML), genomics (VCF), architecture docs (AsciiDoc) — whatever your project needs.
 
-- **MCP server** exposing search/sync/context tools
-- **`rtfm init`** auto-configures everything (`.mcp.json`, `CLAUDE.md`, auto-sync hook)
-- **Progressive disclosure** via `rtfm_context` — the agent gets exactly what it needs
+## Works with your workflow tools
 
-### Project Intelligence
+RTFM isn't a task manager. It's a knowledge layer.
 
-- **`rtfm_discover`** — structural scan in ~1 second (files, languages, entry points)
-- **`rtfm_context`** — surgical context retrieval (replaces blind grep)
-- **Incremental sync** — only changed files are re-indexed
-- **Auto-sync hook** on every prompt (transparent, <2s)
+| Tool | Role | Analogy |
+|------|------|---------|
+| GSD / Taskmaster / Claude Flow | Orchestrate WHAT to do | The GPS |
+| **RTFM** | **Provide WHAT the agent needs to know** | **The map** |
+| Claude Code | Execute the work | The engine |
+
+Without RTFM, your workflow tool orchestrates an agent that hallucinates.
+With RTFM, your agent knows what it's building on.
+
+Use both. They're complementary.
+
+```
+┌─────────────────────────────────┐
+│  GSD / Taskmaster / Claude Flow │  <- Workflow
+├─────────────────────────────────┤
+│              RTFM               │  <- Knowledge
+├─────────────────────────────────┤
+│          Claude Code            │  <- Execution
+└─────────────────────────────────┘
+```
 
 ## Quick Start
 
 ### Install
 
 ```bash
-pip install -e ".[mcp]"
+pip install rtfm-ai[mcp]
+```
+
+Optional extras:
+
+```bash
+pip install rtfm-ai[embeddings]   # Semantic search (MiniLM + torch)
+pip install rtfm-ai[pdf]          # PDF parsing (pdftext + marker)
+pip install rtfm-ai[mcp,embeddings,pdf]  # Everything
 ```
 
 ### Initialize in your project
@@ -112,6 +151,7 @@ rtfm init
 
 This creates:
 - `.rtfm/library.db` — indexed project knowledge
+- `.rtfm/config.json` — registered sources for auto-sync
 - `.mcp.json` — registers RTFM MCP server for Claude Code
 - `CLAUDE.md` — injects "search RTFM first" instructions
 - `.claude/hooks/rtfm_sync.py` — auto-sync hook (keeps index fresh every prompt)
@@ -119,11 +159,25 @@ This creates:
 
 Use `--no-embeddings` to skip initial embedding generation (faster setup, FTS still works).
 
+### Register additional sources
+
+```bash
+# Add external documentation directories
+rtfm add /path/to/docs --corpus docs
+rtfm add /path/to/specs --corpus specs --extensions md,pdf
+
+# List registered sources
+rtfm sources
+
+# Sync all registered sources at once
+rtfm sync
+```
+
 ### Auto-Sync
 
-By default, `rtfm init` installs a `UserPromptSubmit` hook:
-- **On every prompt**: fast incremental FTS sync (typically <2s, throttled to 30s)
-- **Embeddings**: generated in background by the MCP server (model stays cached in memory)
+By default, `rtfm init` installs two hooks:
+- **UserPromptSubmit**: fast incremental FTS sync on every prompt (throttled to 30s)
+- **Stop**: final sync when the session ends
 
 You never need to manually sync during a Claude Code session.
 
@@ -131,8 +185,9 @@ You never need to manually sync during a Claude Code session.
 
 | Tool | Description |
 |------|-------------|
-| `rtfm_search` | Search the library (FTS, semantic, or hybrid) |
-| `rtfm_context` | Get relevant context for a subject (use BEFORE Grep/Glob) |
+| `rtfm_search` | Search the library (FTS, semantic, or hybrid). Returns metadata with file paths. |
+| `rtfm_context` | Get relevant context for a subject (metadata-only, use BEFORE Grep/Glob) |
+| `rtfm_expand` | Expand a source — show all chunks with full content |
 | `rtfm_discover` | Scan project structure (files, languages, entry points) |
 | `rtfm_stats` | Get library statistics |
 | `rtfm_tags` | List all tags |
@@ -142,13 +197,22 @@ You never need to manually sync during a Claude Code session.
 | `rtfm_tag_chunks` | Add tags to specific chunks |
 | `rtfm_remove` | Remove a file from the index |
 
-### rtfm_context — Progressive Disclosure
+### Progressive disclosure
 
-The key tool that replaces blind grep searches:
+Search and context return **metadata only** — file paths, scores, chunk counts, language. No content. This keeps token consumption minimal (~300 tokens for 5 results).
+
+The agent then uses `Read(file_path)` to get the actual content of relevant files. For sources without a file path (e.g. learned corpus), `rtfm_expand(slug)` retrieves full content.
+
+```
+rtfm_search("authentication")    -> metadata: file paths, scores, chunk counts
+Read("/path/to/auth.py")         -> actual content (only what's needed)
+```
+
+### rtfm_context — Surgical Context
 
 ```
 rtfm_context("authentication flow")
--> Returns the 5 most relevant chunks about authentication
+-> Returns the 5 most relevant sources about authentication (metadata only)
 
 rtfm_context("src/auth.py")
 -> If the file isn't indexed, indexes it on-the-fly, then searches
@@ -180,8 +244,11 @@ rtfm_discover(".")
 ### Search
 
 ```bash
-# Basic search
-rtfm search "depreciation" --db library.db
+# Basic search (auto-detects .rtfm/ database)
+rtfm search "depreciation"
+
+# Explicit database
+rtfm search "article 39" --db library.db
 
 # Limit results
 rtfm search "article 39" --limit 5
@@ -202,14 +269,24 @@ rtfm search "query" --format prompt    # LLM-ready format
 rtfm search "query" --format prompt --max-chars 4000
 ```
 
+### Context & Expand (CLI)
+
+```bash
+# Get metadata-only context
+rtfm context "authentication flow"
+
+# Expand a source (show all chunks)
+rtfm expand published--auth-module
+```
+
 ### Semantic Search
 
 ```bash
 # Generate embeddings (one-time)
-rtfm embed --db library.db
+rtfm embed
 
 # Semantic search
-rtfm semantic-search "tax deductions" --db library.db
+rtfm semantic-search "tax deductions"
 
 # Hybrid search (FTS5 + semantic)
 rtfm semantic-search "amortissement" --hybrid
@@ -218,17 +295,20 @@ rtfm semantic-search "amortissement" --hybrid
 ### Sync
 
 ```bash
-# Incremental sync (only changed files)
-rtfm sync . --db project.db --corpus my-project
+# Sync all registered sources (from .rtfm/config.json)
+rtfm sync
 
-# Force re-index all files (e.g. after adding new parsers)
-rtfm sync . --db project.db --force
+# Sync a specific directory
+rtfm sync /path/to/docs --corpus my-project
+
+# Force re-index all files
+rtfm sync . --force
 
 # Dry run
-rtfm sync . --db project.db --dry-run
+rtfm sync . --dry-run
 
 # Sync specific files
-rtfm sync --files src/main.py README.md --db project.db
+rtfm sync --files src/main.py README.md
 
 # Limit to specific extensions
 rtfm sync . --extensions md,py,txt
@@ -237,23 +317,42 @@ rtfm sync . --extensions md,py,txt
 rtfm sync . --no-embeddings
 ```
 
+### Source Management
+
+```bash
+# Register a source directory
+rtfm add /path/to/docs --corpus docs --extensions md,txt
+
+# List registered sources
+rtfm sources
+```
+
 ### Other Commands
 
 ```bash
+# Start MCP server
+rtfm serve
+
 # Library status
-rtfm status --db library.db
+rtfm status
 
 # List books
-rtfm books --db library.db
+rtfm books
 
 # List corpora
-rtfm corpora --db library.db
+rtfm corpora
 
 # List tags
-rtfm tags --db library.db
+rtfm tags
+
+# Monitor live activity (MCP + hook calls)
+rtfm monitor
 
 # Field schema
 rtfm schema
+
+# Ask a question (RAG with citations)
+rtfm ask "What is the depreciation schedule?"
 ```
 
 ## Python API
@@ -359,7 +458,9 @@ rtfm/
 │   ├── library.py      # Main Library class (SQLite + FTS5)
 │   ├── models.py       # Chunk, SearchResult, SearchResults
 │   ├── embeddings.py   # Semantic search (MiniLM)
-│   └── sync.py         # Incremental file sync
+│   ├── sync.py         # Incremental file sync
+│   ├── ask.py          # Traceable RAG (question answering)
+│   └── llm.py          # LLM client
 ├── parsers/
 │   ├── base.py         # BaseParser, ParserRegistry
 │   ├── markdown.py     # Markdown (header-based)
@@ -377,11 +478,27 @@ rtfm/
 │   ├── discover.py     # Fast project structure scan
 │   ├── install.py      # Orchestration for `rtfm init`
 │   └── hooks.py        # Claude Code auto-sync hook
-├── cli.py              # CLI (search, sync, init, status, ...)
+├── config.py           # Auto-detect .rtfm/, config load/save
+├── cli.py              # CLI (search, sync, init, add, sources, serve, ...)
 ├── mcp.py              # MCP server (background embeddings)
 └── schema.py           # Field documentation
 ```
 
+## Use cases
+
+RTFM works anywhere your project isn't just code:
+
+- **LegalTech / RegTech** — Code + tax law articles + regulatory specs. Ships with Legifrance XML and BOFiP parsers.
+- **HealthTech** — Code + medical records (HL7/FHIR) + clinical guidelines. Write a FHIR parser in 50 lines.
+- **Academic research** — Code + LaTeX papers + datasets + methodology docs. Ships with LaTeX and PDF parsers.
+- **FinTech** — Code + financial regulations + XBRL reports. Write an XBRL parser.
+- **Defense / Aerospace** — Code + technical specs + compliance docs. Fully self-hosted, no cloud dependency.
+- **Any regulated industry** — If your project mixes code with domain-specific documents, RTFM is for you.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Adding a parser is the easiest way to contribute — and the most impactful.
+
 ## License
 
-MIT
+MIT — use it, fork it, extend it, ship it.

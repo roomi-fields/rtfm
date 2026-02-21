@@ -22,32 +22,47 @@ def _content_hash(text: str) -> str:
     return hashlib.md5(text.encode()).hexdigest()[:12]
 
 
-def _chunk_lines(text: str) -> list[str]:
-    """Split *text* into chunks of ~TARGET_CHUNK_CHARS respecting line boundaries."""
+def _chunk_lines(text: str) -> list[dict]:
+    """Split *text* into chunks of ~TARGET_CHUNK_CHARS respecting line boundaries.
+
+    Returns list of dicts: {content, line_start, line_end}.
+    """
     lines = text.split("\n")
-    chunks: list[str] = []
+    chunks: list[dict] = []
     buf: list[str] = []
     buf_len = 0
+    buf_start_line = 1  # 1-indexed
 
-    for line in lines:
+    for line_num, line in enumerate(lines, 1):
         line_len = len(line) + 1  # +1 for the newline
         if buf and buf_len + line_len > TARGET_CHUNK_CHARS:
             chunk_text = "\n".join(buf)
             if len(chunk_text) > MAX_CHUNK_CHARS:
                 # Force-split oversized buffer
                 while len(chunk_text) > MAX_CHUNK_CHARS:
-                    chunks.append(chunk_text[:MAX_CHUNK_CHARS])
+                    chunks.append({
+                        "content": chunk_text[:MAX_CHUNK_CHARS],
+                        "line_start": buf_start_line,
+                        "line_end": line_num - 1,
+                    })
                     chunk_text = chunk_text[MAX_CHUNK_CHARS:]
                 if chunk_text.strip():
                     buf = [chunk_text]
                     buf_len = len(chunk_text)
+                    buf_start_line = line_num
                 else:
                     buf = []
                     buf_len = 0
+                    buf_start_line = line_num
             else:
-                chunks.append(chunk_text)
+                chunks.append({
+                    "content": chunk_text,
+                    "line_start": buf_start_line,
+                    "line_end": line_num - 1,
+                })
                 buf = []
                 buf_len = 0
+                buf_start_line = line_num
         buf.append(line)
         buf_len += line_len
 
@@ -55,11 +70,16 @@ def _chunk_lines(text: str) -> list[str]:
     if buf:
         remainder = "\n".join(buf)
         if chunks and len(remainder) < MIN_CHUNK_CHARS:
-            chunks[-1] += "\n" + remainder
+            chunks[-1]["content"] += "\n" + remainder
+            chunks[-1]["line_end"] = len(lines)
         else:
-            chunks.append(remainder)
+            chunks.append({
+                "content": remainder,
+                "line_start": buf_start_line,
+                "line_end": len(lines),
+            })
 
-    return [c for c in chunks if c.strip()]
+    return [c for c in chunks if c["content"].strip()]
 
 
 @ParserRegistry.register
@@ -94,7 +114,8 @@ class PlainTextParser(BaseParser):
         chunks = _chunk_lines(text)
 
         char_pos = 0
-        for idx, chunk_text in enumerate(chunks, 1):
+        for idx, chunk_info in enumerate(chunks, 1):
+            chunk_text = chunk_info["content"]
             page = max(1, (char_pos // 2500) + 1)
             chunk_id = f"{book_slug}-{idx:04d}"
 
@@ -109,6 +130,8 @@ class PlainTextParser(BaseParser):
                 page_start=page,
                 page_end=page,
                 paragraph=1,
+                line_start=chunk_info["line_start"],
+                line_end=chunk_info["line_end"],
                 content_chars=len(chunk_text),
                 content_hash=_content_hash(chunk_text),
                 metadata=metadata.get("extended", {}),

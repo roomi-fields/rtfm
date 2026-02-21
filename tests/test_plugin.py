@@ -18,7 +18,7 @@ class TestInjectClaudeMd:
         assert result == "created"
         content = (tmp_path / "CLAUDE.md").read_text()
         assert RTFM_MARKER in content
-        assert "rtfm_search" in content
+        assert "rtfm_context" in content
 
     def test_append_to_existing(self, tmp_path):
         """Appends to existing CLAUDE.md."""

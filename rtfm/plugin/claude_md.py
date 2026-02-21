@@ -6,24 +6,36 @@ from pathlib import Path
 
 RTFM_MARKER = "## RTFM"
 
-RTFM_TEMPLATE = """## RTFM — Project Knowledge Base (MANDATORY)
+RTFM_TEMPLATE = """## RTFM — Project Knowledge Base
 
-IMPORTANT: This project has a fully indexed knowledge base via RTFM MCP server.
+This project has an indexed knowledge base. RTFM indexes docs, code, specs, and past learnings.
 
-### MANDATORY workflow for EVERY task:
+### Workflow: RTFM first, then Read
 
-1. **BEFORE using Grep or Glob**, you MUST call `rtfm_context("subject")` or `rtfm_search("query")` first
-2. RTFM returns relevant chunks from ALL project files (code, docs, data) in milliseconds
-3. Only fall back to Grep/Glob if RTFM returns no results
+**Step 1 — Ask RTFM** (always start here for any research):
+```
+rtfm_context("subject")   → metadata with file paths
+rtfm_search("query")      → same, different ranking
+```
+To find ANY file or document, ALWAYS use rtfm_search — never Glob.
 
-### Rules (MUST follow):
-- **NEVER** start a task with Grep/Glob searches. Always `rtfm_context` or `rtfm_search` first
-- **NEVER** delegate context research to Explore/Task agents — they do NOT have access to RTFM. Do RTFM searches yourself directly
-- When asked about a topic, concept, or file: `rtfm_context("topic")` FIRST
-- When looking for how something works: `rtfm_search("how X works")` FIRST
-- When exploring the project structure: `rtfm_discover(".")` FIRST
-- After external searches (Grep, web, etc.), use `rtfm_remember(content, title)` to save useful findings into the knowledge base
-- Grep/Glob are ONLY for: (a) RTFM returned nothing, or (b) you need exact line numbers for editing
+**Step 2 — Read the files** (RTFM gave you the paths):
+```
+Read(file_path)            → use the absolute path from Step 1
+```
+
+**Step 3 — Edit** (only when you know exactly which file/line):
+Use Grep to find the exact line, then Edit.
+
+**When to use `rtfm_expand` instead of Read:**
+Only for sources with no file path (e.g. learned corpus entries with a `slug:` instead of `file:`).
+
+### Rules (IMPORTANT)
+- To find files: rtfm_search. NEVER Glob for research.
+- After Read: do NOT rtfm_expand the same source.
+- Never Read the same file twice in one session.
+- Glob/Grep: ONLY for editing (finding a line to change). Not for research.
+- Save any significant finding (web search, external API, decision) to a scratch file — it will be auto-indexed.
 """
 
 

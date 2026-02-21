@@ -12,6 +12,7 @@ from rtfm.core.sync import (
     sync,
     SyncDiff,
     SyncResult,
+    _path_to_slug,
 )
 from rtfm.parsers.plaintext import PlainTextParser, _chunk_lines
 
@@ -127,6 +128,7 @@ class TestComputeDiff:
         assert len(diff.added) == len(files)
         assert diff.modified == []
         assert diff.removed == []
+        assert diff.moved == []
         assert diff.unchanged == 0
 
     def test_unchanged(self, project_dir):
@@ -141,6 +143,7 @@ class TestComputeDiff:
         assert diff.added == []
         assert diff.modified == []
         assert diff.removed == []
+        assert diff.moved == []
         assert diff.unchanged == len(files)
 
     def test_modified(self, project_dir):
@@ -165,7 +168,42 @@ class TestComputeDiff:
 
         diff = compute_diff(files, indexed, project_dir)
         assert diff.removed == ["gone.md"]
+        assert diff.moved == []
         assert diff.unchanged == len(files)
+
+    def test_move_detected(self, tmp_path):
+        """A file that moved (same hash, different path) is detected as move."""
+        # Create file at new location
+        (tmp_path / "new_dir").mkdir()
+        f = tmp_path / "new_dir" / "moved.txt"
+        f.write_text("same content")
+        file_hash = compute_file_hash(f)
+
+        # Simulate old location in DB with same hash
+        indexed = {
+            "old_dir/moved.txt": {"file_hash": file_hash},
+        }
+
+        diff = compute_diff([f], indexed, tmp_path)
+        assert len(diff.moved) == 1
+        assert diff.moved[0][0] == "old_dir/moved.txt"  # old path
+        assert diff.moved[0][1] == f  # new Path
+        assert diff.added == []  # NOT treated as added
+        assert diff.removed == []  # NOT treated as removed
+
+    def test_move_vs_different_content(self, tmp_path):
+        """If hash differs, it's a remove + add, not a move."""
+        f = tmp_path / "new.txt"
+        f.write_text("new content")
+
+        indexed = {
+            "old.txt": {"file_hash": "different_hash_entirely"},
+        }
+
+        diff = compute_diff([f], indexed, tmp_path)
+        assert diff.moved == []
+        assert len(diff.added) == 1
+        assert diff.removed == ["old.txt"]
 
 
 # ── sync full flow ────────────────────────────────────────────────────────
@@ -180,6 +218,7 @@ class TestSync:
         assert result.added > 0
         assert result.modified == 0
         assert result.removed == 0
+        assert result.moved == 0
         assert result.errors == []
 
         # DB should have data
@@ -198,6 +237,7 @@ class TestSync:
         )
         assert result.added == 0
         assert result.modified == 0
+        assert result.moved == 0
         assert result.unchanged > 0
 
     def test_incremental_modified(self, sync_db, project_dir):
@@ -227,6 +267,36 @@ class TestSync:
             generate_embeddings=False,
         )
         assert result.removed == 1
+
+    def test_incremental_moved(self, sync_db, project_dir):
+        """Moving a file should be detected and handled without re-ingesting."""
+        sync(sync_db, project_dir, corpus="test", generate_embeddings=False)
+
+        # Get stats before move
+        stats_before = sync_db.get_stats()
+
+        # Move notes.txt to docs/notes.txt
+        docs = project_dir / "docs"
+        docs.mkdir()
+        (project_dir / "notes.txt").rename(docs / "notes.txt")
+
+        result = sync(
+            sync_db, project_dir,
+            corpus="test",
+            generate_embeddings=False,
+        )
+        assert result.moved == 1
+        assert result.added == 0
+        assert result.removed == 0
+
+        # Chunk count should be unchanged (no re-ingestion)
+        stats_after = sync_db.get_stats()
+        assert stats_after["chunks"] == stats_before["chunks"]
+
+        # New path should be tracked
+        indexed = sync_db.list_indexed_files(corpus="test")
+        assert "notes.txt" not in indexed
+        assert "docs/notes.txt" in indexed
 
     def test_dry_run(self, sync_db, project_dir):
         """Dry run should report changes without modifying DB."""
@@ -291,6 +361,29 @@ class TestSync:
         assert r3.modified == r2.unchanged
         assert r3.unchanged == 0
 
+    def test_move_progress_callback(self, sync_db, project_dir):
+        """on_progress reports move events."""
+        sync(sync_db, project_dir, corpus="test", generate_embeddings=False)
+
+        events = []
+        def recorder(action, filepath, detail):
+            events.append((action, filepath, detail))
+
+        # Move a file
+        docs = project_dir / "docs"
+        docs.mkdir()
+        (project_dir / "notes.txt").rename(docs / "notes.txt")
+
+        sync(
+            sync_db, project_dir,
+            corpus="test",
+            generate_embeddings=False,
+            on_progress=recorder,
+        )
+        move_events = [e for e in events if e[0] == "move"]
+        assert len(move_events) == 1
+        assert "notes.txt" in move_events[0][1]
+
 
 # ── PlainTextParser ───────────────────────────────────────────────────────
 
@@ -350,7 +443,7 @@ class TestPlainTextParser:
         assert not parser.can_parse(Path("test.json"))  # handled by JSONParser
 
 
-# ── Library sync method ──────────────────────────────────────────────────
+# ── Library file tracking ────────────────────────────────────────────────
 
 class TestLibraryFileTracking:
     def test_list_indexed_files_empty(self, sync_db):
@@ -381,7 +474,7 @@ class TestLibraryFileTracking:
             filepath="test.txt",
             file_hash="abc",
             corpus="test",
-            book_slug="test-txt",  # match the slug from PlainTextParser
+            book_slug="test-txt",
         )
 
         # Verify it's there
@@ -395,6 +488,148 @@ class TestLibraryFileTracking:
         indexed = sync_db.list_indexed_files()
         assert "test.txt" not in indexed
 
+    def test_move_file(self, sync_db, tmp_path):
+        """Test move_file updates tracking and book slug."""
+        f = tmp_path / "test.txt"
+        f.write_text("Some content for the test file to index properly.\n" * 5)
+
+        # Ingest and track (pass book_slug so parser uses it)
+        sync_db.ingest(f, corpus="test", metadata={"book_slug": "test-txt"})
+        sync_db.update_indexed_file(
+            filepath="test.txt",
+            file_hash="abc",
+            corpus="test",
+            book_slug="test-txt",
+        )
+
+        # Move
+        result = sync_db.move_file("test.txt", "docs/test.txt", "docs--test-txt")
+        assert result is True
+
+        # Old path gone, new path tracked
+        indexed = sync_db.list_indexed_files()
+        assert "test.txt" not in indexed
+        assert "docs/test.txt" in indexed
+        assert indexed["docs/test.txt"]["book_slug"] == "docs--test-txt"
+
+        # Book slug should be updated
+        books = sync_db.list_books()
+        slugs = {b["slug"] for b in books}
+        assert "docs--test-txt" in slugs
+        assert "test-txt" not in slugs
+
+
+# ── _path_to_slug ────────────────────────────────────────────────────────
+
+class TestPathToSlug:
+    def test_root_file_no_corpus(self):
+        assert _path_to_slug("README.md") == "readme"
+
+    def test_root_file_with_corpus(self):
+        slug = _path_to_slug("README.md", corpus="pub")
+        assert slug == "pub--readme"
+
+    def test_subdirectory_with_corpus(self):
+        slug = _path_to_slug("_en/B4_Flags.md", corpus="pub")
+        assert slug == "pub-en--b4_flags"
+
+    def test_subdirectory_no_corpus(self):
+        slug = _path_to_slug("_en/B4_Flags.md")
+        assert slug == "en--b4_flags"
+
+    def test_nested_subdirectory(self):
+        slug = _path_to_slug("src/utils/helper.py", corpus="proj")
+        assert "proj" in slug
+        assert "src" in slug
+        assert "utils" in slug
+        assert "helper" in slug
+
+    def test_same_name_different_dirs(self):
+        """Same filename in different dirs → different slugs."""
+        slug_fr = _path_to_slug("B4_Flags.md", corpus="pub")
+        slug_en = _path_to_slug("_en/B4_Flags.md", corpus="pub")
+        assert slug_fr != slug_en
+
+    def test_same_name_different_corpora(self):
+        """Same filename in different corpora → different slugs."""
+        slug_a = _path_to_slug("B4.md", corpus="blog-fr")
+        slug_b = _path_to_slug("B4.md", corpus="blog-en")
+        assert slug_a != slug_b
+
+    def test_spaces_in_name(self):
+        slug = _path_to_slug("My Document.md")
+        assert " " not in slug
+
+    def test_dot_parent(self):
+        """Explicit '.' parent should be treated as root."""
+        slug = _path_to_slug("./README.md")
+        assert _path_to_slug("./README.md") == _path_to_slug("README.md")
+
+
+# ── Slug collision integration ───────────────────────────────────────────
+
+class TestSlugCollision:
+    def test_sync_same_name_different_dirs(self, sync_db, tmp_path):
+        """Syncing B4.md and _en/B4.md should create TWO separate books."""
+        # Create FR version
+        (tmp_path / "B4_Flags.md").write_text(
+            "# B4 Flags et Poids\n\n"
+            "Cet article traite des flags et poids dans le système BP3.\n"
+            "Le système utilise des indicateurs binaires pour marquer les états.\n"
+        )
+        # Create EN version in subdirectory
+        en_dir = tmp_path / "_en"
+        en_dir.mkdir()
+        (en_dir / "B4_Flags.md").write_text(
+            "# B4 Flags and Weights\n\n"
+            "This article discusses flags and weights in the BP3 system.\n"
+            "The system uses binary indicators to mark states.\n"
+        )
+
+        result = sync(
+            sync_db, tmp_path,
+            corpus="test",
+            generate_embeddings=False,
+        )
+        assert result.added == 2
+        assert result.errors == []
+
+        # Both should be tracked as separate files
+        indexed = sync_db.list_indexed_files(corpus="test")
+        assert "B4_Flags.md" in indexed
+        assert "_en/B4_Flags.md" in indexed
+
+        # Both should have different book slugs (corpus is in both)
+        slug_fr = indexed["B4_Flags.md"]["book_slug"]
+        slug_en = indexed["_en/B4_Flags.md"]["book_slug"]
+        assert slug_fr != slug_en
+        assert "test" in slug_fr  # corpus prefix
+        assert "test" in slug_en
+
+        # Both books should exist in the DB
+        books = sync_db.list_books()
+        slugs = {b["slug"] for b in books}
+        assert len(slugs) >= 2
+
+    def test_sync_same_name_same_content_different_dirs(self, sync_db, tmp_path):
+        """Even identical content in different dirs creates separate books."""
+        content = "# Same Title\n\nExact same content in both files.\n"
+        (tmp_path / "doc.md").write_text(content)
+        sub = tmp_path / "archive"
+        sub.mkdir()
+        (sub / "doc.md").write_text(content)
+
+        result = sync(
+            sync_db, tmp_path,
+            corpus="test",
+            generate_embeddings=False,
+        )
+        assert result.added == 2
+        assert result.errors == []
+
+        indexed = sync_db.list_indexed_files(corpus="test")
+        assert indexed["doc.md"]["book_slug"] != indexed["archive/doc.md"]["book_slug"]
+
 
 class TestSyncResult:
     def test_str(self):
@@ -403,10 +638,15 @@ class TestSyncResult:
         assert "~1" in str(r)
         assert "=10" in str(r)
 
+    def test_str_with_moved(self):
+        r = SyncResult(moved=2, unchanged=5)
+        assert ">2" in str(r)
+
     def test_to_dict(self):
-        r = SyncResult(added=1, modified=2, removed=3, unchanged=4)
+        r = SyncResult(added=1, modified=2, removed=3, moved=4, unchanged=5)
         d = r.to_dict()
         assert d["added"] == 1
         assert d["modified"] == 2
         assert d["removed"] == 3
-        assert d["unchanged"] == 4
+        assert d["moved"] == 4
+        assert d["unchanged"] == 5

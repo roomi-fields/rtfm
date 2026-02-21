@@ -25,6 +25,90 @@ from rtfm.log import log
 
 mcp = FastMCP("rtfm")
 
+
+# ── Progressive disclosure helpers ───────────────────────────────────────
+
+def _deduplicate_by_source(results, limit: int):
+    """Keep only the best chunk per unique source (book_slug).
+
+    Returns a list of dicts with best result, chunk count, and metadata,
+    sorted by score, limited to *limit* unique sources.
+    """
+    seen: dict[str, dict] = {}  # book_slug -> {best, count}
+    for r in results:
+        slug = r.chunk.book_slug
+        if slug not in seen:
+            seen[slug] = {"best": r, "count": 1}
+        else:
+            seen[slug]["count"] += 1
+            if r.score > seen[slug]["best"].score:
+                seen[slug]["best"] = r
+
+    ranked = sorted(seen.values(), key=lambda x: x["best"].score, reverse=True)
+    return ranked[:limit]
+
+
+def _resolve_abs_path(filepath: str, corpus: str) -> str:
+    """Resolve a relative filepath to absolute using stored sync root."""
+    if not filepath:
+        return ""
+    if os.path.isabs(filepath):
+        return filepath
+    try:
+        lib = _get_library()
+        root = lib.get_sync_root(corpus)
+        if root:
+            abs_path = os.path.join(root, filepath)
+            if os.path.exists(abs_path):
+                return abs_path
+    except Exception:
+        pass
+    return filepath
+
+
+def _format_source_line(r, count: int, slug: str) -> str:
+    """Format a single source as a compact metadata line.
+
+    Level 0: metadata only — title, score, chunk count, lang, absolute file path.
+    No content preview. Agent uses Read(file_path) to get content.
+    """
+    filepath = r.chunk.book_file or ""
+
+    # lang and corpus come from book metadata
+    lang = ""
+    corpus = ""
+    try:
+        lib = _get_library()
+        conn = lib._get_conn()
+        import json as _json
+        row = conn.execute("SELECT metadata, corpus FROM books WHERE slug = ?", (slug,)).fetchone()
+        if row:
+            corpus = row["corpus"] or ""
+            if row["metadata"]:
+                book_meta = _json.loads(row["metadata"])
+                lang = book_meta.get("lang", "")
+    except Exception:
+        pass
+
+    # Resolve to absolute path so agent can Read directly
+    if filepath:
+        filepath = _resolve_abs_path(filepath, corpus)
+
+    parts = [f"{r.source} ({r.page})"]
+    parts.append(f"score: {r.score:.3f}")
+    parts.append(f"{count} chunks")
+    if lang:
+        parts.append(f"lang: {lang}")
+
+    if filepath:
+        parts.append(f"file: {filepath}")
+    else:
+        parts.append(f"slug: {slug}")
+
+    return " — ".join(parts)
+
+
+
 # ── Library singleton ─────────────────────────────────────────────────────
 
 _library = None
@@ -36,7 +120,10 @@ def _get_library():
     global _library
     if _library is None:
         from rtfm.core.library import Library
-        db_path = os.environ.get("RTFM_DB", "library.db")
+        db_path = os.environ.get("RTFM_DB")
+        if not db_path:
+            from rtfm.config import resolve_db
+            db_path = resolve_db()
         _library = Library(db_path)
     return _library
 
@@ -68,44 +155,54 @@ def _embed_in_background(corpus: str | None = None):
 @mcp.tool()
 def rtfm_search(
     query: str,
-    limit: int = 10,
+    limit: int = 5,
     corpus: str | None = None,
-    search_type: str = "hybrid",
+    search_type: str = "fts",
 ) -> str:
-    """Search the document library. Returns ranked chunks with source and page.
+    """Search the knowledge base. Returns metadata only — no content.
+
+    Like a search engine results page: shows which sources are relevant.
+    Use rtfm_expand(source) to read the actual content.
 
     Args:
         query: The search query.
-        limit: Maximum number of results (default 10).
+        limit: Maximum number of unique sources to return (default 5).
         corpus: Filter by corpus name (optional).
-        search_type: One of "fts", "semantic", or "hybrid" (default).
+        search_type: One of "fts", "semantic", or "hybrid" (default "fts").
     """
     t0 = time.time()
     lib = _get_library()
 
+    # Overfetch to ensure enough unique sources after dedup
+    fetch_limit = limit * 5
+
     try:
         if search_type == "semantic":
-            results = lib.semantic_search(query, limit=limit, corpus=corpus)
+            results = lib.semantic_search(query, limit=fetch_limit, corpus=corpus)
         elif search_type == "fts":
-            results = lib.search(query, limit=limit, corpus=corpus)
+            results = lib.search(query, limit=fetch_limit, corpus=corpus)
         else:
-            results = lib.hybrid_search(query, limit=limit, corpus=corpus)
+            results = lib.hybrid_search(query, limit=fetch_limit, corpus=corpus)
     except Exception:
-        # Fallback to FTS if embeddings are not available
-        results = lib.search(query, limit=limit, corpus=corpus)
+        results = lib.search(query, limit=fetch_limit, corpus=corpus)
 
     elapsed = time.time() - t0
-    log("search", f"query={query!r} type={search_type} results={results.total_found} time={elapsed:.3f}s")
 
     if not results:
+        log("search", f"query={query!r} type={search_type} results=0 time={elapsed:.3f}s")
         return f"No results found for: {query}"
 
-    lines = [f"Found {results.total_found} results for \"{query}\":\n"]
-    for r in results:
-        lines.append(f"[{r.rank}] {r.source} ({r.page}) — score: {r.score:.3f}")
-        if r.tags:
-            lines.append(f"    Tags: {', '.join(r.tags)}")
-        lines.append(f"    {r.content}\n")
+    # Deduplicate: 1 best chunk per source
+    deduped = _deduplicate_by_source(results, limit)
+    log("search", f"query={query!r} type={search_type} sources={len(deduped)}/{results.total_found} time={elapsed:.3f}s")
+
+    # Metadata-only output — no content, minimal tokens
+    lines = [f"Found {len(deduped)} sources for \"{query}\":\n"]
+    for rank, entry in enumerate(deduped, 1):
+        r = entry["best"]
+        count = entry["count"]
+        slug = r.chunk.book_slug
+        lines.append(f"[{rank}] {_format_source_line(r, count, slug)}")
 
     return "\n".join(lines)
 
@@ -271,81 +368,6 @@ def rtfm_remove(filepath: str) -> str:
     return f"Not found in index: {filepath}"
 
 
-# ── Knowledge capture ─────────────────────────────────────────────────────
-
-@mcp.tool()
-def rtfm_remember(
-    content: str,
-    title: str,
-    corpus: str = "learned",
-) -> str:
-    """Save discovered knowledge back into the RTFM index.
-
-    Use this AFTER external searches (Grep, web, Semantic Scholar, etc.)
-    to capture useful information so it's available for future queries.
-    This way knowledge accumulates and is never lost between sessions.
-
-    Args:
-        content: The text content to index (research findings, code snippets, notes).
-        title: A descriptive title for this piece of knowledge.
-        corpus: Corpus name (default: "learned").
-    """
-    import hashlib
-    from rtfm.core.models import Chunk
-
-    log("remember", f"title={title!r} corpus={corpus!r} chars={len(content)}")
-    lib = _get_library()
-
-    slug = hashlib.md5(title.encode()).hexdigest()[:10]
-
-    # Split long content into ~800 char chunks
-    chunks = []
-    if len(content) <= 1200:
-        chunks.append(Chunk(
-            id=f"learned-{slug}",
-            content=content,
-            book_title=title,
-            book_slug=slug,
-            page_start=1,
-            page_end=1,
-            content_chars=len(content),
-        ))
-    else:
-        parts = content.split("\n\n")
-        current = ""
-        page = 1
-        for part in parts:
-            if len(current) + len(part) > 800 and current:
-                chunks.append(Chunk(
-                    id=f"learned-{slug}-{page}",
-                    content=current.strip(),
-                    book_title=title,
-                    book_slug=slug,
-                    page_start=page,
-                    page_end=page,
-                    content_chars=len(current.strip()),
-                ))
-                page += 1
-                current = part
-            else:
-                current = current + "\n\n" + part if current else part
-        if current.strip():
-            chunks.append(Chunk(
-                id=f"learned-{slug}-{page}",
-                content=current.strip(),
-                book_title=title,
-                book_slug=slug,
-                page_start=page,
-                page_end=page,
-                content_chars=len(current.strip()),
-            ))
-
-    stats = lib.ingest_chunks(iter(chunks), corpus=corpus)
-    _embed_in_background(corpus=corpus)
-    log("remember", f"saved {stats['chunks']} chunks for {title!r}")
-    return f"Remembered: '{title}' — {stats['chunks']} chunks, {len(content):,} chars indexed in corpus '{corpus}'"
-
-
 # ── Plugin tools ──────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -376,16 +398,15 @@ def rtfm_context(
     scope: str | None = None,
     limit: int = 5,
 ) -> str:
-    """Get relevant context for a subject. Use this BEFORE Grep/Glob.
+    """Get relevant context for a subject. Returns metadata only — no content.
 
-    Progressive disclosure: searches the indexed knowledge base and returns
-    the most relevant chunks. If the subject is a file path that exists but
-    isn't indexed, it will be indexed on-the-fly.
+    Like a search engine results page: shows which sources are relevant.
+    Use rtfm_expand(source, subject) to read the actual content.
 
     Args:
         subject: Topic, concept, file path, or question to get context for.
         scope: Optional corpus filter.
-        limit: Maximum chunks to return (default 5).
+        limit: Maximum unique sources to return (default 5).
     """
     t0 = time.time()
     lib = _get_library()
@@ -401,28 +422,153 @@ def rtfm_context(
             except Exception:
                 pass  # Non-blocking — still search for the subject
 
-    # Hybrid search across all corpora (or scoped)
-    try:
-        results = lib.hybrid_search(subject, limit=limit, corpus=scope)
-    except Exception:
-        results = lib.search(subject, limit=limit, corpus=scope)
+    # Overfetch for dedup
+    fetch_limit = limit * 5
+
+    # FTS search across all corpora (or scoped) — fast, no model loading
+    results = lib.search(subject, limit=fetch_limit, corpus=scope)
 
     elapsed = time.time() - t0
-    log("context", f"subject={subject!r} scope={scope!r} results={results.total_found} time={elapsed:.3f}s")
 
     if not results:
+        log("context", f"subject={subject!r} scope={scope!r} results=0 time={elapsed:.3f}s")
         return f"No context found for: {subject}\nTip: use Grep/Glob as fallback."
 
-    lines = [f"Context for \"{subject}\" ({results.total_found} matches):\n"]
-    for r in results:
-        lines.append(f"--- [{r.rank}] {r.source} ({r.page}) ---")
-        # Truncate long chunks to keep output manageable
-        content = r.content
-        if len(content) > 1500:
-            content = content[:1500] + "..."
-        lines.append(content)
-        lines.append("")
+    # Deduplicate: 1 best chunk per source
+    deduped = _deduplicate_by_source(results, limit)
+    log("context", f"subject={subject!r} scope={scope!r} sources={len(deduped)}/{results.total_found} time={elapsed:.3f}s")
 
+    # Metadata-only output — no content, minimal tokens
+    lines = [f"Context for \"{subject}\" ({len(deduped)} sources):\n"]
+    for rank, entry in enumerate(deduped, 1):
+        r = entry["best"]
+        count = entry["count"]
+        slug = r.chunk.book_slug
+        lines.append(f"[{rank}] {_format_source_line(r, count, slug)}")
+
+    return "\n".join(lines)
+
+
+# ── Drill-down ───────────────────────────────────────────────────────────
+
+@mcp.tool()
+def rtfm_expand(
+    source: str,
+    query: str | None = None,
+    limit: int = 20,
+) -> str:
+    """Drill into a specific source document. Shows all matching chunks.
+
+    Use this AFTER rtfm_search or rtfm_context identified a relevant source.
+    Like clicking a search result to read the full page.
+
+    Args:
+        source: Book slug (shown in search results as the expand hint).
+        query: Optional query to rank chunks by relevance. If omitted, returns all chunks in order.
+        limit: Maximum chunks to return (default 20).
+    """
+    t0 = time.time()
+    lib = _get_library()
+
+    # Get book metadata for header
+    conn = lib._get_conn()
+    book_row = conn.execute(
+        "SELECT title, filename, metadata FROM books WHERE slug = ?",
+        (source,),
+    ).fetchone()
+
+    if not book_row:
+        return f"Source not found: {source}"
+
+    book_title = book_row["title"]
+    book_file = book_row["filename"] or ""
+    import json as _json
+    book_meta = _json.loads(book_row["metadata"]) if book_row["metadata"] else {}
+    lang = book_meta.get("lang", "")
+
+    # Resolve absolute path for expand (actionable output)
+    corpus = ""
+    try:
+        c_row = conn.execute("SELECT corpus FROM books WHERE slug = ?", (source,)).fetchone()
+        corpus = c_row["corpus"] if c_row else ""
+    except Exception:
+        pass
+    abs_path = _resolve_abs_path(book_file, corpus)
+
+    header_parts = [f"Expanding \"{book_title}\""]
+    if lang:
+        header_parts.append(f"lang: {lang}")
+    if abs_path:
+        header_parts.append(f"path: {abs_path}")
+
+    if query:
+        # Search within this specific book (FTS — fast, no model loading)
+        results = lib.search(query, limit=limit, corpus=None)
+
+        # Filter to only this book
+        filtered = [r for r in results if r.chunk.book_slug == source]
+
+        if not filtered:
+            # Fallback: try FTS with book filter
+            results = lib.search(query, limit=limit, book=source)
+            filtered = list(results)
+
+        elapsed = time.time() - t0
+        log("expand", f"source={source!r} query={query!r} chunks={len(filtered)} time={elapsed:.3f}s")
+
+        if not filtered:
+            return f"No chunks found in '{source}' for: {query}"
+
+        lines = [f"{' | '.join(header_parts)} — {len(filtered)} chunks for \"{query}\":\n"]
+        for i, r in enumerate(filtered, 1):
+            section = r.chunk.chapter_title or ""
+            page = r.page
+            loc_parts = [f"{section} ({page})"]
+            if r.chunk.line_start:
+                if r.chunk.line_end and r.chunk.line_end != r.chunk.line_start:
+                    loc_parts.append(f"L{r.chunk.line_start}-{r.chunk.line_end}")
+                else:
+                    loc_parts.append(f"L{r.chunk.line_start}")
+            lines.append(f"[{i}] {' — '.join(loc_parts)} — score: {r.score:.3f}")
+            lines.append(f"    {r.content}\n")
+    else:
+        # No query — return all chunks from this book, in page order
+        cursor = conn.execute(
+            """SELECT c.*, b.title as book_title, b.slug as book_slug,
+                      b.filename as book_file
+               FROM chunks c
+               JOIN books b ON c.book_id = b.id
+               WHERE b.slug = ?
+               ORDER BY c.page_start, c.paragraph
+               LIMIT ?""",
+            (source, limit),
+        )
+        rows = cursor.fetchall()
+
+        elapsed = time.time() - t0
+        log("expand", f"source={source!r} query=None chunks={len(rows)} time={elapsed:.3f}s")
+
+        if not rows:
+            return f"Source not found: {source}"
+
+        lines = [f"{' | '.join(header_parts)} — {len(rows)} chunks (page order):\n"]
+        for i, row in enumerate(rows, 1):
+            section = row["chapter_title"] or ""
+            ps = row["page_start"] or "?"
+            pe = row["page_end"] or ps
+            page = f"p.{ps}" if ps == pe else f"pp.{ps}-{pe}"
+            loc_parts = [f"{section} ({page})"]
+            ls = row["line_start"]
+            le = row["line_end"]
+            if ls:
+                if le and le != ls:
+                    loc_parts.append(f"L{ls}-{le}")
+                else:
+                    loc_parts.append(f"L{ls}")
+            lines.append(f"[{i}] {' — '.join(loc_parts)}")
+            lines.append(f"    {row['content']}\n")
+
+    lines.append("⏹")
     return "\n".join(lines)
 
 

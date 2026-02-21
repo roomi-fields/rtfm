@@ -5,12 +5,19 @@ import json
 import sys
 from pathlib import Path
 
+from rtfm.config import resolve_db
 from rtfm.core.library import Library
+
+
+def _get_lib(args) -> Library:
+    """Resolve DB path and return a Library instance."""
+    db = resolve_db(args.db)
+    return Library(db)
 
 
 def cmd_search(args):
     """Search the library."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
     results = lib.search(
         args.query,
         limit=args.limit,
@@ -37,7 +44,7 @@ def cmd_search(args):
 
 def cmd_stats(args):
     """Show library statistics."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
     stats = lib.get_stats()
 
     print(f"Books:         {stats['books']}")
@@ -51,7 +58,7 @@ def cmd_stats(args):
 
 def cmd_books(args):
     """List books in the library."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
     books = lib.list_books(corpus=args.corpus)
 
     if args.format == "json":
@@ -66,7 +73,7 @@ def cmd_books(args):
 
 def cmd_corpora(args):
     """List corpora in the library."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
     corpora = lib.list_corpora()
 
     if args.format == "json":
@@ -86,7 +93,7 @@ def cmd_schema(args):
 
 def cmd_tags(args):
     """List or manage tags."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
 
     if args.format == "json":
         tags = lib.list_tags(corpus=args.corpus)
@@ -104,7 +111,7 @@ def cmd_tags(args):
 
 def cmd_tag_add(args):
     """Add tags to chunks."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
 
     tags = [t.strip() for t in args.tags.split(",")]
 
@@ -128,7 +135,7 @@ def cmd_tag_add(args):
 
 def cmd_versions(args):
     """List versioned articles or show version history."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
 
     if args.article:
         # Show history for a specific article
@@ -161,7 +168,7 @@ def cmd_versions(args):
 
 def cmd_version_at(args):
     """Get article content at a specific date."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
 
     result = lib.get_article_at_date(args.article, args.date)
 
@@ -183,7 +190,7 @@ def cmd_version_at(args):
 
 def cmd_compare_versions(args):
     """Compare two versions of an article."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
 
     result = lib.compare_versions(args.article, args.v1, args.v2)
 
@@ -204,7 +211,7 @@ def cmd_compare_versions(args):
 
 def cmd_embed(args):
     """Generate embeddings for chunks."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
 
     stats = lib.generate_embeddings(
         corpus=args.corpus,
@@ -219,7 +226,7 @@ def cmd_embed(args):
 
 def cmd_embed_stats(args):
     """Show embedding statistics."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
     stats = lib.get_embedding_stats()
 
     print(f"Chunks:    {stats['total_chunks']}")
@@ -232,7 +239,7 @@ def cmd_embed_stats(args):
 
 def cmd_ask(args):
     """Ask a question (traceable RAG)."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
 
     answer = lib.ask(
         args.question,
@@ -272,12 +279,166 @@ def cmd_ask(args):
     lib.close()
 
 
+def cmd_context(args):
+    """Get context for a subject (metadata-only, like MCP rtfm_context)."""
+    lib = _get_lib(args)
+
+    try:
+        results = lib.hybrid_search(args.subject, limit=args.limit * 5, corpus=args.corpus)
+    except Exception:
+        results = lib.search(args.subject, limit=args.limit * 5, corpus=args.corpus)
+
+    if not results:
+        print(f"No context found for: {args.subject}")
+        lib.close()
+        return
+
+    # Deduplicate by source
+    seen: dict[str, dict] = {}
+    for r in results:
+        slug = r.chunk.book_slug
+        if slug not in seen:
+            seen[slug] = {"best": r, "count": 1}
+        else:
+            seen[slug]["count"] += 1
+            if r.score > seen[slug]["best"].score:
+                seen[slug]["best"] = r
+
+    ranked = sorted(seen.values(), key=lambda x: x["best"].score, reverse=True)[:args.limit]
+
+    print(f"Context for \"{args.subject}\" ({len(ranked)} sources):\n")
+    for rank, entry in enumerate(ranked, 1):
+        r = entry["best"]
+        count = entry["count"]
+        slug = r.chunk.book_slug
+        filepath = r.chunk.book_file or ""
+        lang = r.chunk.metadata.get("lang", "") if r.chunk.metadata else ""
+
+        parts = [f"{r.source} ({r.page})", f"score: {r.score:.3f}", f"{count} chunks"]
+        if lang:
+            parts.append(f"lang: {lang}")
+        if filepath:
+            parts.append(f"file: {filepath}")
+
+        print(f"[{rank}] {' — '.join(parts)}")
+        print(f"    → rtfm expand \"{slug}\"")
+
+    lib.close()
+
+
+def cmd_expand(args):
+    """Expand a source — show all chunks (like MCP rtfm_expand)."""
+    lib = _get_lib(args)
+    conn = lib._get_conn()
+
+    # Get book info
+    book_row = conn.execute(
+        "SELECT id, title, filename, metadata FROM books WHERE slug = ?",
+        (args.source,),
+    ).fetchone()
+
+    if not book_row:
+        print(f"Source not found: {args.source}")
+        lib.close()
+        return
+
+    book_title = book_row["title"]
+    book_file = book_row["filename"] or ""
+    meta = json.loads(book_row["metadata"]) if book_row["metadata"] else {}
+    lang = meta.get("lang", "")
+
+    header_parts = [f"Expanding \"{book_title}\""]
+    if lang:
+        header_parts.append(f"lang: {lang}")
+    if book_file:
+        header_parts.append(f"file: {book_file}")
+
+    if args.query:
+        # Search within this book
+        try:
+            results = lib.hybrid_search(args.query, limit=args.limit, corpus=None)
+        except Exception:
+            results = lib.search(args.query, limit=args.limit, corpus=None)
+
+        filtered = [r for r in results if r.chunk.book_slug == args.source]
+        if not filtered:
+            results = lib.search(args.query, limit=args.limit, book=args.source)
+            filtered = list(results)
+
+        if not filtered:
+            print(f"No chunks found in '{args.source}' for: {args.query}")
+            lib.close()
+            return
+
+        print(f"{' | '.join(header_parts)} — {len(filtered)} chunks for \"{args.query}\":\n")
+        for i, r in enumerate(filtered, 1):
+            section = r.chunk.chapter_title or ""
+            print(f"[{i}] {section} ({r.page}) — score: {r.score:.3f}")
+            print(f"    {r.content}\n")
+    else:
+        # All chunks in page order
+        cursor = conn.execute(
+            """SELECT c.*, b.title as book_title
+               FROM chunks c JOIN books b ON c.book_id = b.id
+               WHERE b.slug = ?
+               ORDER BY c.page_start, c.paragraph
+               LIMIT ?""",
+            (args.source, args.limit),
+        )
+        rows = cursor.fetchall()
+
+        if not rows:
+            print(f"No chunks in source: {args.source}")
+            lib.close()
+            return
+
+        print(f"{' | '.join(header_parts)} — {len(rows)} chunks (page order):\n")
+        for i, row in enumerate(rows, 1):
+            section = row["chapter_title"] or ""
+            ps = row["page_start"] or "?"
+            pe = row["page_end"] or ps
+            page = f"p.{ps}" if ps == pe else f"pp.{ps}-{pe}"
+            print(f"[{i}] {section} ({page})")
+            print(f"    {row['content']}\n")
+
+    lib.close()
+
+
+def cmd_files(args):
+    """List indexed files, optionally filtered."""
+    import fnmatch
+
+    lib = _get_lib(args)
+    indexed = lib.list_indexed_files(corpus=args.corpus)
+    lib.close()
+
+    if not indexed:
+        print("No indexed files.")
+        return
+
+    # Optional pattern filter
+    if args.pattern:
+        indexed = {k: v for k, v in indexed.items() if fnmatch.fnmatch(k, args.pattern)}
+
+    if not indexed:
+        print(f"No files matching: {args.pattern}")
+        return
+
+    print(f"{len(indexed)} indexed files:\n")
+    for fp, info in sorted(indexed.items()):
+        corpus = info.get("corpus", "")
+        size = info.get("file_size", 0)
+        size_str = f"{size:,}" if size else "?"
+        print(f"  [{corpus}] {fp}  ({size_str} bytes)")
+
+
 def cmd_status(args):
     """Show detailed RTFM status."""
-    lib = Library(args.db)
+    db = resolve_db(args.db)
+    lib = Library(db)
 
     stats = lib.get_stats()
-    print(f"Database:      {args.db}")
+    print(f"Database:      {db}")
     print(f"Books:         {stats['books']}")
     print(f"Chunks:        {stats['chunks']}")
     print(f"Total chars:   {stats['total_chars']:,}")
@@ -329,9 +490,63 @@ def cmd_status(args):
 def cmd_sync(args):
     """Sync files into the library."""
     from rtfm.core.sync import sync
+    from rtfm.config import find_rtfm_root, load_config
 
-    root = Path(args.path).resolve()
-    lib = Library(args.db)
+    lib = _get_lib(args)
+
+    symbols = {"add": "+", "update": "~", "remove": "-", "error": "!", "embed": "*", "skip": "."}
+
+    def _progress(action: str, filepath: str, detail: str) -> None:
+        sym = symbols.get(action, "?")
+        if filepath:
+            print(f"  {sym} {filepath}  ({detail})")
+        else:
+            print(f"  {sym} {detail}")
+
+    # Detect if user provided explicit path or corpus
+    explicit_mode = args.path is not None or args.corpus is not None
+
+    if not explicit_mode:
+        # Config mode: sync all registered sources
+        root = find_rtfm_root()
+        if root:
+            config = load_config(root)
+            sources = config.get("sources", [])
+            if sources:
+                for src in sources:
+                    src_path = Path(src["path"]).resolve()
+                    src_corpus = src.get("corpus", "default")
+                    src_ext = None
+                    if src.get("extensions"):
+                        src_ext = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
+                                   for e in src["extensions"].split(",")}
+
+                    print(f"Syncing [{src_corpus}] {src_path} ...")
+                    result = sync(
+                        library=lib,
+                        root=src_path,
+                        corpus=src_corpus,
+                        extensions=src_ext,
+                        dry_run=args.dry_run,
+                        generate_embeddings=not args.no_embeddings,
+                        on_progress=_progress,
+                        force=args.force,
+                    )
+
+                    prefix = "[dry-run] " if args.dry_run else ""
+                    print(f"{prefix}  Added: {result.added}  Modified: {result.modified}  "
+                          f"Removed: {result.removed}  Unchanged: {result.unchanged}")
+                    if result.errors:
+                        for e in result.errors:
+                            print(f"  ! {e}")
+                    print()
+
+                lib.close()
+                return
+
+    # Explicit mode (or no config found): original behavior
+    root = Path(args.path or ".").resolve()
+    corpus = args.corpus or "default"
 
     extensions = None
     if args.extensions:
@@ -345,19 +560,10 @@ def cmd_sync(args):
     if args.dry_run:
         print(f"Dry run — scanning {root} ...")
 
-    symbols = {"add": "+", "update": "~", "remove": "-", "error": "!", "embed": "*", "skip": "."}
-
-    def _progress(action: str, filepath: str, detail: str) -> None:
-        sym = symbols.get(action, "?")
-        if filepath:
-            print(f"  {sym} {filepath}  ({detail})")
-        else:
-            print(f"  {sym} {detail}")
-
     result = sync(
         library=lib,
         root=root,
-        corpus=args.corpus,
+        corpus=corpus,
         extensions=extensions,
         dry_run=args.dry_run,
         generate_embeddings=not args.no_embeddings,
@@ -377,6 +583,57 @@ def cmd_sync(args):
             print(f"  - {e}")
 
     lib.close()
+
+
+def cmd_add(args):
+    """Register a source in .rtfm/config.json."""
+    from rtfm.config import find_rtfm_root, add_source
+
+    root = find_rtfm_root()
+    if not root:
+        print("No .rtfm/ found. Run 'rtfm init' first.")
+        sys.exit(1)
+
+    ext = args.extensions or None
+    result = add_source(root, args.path, corpus=args.corpus, extensions=ext)
+    resolved = str(Path(args.path).resolve())
+
+    if result == "added":
+        print(f"Added source: [{args.corpus}] {resolved}")
+        if ext:
+            print(f"  Extensions: {ext}")
+    else:
+        print(f"Source already registered: [{args.corpus}] {resolved}")
+
+
+def cmd_sources(args):
+    """List registered sources."""
+    from rtfm.config import find_rtfm_root, list_sources
+
+    root = find_rtfm_root()
+    if not root:
+        print("No .rtfm/ found. Run 'rtfm init' first.")
+        sys.exit(1)
+
+    sources = list_sources(root)
+    if not sources:
+        print("No sources registered. Use 'rtfm add <path>' to add one.")
+        return
+
+    print("Sources:")
+    for src in sources:
+        ext_info = f"  (extensions: {src['extensions']})" if src.get("extensions") else ""
+        print(f"  [{src.get('corpus', 'default')}] {src['path']}{ext_info}")
+
+
+def cmd_serve(args):
+    """Start the RTFM MCP server."""
+    import os
+    db = resolve_db(args.db)
+    os.environ["RTFM_DB"] = db
+    print(f"Starting RTFM MCP server (db: {db}) ...", file=sys.stderr)
+    from rtfm.mcp import main as mcp_main
+    mcp_main()
 
 
 def cmd_init(args):
@@ -424,7 +681,7 @@ def cmd_monitor(args):
 
 def cmd_semantic_search(args):
     """Search using semantic similarity."""
-    lib = Library(args.db)
+    lib = _get_lib(args)
 
     if args.hybrid:
         results = lib.hybrid_search(
@@ -454,8 +711,8 @@ def main():
     db_parent = argparse.ArgumentParser(add_help=False)
     db_parent.add_argument(
         "--db", "-d",
-        default="library.db",
-        help="Path to database file (default: library.db)"
+        default=None,
+        help="Path to database (auto-detected from .rtfm/)"
     )
 
     parser = argparse.ArgumentParser(
@@ -550,20 +807,55 @@ def main():
     p_semantic.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_semantic.set_defaults(func=cmd_semantic_search)
 
+    # context
+    p_context = subparsers.add_parser("context", help="Get context for a subject (metadata-only)", parents=[db_parent])
+    p_context.add_argument("subject", help="Topic, concept, or question")
+    p_context.add_argument("--limit", "-l", type=int, default=5)
+    p_context.add_argument("--corpus", "-c", help="Filter by corpus")
+    p_context.set_defaults(func=cmd_context)
+
+    # expand
+    p_expand = subparsers.add_parser("expand", help="Expand a source — show all chunks", parents=[db_parent])
+    p_expand.add_argument("source", help="Book slug (from search/context results)")
+    p_expand.add_argument("query", nargs="?", help="Optional query to filter chunks")
+    p_expand.add_argument("--limit", "-l", type=int, default=20)
+    p_expand.set_defaults(func=cmd_expand)
+
+    # files
+    p_files = subparsers.add_parser("files", help="List indexed files", parents=[db_parent])
+    p_files.add_argument("pattern", nargs="?", help="Filter by glob pattern (e.g. '*.md', '*config*')")
+    p_files.add_argument("--corpus", "-c", help="Filter by corpus")
+    p_files.set_defaults(func=cmd_files)
+
     # status
     p_status = subparsers.add_parser("status", help="Show RTFM status", parents=[db_parent])
     p_status.set_defaults(func=cmd_status)
 
     # sync
     p_sync = subparsers.add_parser("sync", help="Sync files into the library", parents=[db_parent])
-    p_sync.add_argument("path", nargs="?", default=".", help="Directory to sync")
-    p_sync.add_argument("--corpus", "-c", default="default")
+    p_sync.add_argument("path", nargs="?", default=None, help="Directory to sync (auto: all sources from config)")
+    p_sync.add_argument("--corpus", "-c", default=None, help="Corpus name (auto: from config)")
     p_sync.add_argument("--extensions", "-e", help="Comma-separated extensions (e.g. md,py,pdf)")
     p_sync.add_argument("--dry-run", action="store_true", help="Show what would change")
     p_sync.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
     p_sync.add_argument("--force", action="store_true", help="Re-index all files (ignore hash cache)")
     p_sync.add_argument("--files", nargs="+", help="Specific files to sync (for git hooks)")
     p_sync.set_defaults(func=cmd_sync)
+
+    # add (register a source)
+    p_add = subparsers.add_parser("add", help="Register a source directory")
+    p_add.add_argument("path", help="Directory to register as a source")
+    p_add.add_argument("--corpus", "-c", default="default", help="Corpus name")
+    p_add.add_argument("--extensions", "-e", help="Comma-separated extensions (e.g. md,py,pdf)")
+    p_add.set_defaults(func=cmd_add)
+
+    # sources (list registered sources)
+    p_sources = subparsers.add_parser("sources", help="List registered sources")
+    p_sources.set_defaults(func=cmd_sources)
+
+    # serve (start MCP server)
+    p_serve = subparsers.add_parser("serve", help="Start the RTFM MCP server", parents=[db_parent])
+    p_serve.set_defaults(func=cmd_serve)
 
     # init (has its own --db default)
     p_init = subparsers.add_parser("init", help="Initialize RTFM for a project")

@@ -45,6 +45,67 @@ def mcp_db(tmp_path):
         mcp_mod._library = None
 
 
+@pytest.fixture
+def multi_source_db(tmp_path):
+    """Create a DB with multiple source documents sharing common terms."""
+    db_path = tmp_path / "multi.db"
+    lib = Library(db_path)
+
+    # Source 1: Python guide (3 chunks about programming)
+    py_guide = tmp_path / "python_guide.md"
+    py_guide.write_text(
+        "# Python Programming Guide\n\n"
+        "Python is a versatile programming language used for web development, "
+        "data science, and automation. Functions are first-class objects.\n\n"
+        "## Functions\n\n"
+        "Functions in Python are defined with the def keyword. "
+        "They can accept arguments and return values. "
+        "Lambda functions provide a concise way to create anonymous functions.\n\n"
+        "## Classes\n\n"
+        "Object-oriented programming in Python uses classes. "
+        "Classes encapsulate data and behavior. Inheritance allows code reuse.\n"
+    )
+    lib.ingest(py_guide, corpus="test")
+
+    # Source 2: JavaScript guide (3 chunks about programming)
+    js_guide = tmp_path / "javascript_guide.md"
+    js_guide.write_text(
+        "# JavaScript Programming Guide\n\n"
+        "JavaScript is the language of the web. It runs in browsers and on servers "
+        "with Node.js. Functions are first-class citizens in JavaScript.\n\n"
+        "## Functions\n\n"
+        "JavaScript functions can be declared or expressed. "
+        "Arrow functions provide compact syntax. Closures capture variables.\n\n"
+        "## Async Programming\n\n"
+        "Promises and async/await make asynchronous programming manageable. "
+        "The event loop processes callbacks and microtasks.\n"
+    )
+    lib.ingest(js_guide, corpus="test")
+
+    # Source 3: Rust guide (3 chunks about programming)
+    rust_guide = tmp_path / "rust_guide.md"
+    rust_guide.write_text(
+        "# Rust Programming Guide\n\n"
+        "Rust is a systems programming language focused on safety and performance. "
+        "The borrow checker enforces memory safety at compile time.\n\n"
+        "## Functions\n\n"
+        "Rust functions use the fn keyword. Return types are specified after an arrow. "
+        "Closures can capture environment variables by reference or by value.\n\n"
+        "## Ownership\n\n"
+        "Ownership is Rust's core concept. Each value has exactly one owner. "
+        "When the owner goes out of scope, the value is dropped.\n"
+    )
+    lib.ingest(rust_guide, corpus="test")
+
+    lib.close()
+
+    with patch.dict(os.environ, {"RTFM_DB": str(db_path)}):
+        import rtfm.mcp as mcp_mod
+        mcp_mod._library = None
+        yield db_path
+        mcp_mod._library = None
+
+
 # ── Tests ─────────────────────────────────────────────────────────────────
 
 class TestMCPSearch:
@@ -184,7 +245,7 @@ class TestMCPContext:
         result = rtfm_context("consciousness meditation")
 
         assert "Context for" in result
-        assert "---" in result  # chunk separator
+        assert "file:" in result or "slug:" in result  # metadata with actionable refs
 
     def test_context_no_results(self, mcp_db):
         """rtfm_context with unknown topic returns fallback hint."""
@@ -215,3 +276,158 @@ class TestMCPContext:
 
         # Should have indexed it and found content (or at least not crashed)
         assert "Error" not in result or "No context" in result
+
+
+class TestProgressiveDisclosure:
+    """Tests for search deduplication and rtfm_expand."""
+
+    def test_search_deduplicates_by_source(self, multi_source_db):
+        """Search returns 1 chunk per unique source document."""
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search("programming functions", limit=5)
+
+        assert "sources" in result
+        assert "file:" in result or "slug:" in result
+
+    def test_search_shows_chunk_count(self, multi_source_db):
+        """Each source shows how many chunks matched."""
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search("programming functions", limit=5)
+
+        # Should contain "N chunks" indicators (metadata-only format)
+        assert "chunks" in result
+
+    def test_search_returns_different_sources(self, multi_source_db):
+        """With 3 sources all about programming, we should get 3 unique sources."""
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search("programming", limit=10)
+
+        # Count source entries [1], [2], [3]
+        assert "[1]" in result
+        assert "[2]" in result
+        assert "[3]" in result
+
+    def test_context_deduplicates(self, multi_source_db):
+        """rtfm_context also returns 1 chunk per source."""
+        from rtfm.mcp import rtfm_context
+        result = rtfm_context("functions programming")
+
+        assert "sources" in result
+        assert "file:" in result or "slug:" in result
+
+    def test_expand_with_query(self, multi_source_db):
+        """rtfm_expand shows all chunks from a source matching a query."""
+        from rtfm.mcp import rtfm_expand
+
+        # Get the slug from the DB
+        lib = Library(multi_source_db)
+        books = lib.list_books()
+        slug = books[0]["slug"]
+        lib.close()
+
+        # Reset singleton
+        import rtfm.mcp as mcp_mod
+        mcp_mod._library = None
+
+        result = rtfm_expand(slug, "programming")
+        assert "Expanding" in result
+        # Should have multiple chunks from the same source
+        assert "[1]" in result
+
+    def test_expand_without_query(self, multi_source_db):
+        """rtfm_expand without query returns all chunks in page order."""
+        from rtfm.mcp import rtfm_expand
+
+        lib = Library(multi_source_db)
+        books = lib.list_books()
+        slug = books[0]["slug"]
+        lib.close()
+
+        import rtfm.mcp as mcp_mod
+        mcp_mod._library = None
+
+        result = rtfm_expand(slug)
+        assert "Expanding" in result
+        assert "page order" in result
+        assert "[1]" in result
+
+    def test_expand_nonexistent_source(self, multi_source_db):
+        """rtfm_expand with unknown slug returns not found."""
+        from rtfm.mcp import rtfm_expand
+        result = rtfm_expand("nonexistent-slug-xyz")
+        assert "not found" in result.lower() or "No chunks" in result
+
+    def test_search_limit_respected(self, multi_source_db):
+        """limit=2 returns at most 2 unique sources."""
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search("programming", limit=2)
+
+        assert "[1]" in result
+        assert "[2]" in result
+        assert "[3]" not in result
+
+
+class TestMetadataOnlyOutput:
+    """Tests for the new metadata-only search output."""
+
+    def test_search_no_content_in_output(self, multi_source_db):
+        """Search results should NOT contain actual chunk content."""
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search("programming functions", limit=3)
+
+        # Should have metadata
+        assert "score:" in result
+        assert "chunks" in result
+        assert "file:" in result
+
+        # Should NOT have full content from the documents
+        assert "first-class" not in result  # content from Python/JS guides
+
+    def test_search_shows_file_path(self, multi_source_db):
+        """Search results include file paths."""
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search("programming", limit=3)
+
+        assert "file:" in result
+
+    def test_context_no_content_in_output(self, multi_source_db):
+        """Context results should NOT contain chunk content."""
+        from rtfm.mcp import rtfm_context
+        result = rtfm_context("programming functions")
+
+        assert "Context for" in result
+        assert "file:" in result or "slug:" in result
+        # Should not have full content
+        assert "first-class" not in result
+
+    def test_expand_has_content(self, multi_source_db):
+        """Expand SHOULD return full content (that's its purpose)."""
+        from rtfm.mcp import rtfm_expand
+
+        lib = Library(multi_source_db)
+        books = lib.list_books()
+        slug = books[0]["slug"]
+        lib.close()
+
+        import rtfm.mcp as mcp_mod
+        mcp_mod._library = None
+
+        result = rtfm_expand(slug, "programming")
+        assert "Expanding" in result
+        # Should have actual content
+        assert len(result) > 200
+
+    def test_expand_shows_file_and_lang(self, multi_source_db):
+        """Expand header shows file path."""
+        from rtfm.mcp import rtfm_expand
+
+        lib = Library(multi_source_db)
+        books = lib.list_books()
+        slug = books[0]["slug"]
+        lib.close()
+
+        import rtfm.mcp as mcp_mod
+        mcp_mod._library = None
+
+        result = rtfm_expand(slug)
+        assert "path:" in result

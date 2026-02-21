@@ -42,7 +42,8 @@ def _extract_blocks(source: str) -> list[dict]:
         tree = ast.parse(source)
     except SyntaxError:
         # Unparseable — return whole file as one block
-        return [{"label": "module", "content": source, "lineno": 1}]
+        return [{"label": "module", "content": source, "lineno": 1,
+                 "end_lineno": source.count("\n") + 1}]
 
     lines = source.splitlines(keepends=True)
     blocks: list[dict] = []
@@ -65,6 +66,7 @@ def _extract_blocks(source: str) -> list[dict]:
                     "label": "module",
                     "content": preamble,
                     "lineno": prev_end + 1,
+                    "end_lineno": node_start,
                 })
 
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -74,6 +76,7 @@ def _extract_blocks(source: str) -> list[dict]:
                 "label": _node_label(node),
                 "content": block_text,
                 "lineno": node.lineno,
+                "end_lineno": node_end,
             })
             prev_end = node_end
         else:
@@ -89,6 +92,7 @@ def _extract_blocks(source: str) -> list[dict]:
                 "label": "module",
                 "content": tail,
                 "lineno": prev_end + 1,
+                "end_lineno": len(lines),
             })
 
     # Merge consecutive "module" blocks
@@ -96,6 +100,7 @@ def _extract_blocks(source: str) -> list[dict]:
     for b in blocks:
         if merged and merged[-1]["label"] == "module" and b["label"] == "module":
             merged[-1]["content"] += "\n\n" + b["content"]
+            merged[-1]["end_lineno"] = b.get("end_lineno", b["lineno"])
         else:
             merged.append(b)
 
@@ -107,8 +112,8 @@ def _extract_blocks(source: str) -> list[dict]:
         else:
             # Split large class/function by sub-chunks
             text = b["content"]
+            end_line = b.get("end_lineno", b["lineno"])
             while len(text) > MAX_CHUNK_CHARS:
-                # Try to split at a blank line
                 cut = text.rfind("\n\n", 0, MAX_CHUNK_CHARS)
                 if cut < MIN_CHUNK_CHARS:
                     cut = text.rfind("\n", 0, MAX_CHUNK_CHARS)
@@ -118,6 +123,7 @@ def _extract_blocks(source: str) -> list[dict]:
                     "label": b["label"],
                     "content": text[:cut].rstrip(),
                     "lineno": b["lineno"],
+                    "end_lineno": end_line,
                 })
                 text = text[cut:].lstrip("\n")
             if text.strip():
@@ -125,6 +131,7 @@ def _extract_blocks(source: str) -> list[dict]:
                     "label": b["label"] + " (cont.)",
                     "content": text,
                     "lineno": b["lineno"],
+                    "end_lineno": end_line,
                 })
 
     return [b for b in final if b["content"].strip()]
@@ -170,6 +177,8 @@ class PythonParser(BaseParser):
                 page_start=block["lineno"],
                 page_end=block["lineno"],
                 paragraph=1,
+                line_start=block["lineno"],
+                line_end=block.get("end_lineno", block["lineno"]),
                 content_chars=len(chunk_text),
                 content_hash=_content_hash(chunk_text),
                 metadata=metadata.get("extended", {}),

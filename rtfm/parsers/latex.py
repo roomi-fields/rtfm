@@ -79,23 +79,28 @@ def _split_sections(text: str) -> list[dict]:
     """Split LaTeX source into sections based on sectioning commands."""
     sections: list[dict] = []
     matches = list(SECTION_RE.finditer(text))
+    total_lines = text.count("\n") + 1
 
     if not matches:
         # No sections found — return whole text
         cleaned = _clean_chunk(text)
         if cleaned:
-            return [{"title": "", "level": 0, "type": "content", "content": cleaned}]
+            return [{"title": "", "level": 0, "type": "content", "content": cleaned,
+                      "line_start": 1, "line_end": total_lines}]
         return []
 
     # Preamble before first section
     if matches[0].start() > 0:
         preamble = _clean_chunk(text[: matches[0].start()])
+        preamble_end_line = text[:matches[0].start()].count("\n") + 1
         if preamble and len(preamble) >= MIN_CHUNK_CHARS:
             sections.append({
                 "title": "Preamble",
                 "level": 0,
                 "type": "preamble",
                 "content": preamble,
+                "line_start": 1,
+                "line_end": preamble_end_line,
             })
 
     for i, m in enumerate(matches):
@@ -111,12 +116,17 @@ def _split_sections(text: str) -> list[dict]:
         if not content:
             continue
 
+        line_start = text[:m.start()].count("\n") + 1
+        line_end = text[:end].count("\n") + 1
+
         sec_type = "chapter" if level <= 1 else "section"
         sections.append({
             "title": title,
             "level": level,
             "type": sec_type,
             "content": content,
+            "line_start": line_start,
+            "line_end": line_end,
         })
 
     return sections
@@ -195,6 +205,8 @@ class LaTeXParser(BaseParser):
                 page_start=idx,
                 page_end=idx,
                 paragraph=1,
+                line_start=sec.get("line_start"),
+                line_end=sec.get("line_end"),
                 section_type=sec["type"],
                 content_chars=len(chunk_text),
                 content_hash=_content_hash(chunk_text),

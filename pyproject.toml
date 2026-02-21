@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rtfm"
-version = "0.1.0"
-description = "Read The Fucking Manual — Project intelligence for AI coding agents. Indexes code, docs, specs, and data. Serves surgical context via MCP."
+version = "0.2.0"
+description = "RTFM — The open retrieval layer for AI agents. Indexes code, docs, legal, research, data. Extensible parser system. Serves surgical context via MCP."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -13,9 +13,10 @@ authors = [
     { name = "roomi-fields" }
 ]
 keywords = [
-    "mcp", "claude-code", "project-intelligence", "context", "rag",
+    "mcp", "claude-code", "retrieval", "context", "rag",
     "search", "indexing", "fts5", "sqlite", "embeddings",
     "ai-agent", "knowledge-base", "developer-tools",
+    "open-source", "extensible", "multi-domain",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -39,6 +40,10 @@ pdf = [
 mcp = [
     "mcp>=1.0.0",
 ]
+embeddings = [
+    "sentence-transformers>=2.0.0",
+    "torch>=2.0.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -46,6 +51,7 @@ dev = [
 
 [project.scripts]
 rtfm = "rtfm.cli:main"
+rtfm-serve = "rtfm.mcp:main"
 
 [project.urls]
 Homepage = "https://github.com/roomi-fields/rtfm"

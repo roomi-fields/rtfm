@@ -158,7 +158,11 @@ def init_project(
         )
         summary["gitignore"] = "created"
 
-    # 7. Sync entry-point docs
+    # 7. Register project as a source in config
+    from rtfm.config import add_source
+    add_source(project_root, str(project_root), corpus=corpus)
+
+    # 8. Sync entry-point docs
     entry_files = []
     for ep in project_info["entry_points"]:
         ep_path = project_root / ep
