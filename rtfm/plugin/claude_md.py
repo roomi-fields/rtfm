@@ -6,36 +6,15 @@ from pathlib import Path
 
 RTFM_MARKER = "## RTFM"
 
-RTFM_TEMPLATE = """## RTFM — Project Knowledge Base
+RTFM_TEMPLATE = """## RTFM — Indexed Knowledge Base
 
-This project has an indexed knowledge base. RTFM indexes docs, code, specs, and past learnings.
+This project has been indexed with RTFM.
 
-### Workflow: RTFM first, then Read
+For any **exploratory search** (finding which files/modules/classes are relevant
+to a topic), use `rtfm_search` instead of Glob, find, ls, or broad Grep.
 
-**Step 1 — Ask RTFM** (always start here for any research):
-```
-rtfm_context("subject")   → metadata with file paths
-rtfm_search("query")      → same, different ranking
-```
-To find ANY file or document, ALWAYS use rtfm_search — never Glob.
-
-**Step 2 — Read the files** (RTFM gave you the paths):
-```
-Read(file_path)            → use the absolute path from Step 1
-```
-
-**Step 3 — Edit** (only when you know exactly which file/line):
-Use Grep to find the exact line, then Edit.
-
-**When to use `rtfm_expand` instead of Read:**
-Only for sources with no file path (e.g. learned corpus entries with a `slug:` instead of `file:`).
-
-### Rules (IMPORTANT)
-- To find files: rtfm_search. NEVER Glob for research.
-- After Read: do NOT rtfm_expand the same source.
-- Never Read the same file twice in one session.
-- Glob/Grep: ONLY for editing (finding a line to change). Not for research.
-- Save any significant finding (web search, external API, decision) to a scratch file — it will be auto-indexed.
+This returns file paths + context metadata. Then continue normally — Read the
+files, Grep for exact patterns within them, Edit to modify.
 """
 
 

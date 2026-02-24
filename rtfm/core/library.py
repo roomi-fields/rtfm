@@ -1344,13 +1344,14 @@ class Library:
         results = []
         for rank, idx in enumerate(top_indices, 1):
             row = rows[idx]
+            slug = row["chunk_id"].rsplit("-", 1)[0] if row["chunk_id"] else ""
             score = float(similarities[idx])
 
             chunk = Chunk(
                 id=row["chunk_id"],
                 content=row["content"],
                 book_title=row["book_title"],
-                book_slug=row["chunk_id"].rsplit("-", 1)[0] if row["chunk_id"] else "",
+                book_slug=slug,
                 chapter_title=row["chapter_title"],
                 chapter_num=row["chapter_num"],
                 page_start=row["page_start"] or 1,

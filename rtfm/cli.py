@@ -15,12 +15,51 @@ def _get_lib(args) -> Library:
     return Library(db)
 
 
+def _deduplicate_by_source(results, limit: int):
+    """Keep only the best chunk per unique source (book_slug).
+
+    Returns a list of dicts: {best: SearchResult, count: int},
+    sorted by score, limited to *limit* unique sources.
+    """
+    seen: dict[str, dict] = {}
+    for r in results:
+        slug = r.chunk.book_slug
+        if slug not in seen:
+            seen[slug] = {"best": r, "count": 1}
+        else:
+            seen[slug]["count"] += 1
+            if r.score > seen[slug]["best"].score:
+                seen[slug]["best"] = r
+
+    ranked = sorted(seen.values(), key=lambda x: x["best"].score, reverse=True)
+    return ranked[:limit]
+
+
+def _resolve_abs_path(filepath: str, lib, corpus: str) -> str:
+    """Resolve a relative filepath to absolute using stored sync root."""
+    import os
+
+    if not filepath or os.path.isabs(filepath):
+        return filepath
+    try:
+        root = lib.get_sync_root(corpus)
+        if root:
+            abs_path = os.path.join(root, filepath)
+            if os.path.exists(abs_path):
+                return abs_path
+    except Exception:
+        pass
+    return filepath
+
+
 def cmd_search(args):
     """Search the library."""
     lib = _get_lib(args)
+    # Overfetch so dedup still yields enough unique sources
+    fetch_limit = args.limit * 5
     results = lib.search(
         args.query,
-        limit=args.limit,
+        limit=fetch_limit,
         corpus=args.corpus,
         book=args.book,
     )
@@ -32,12 +71,26 @@ def cmd_search(args):
     elif args.format == "prompt":
         print(results.to_prompt(max_chars=args.max_chars))
     else:
-        # Default: simple text
-        for r in results:
-            print(f"\n[{r.rank}] {r.source} ({r.page}) - score: {r.score:.2f}")
-            if r.tags:
-                print(f"    Tags: {', '.join(r.tags)}")
-            print(f"    {r.content[:200]}...")
+        # Default: metadata-only, deduplicated by source.
+        # Same progressive-disclosure format as the MCP server.
+        deduped = _deduplicate_by_source(results, args.limit)
+        if not deduped:
+            print(f"No results for: {args.query}")
+        else:
+            for rank, entry in enumerate(deduped, 1):
+                r = entry["best"]
+                count = entry["count"]
+                filepath = _resolve_abs_path(
+                    r.chunk.book_file or "", lib, ""
+                )
+                parts = [f"{r.source} ({r.page})"]
+                parts.append(f"score: {r.score:.2f}")
+                parts.append(f"{count} chunks")
+                if filepath:
+                    parts.append(f"file: {filepath}")
+                else:
+                    parts.append(f"slug: {r.chunk.book_slug}")
+                print(f"[{rank}] {' — '.join(parts)}")
 
     lib.close()
 
