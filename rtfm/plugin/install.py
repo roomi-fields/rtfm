@@ -73,6 +73,62 @@ def write_mcp_json(project_root: str | Path, db_path: str = ".rtfm/library.db") 
         return "created"
 
 
+def _enable_mcp_in_settings(project_root: Path) -> str:
+    """Ensure 'rtfm' is listed in enabledMcpjsonServers in Claude Code settings.
+
+    Checks both .claude/settings.json and .claude/settings.local.json.
+    Adds 'rtfm' to enabledMcpjsonServers if the key exists but rtfm is missing,
+    or creates the key if the settings file exists without it.
+
+    Returns:
+        One of "enabled", "already enabled", or "no settings".
+    """
+    enabled_any = False
+    already = True
+
+    for filename in ("settings.json", "settings.local.json"):
+        settings_path = project_root / ".claude" / filename
+        if not settings_path.exists():
+            continue
+
+        try:
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        servers = data.get("enabledMcpjsonServers")
+        if servers is None:
+            # Key doesn't exist yet — add it
+            data["enabledMcpjsonServers"] = ["rtfm"]
+            settings_path.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+            enabled_any = True
+            already = False
+        elif "rtfm" not in servers:
+            servers.insert(0, "rtfm")
+            settings_path.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+            enabled_any = True
+            already = False
+
+    if already and not enabled_any:
+        # Check if rtfm was already in all existing settings
+        for filename in ("settings.json", "settings.local.json"):
+            settings_path = project_root / ".claude" / filename
+            if settings_path.exists():
+                try:
+                    data = json.loads(settings_path.read_text(encoding="utf-8"))
+                    if "rtfm" in data.get("enabledMcpjsonServers", []):
+                        return "already enabled"
+                except (json.JSONDecodeError, OSError):
+                    pass
+        return "no settings"
+
+    return "enabled" if enabled_any else "no settings"
+
+
 def init_project(
     project_root: str | Path,
     db_path: Optional[str] = None,
@@ -125,6 +181,10 @@ def init_project(
     # 3. Write .mcp.json
     mcp_result = write_mcp_json(project_root, rel_db)
     summary["mcp_json"] = mcp_result
+
+    # 3b. Enable rtfm in Claude Code settings
+    settings_result = _enable_mcp_in_settings(project_root)
+    summary["claude_settings"] = settings_result
 
     # 4. Inject CLAUDE.md
     claude_result = inject_claude_md(project_root)

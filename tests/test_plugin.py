@@ -137,6 +137,32 @@ class TestInitProject:
         assert summary2["mcp_json"] == "skipped"
         assert summary2["claude_md"] == "skipped"
 
+    def test_init_enables_mcp_in_settings(self, tmp_path):
+        """init_project adds rtfm to enabledMcpjsonServers."""
+        (tmp_path / "README.md").write_text("# Test")
+        # Pre-existing settings with another server
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.local.json").write_text(json.dumps({
+            "enabledMcpjsonServers": ["other-tool"],
+            "permissions": {},
+        }))
+
+        summary = init_project(tmp_path, no_embeddings=True)
+
+        assert summary["claude_settings"] == "enabled"
+        settings = json.loads((claude_dir / "settings.local.json").read_text())
+        assert "rtfm" in settings["enabledMcpjsonServers"]
+        assert "other-tool" in settings["enabledMcpjsonServers"]
+
+    def test_init_enables_mcp_no_settings(self, tmp_path):
+        """init_project handles missing .claude/ gracefully."""
+        (tmp_path / "README.md").write_text("# Test")
+
+        summary = init_project(tmp_path, no_embeddings=True)
+
+        assert summary["claude_settings"] == "no settings"
+
     def test_init_custom_db_path(self, tmp_path):
         """Custom DB path is respected."""
         summary = init_project(tmp_path, db_path="custom/my.db", no_embeddings=True)
