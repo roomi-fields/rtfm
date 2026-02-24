@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2] — 2026-02-24
+
+### Fixed
+- **Auto-enable MCP in Claude Code settings** — `rtfm init` now adds `rtfm` to `enabledMcpjsonServers` in `.claude/settings.json` and `.claude/settings.local.json`. Previously the server was configured in `.mcp.json` but not activated, causing it to silently disappear from `/mcp`.
+- **Simplified CLAUDE.md template** — Replaced verbose 30-line workflow with concise 4-line instruction (search, Read, Edit). Less prescriptive, better agent compliance.
+- **CLI progressive disclosure** — `rtfm search` now deduplicates results by source and shows metadata-only output with absolute file paths, matching the MCP server format.
+- **Semantic search slug extraction** — Fixed slug parsing in `library.py` for semantic search results.
+
 ## [0.2.0] — 2026-02-21
 
 ### Added
