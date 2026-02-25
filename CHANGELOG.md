@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.3] — 2026-02-25
+
+### Fixed
+- **Dynamic version** — `__version__` now reads from `importlib.metadata` instead of hardcoded string, stays in sync with `pyproject.toml`.
+- **`rtfm_books` pagination** — MCP tool now returns per-corpus summary + paginated listing (default 50 books/page) with `limit`/`offset` params. Previously dumped all books at once (~18k tokens for large repos).
+
 ## [0.2.2] — 2026-02-24
 
 ### Fixed

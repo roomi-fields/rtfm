@@ -248,22 +248,53 @@ def rtfm_tags(corpus: str | None = None) -> str:
 
 
 @mcp.tool()
-def rtfm_books(corpus: str | None = None) -> str:
-    """List all indexed books/documents.
+def rtfm_books(
+    corpus: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> str:
+    """List indexed books/documents with pagination.
+
+    Returns a per-corpus summary, then books from `offset` to `offset + limit`.
+    Call again with a higher `offset` to paginate through all books.
 
     Args:
         corpus: Filter by corpus name (optional).
+        limit: Max books per page (default 50). Set 0 for all.
+        offset: Number of books to skip (default 0). Use for pagination.
     """
-    log("books", f"corpus={corpus!r}")
+    log("books", f"corpus={corpus!r} limit={limit} offset={offset}")
     lib = _get_library()
     books = lib.list_books(corpus=corpus)
     if not books:
         return "No books indexed."
-    lines = []
+
+    # Per-corpus summary
+    corpus_counts: dict[str, int] = {}
     for b in books:
+        c = b.get("corpus", "default")
+        corpus_counts[c] = corpus_counts.get(c, 0) + 1
+    summary_lines = [f"Total: {len(books)} books across {len(corpus_counts)} corpus(es)"]
+    for c, count in sorted(corpus_counts.items()):
+        summary_lines.append(f"  [{c}] {count} books")
+
+    # Paginated book listing
+    if limit == 0:
+        page = books[offset:]
+    else:
+        page = books[offset : offset + limit]
+    book_lines = []
+    if offset > 0:
+        book_lines.append(f"(showing from #{offset + 1})")
+    for b in page:
         prefix = f"[{b['corpus']}] " if b.get("corpus") else ""
-        lines.append(f"{prefix}{b['title']}: {b['chunk_count']} chunks")
-    return "\n".join(lines)
+        book_lines.append(f"{prefix}{b['title']}: {b['chunk_count']} chunks")
+    remaining = len(books) - offset - len(page)
+    if remaining > 0:
+        next_offset = offset + len(page)
+        book_lines.append(f"... {remaining} more. Use offset={next_offset} to see next page.")
+
+    return "\n".join(summary_lines + [""] + book_lines)
 
 
 # ── Write tools ───────────────────────────────────────────────────────────
