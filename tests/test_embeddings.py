@@ -3,8 +3,8 @@
 import pytest
 import numpy as np
 
-# Skip all tests if sentence-transformers not installed
-pytest.importorskip("sentence_transformers")
+# Skip all tests if fastembed not installed
+pytest.importorskip("fastembed")
 
 
 class TestEmbeddingsModule:

@@ -91,7 +91,7 @@ def get_schema() -> dict:
 def print_schema():
     """Print schema in human-readable format."""
     print("=" * 60)
-    print("BIBLIRAG SCHEMA")
+    print("RTFM SCHEMA")
     print("=" * 60)
 
     print("\n## Chunk Fields (reserved by rtfm)")

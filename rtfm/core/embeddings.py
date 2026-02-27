@@ -4,8 +4,8 @@ import struct
 from typing import Optional, List
 import numpy as np
 
-# Default model
-DEFAULT_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
+# Default model (FastEmbed format)
+DEFAULT_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 EMBEDDING_DIM = 384  # Dimension for MiniLM models
 
 # Lazy-loaded model
@@ -14,39 +14,45 @@ _model_name = None
 
 
 def get_model(model_name: str = DEFAULT_MODEL):
-    """Get or load the sentence transformer model."""
+    """Get or load the FastEmbed text embedding model."""
     global _model, _model_name
 
     if _model is None or _model_name != model_name:
         try:
-            from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer(model_name)
+            from fastembed import TextEmbedding
+            _model = TextEmbedding(model_name=model_name)
             _model_name = model_name
         except ImportError:
             raise ImportError(
-                "sentence-transformers is required for embeddings. "
-                "Install with: pip install sentence-transformers"
+                "fastembed is required for embeddings. "
+                "Install with: pip install fastembed"
             )
 
     return _model
 
 
+def _normalize(v: np.ndarray) -> np.ndarray:
+    """L2-normalize embeddings so dot product = cosine similarity."""
+    norm = np.linalg.norm(v, axis=-1, keepdims=True)
+    norm = np.where(norm == 0, 1, norm)
+    return v / norm
+
+
 def embed_text(text: str, model_name: str = DEFAULT_MODEL) -> np.ndarray:
     """Generate embedding for a single text."""
     model = get_model(model_name)
-    return model.encode(text, normalize_embeddings=True)
+    embeddings = list(model.embed([text]))
+    vec = np.array(embeddings[0], dtype=np.float32)
+    return _normalize(vec)
 
 
 def embed_texts(texts: List[str], model_name: str = DEFAULT_MODEL,
                 batch_size: int = 32, show_progress: bool = False) -> np.ndarray:
     """Generate embeddings for multiple texts."""
     model = get_model(model_name)
-    return model.encode(
-        texts,
-        normalize_embeddings=True,
-        batch_size=batch_size,
-        show_progress_bar=show_progress
-    )
+    embeddings = list(model.embed(texts, batch_size=batch_size))
+    arr = np.array(embeddings, dtype=np.float32)
+    return _normalize(arr)
 
 
 def embedding_to_bytes(embedding: np.ndarray) -> bytes:

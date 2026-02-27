@@ -43,8 +43,7 @@ mcp = [
     "mcp>=1.0.0",
 ]
 embeddings = [
-    "sentence-transformers>=2.0.0",
-    "torch>=2.0.0",
+    "fastembed>=0.3.0",
 ]
 dev = [
     "pytest>=7.0",

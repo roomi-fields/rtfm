@@ -1163,7 +1163,7 @@ class Library:
         self,
         corpus: Optional[str] = None,
         batch_size: int = 32,
-        model: str = "paraphrase-multilingual-MiniLM-L12-v2",
+        model: Optional[str] = None,
         force: bool = False,
         show_progress: bool = True,
     ) -> dict:
@@ -1173,7 +1173,7 @@ class Library:
         Args:
             corpus: Only process chunks in this corpus (None = all)
             batch_size: Number of chunks to embed at once
-            model: Sentence transformer model name
+            model: Embedding model name (None = default)
             force: Re-generate even if embedding exists
             show_progress: Show progress bar
 
@@ -1287,7 +1287,7 @@ class Library:
         query: str,
         limit: int = 10,
         corpus: Optional[str] = None,
-        model: str = "paraphrase-multilingual-MiniLM-L12-v2",
+        model: Optional[str] = None,
     ) -> SearchResults:
         """
         Search using semantic similarity (embeddings).
@@ -1296,16 +1296,17 @@ class Library:
             query: Search query
             limit: Maximum results
             corpus: Filter by corpus
-            model: Model to use for query embedding
+            model: Embedding model name (None = default)
 
         Returns:
             SearchResults ordered by similarity
         """
         from rtfm.core.embeddings import (
-            embed_text, bytes_to_embedding, cosine_similarity_batch
+            embed_text, bytes_to_embedding, cosine_similarity_batch, DEFAULT_MODEL
         )
         import numpy as np
 
+        model = model or DEFAULT_MODEL
         conn = self._get_conn()
 
         # Get query embedding
@@ -1376,7 +1377,7 @@ class Library:
         corpus: Optional[str] = None,
         fts_weight: float = 0.3,
         semantic_weight: float = 0.7,
-        model: str = "paraphrase-multilingual-MiniLM-L12-v2",
+        model: Optional[str] = None,
     ) -> SearchResults:
         """
         Hybrid search combining FTS5 and semantic similarity.
@@ -1387,14 +1388,16 @@ class Library:
             corpus: Filter by corpus
             fts_weight: Weight for FTS5 score (0-1)
             semantic_weight: Weight for semantic score (0-1)
-            model: Model for semantic search
+            model: Embedding model name (None = default)
 
         Returns:
             SearchResults with combined scoring
         """
         from rtfm.core.embeddings import (
-            embed_text, bytes_to_embedding, cosine_similarity
+            embed_text, bytes_to_embedding, cosine_similarity, DEFAULT_MODEL
         )
+
+        model = model or DEFAULT_MODEL
 
         # Get FTS results (more than limit to have candidates)
         fts_results = self.search(query, limit=limit * 3, corpus=corpus)
