@@ -290,47 +290,6 @@ def cmd_embed_stats(args):
     lib.close()
 
 
-def cmd_ask(args):
-    """Ask a question (traceable RAG)."""
-    lib = _get_lib(args)
-
-    answer = lib.ask(
-        args.question,
-        limit=args.limit,
-        corpus=args.corpus,
-        search_mode=args.search_mode,
-        check_context=not args.no_context_check,
-        verify=not args.no_verify,
-        deep_verify=args.deep_verify,
-    )
-
-    if args.format == "json":
-        print(answer.to_json())
-    elif args.format == "markdown":
-        print(answer.to_markdown())
-    else:
-        # Default: text format
-        if not answer.sufficient_context:
-            print(f"Contexte insuffisant : {answer.confidence_note}")
-            lib.close()
-            return
-
-        print(answer.text)
-        print()
-        print("--- Sources ---")
-        for c in answer.citations:
-            print(f"  [{c.ref}] {c.chunk.source} ({c.chunk.page})")
-
-        if answer.grounding_scores:
-            score_pct = f"{answer.grounding_score * 100:.0f}%"
-            print(f"\nGrounding : {score_pct}")
-            if answer.ungrounded_claims:
-                print(f"Claims non verifies : {len(answer.ungrounded_claims)}")
-                for claim in answer.ungrounded_claims:
-                    print(f"  - {claim}")
-
-    lib.close()
-
 
 def cmd_context(args):
     """Get context for a subject (metadata-only, like MCP rtfm_context)."""
@@ -924,18 +883,6 @@ def main():
     p_monitor.add_argument("--path", "-p", default=".rtfm/rtfm.log",
                            help="Path to log file (default: .rtfm/rtfm.log)")
     p_monitor.set_defaults(func=cmd_monitor)
-
-    # ask (traceable RAG)
-    p_ask = subparsers.add_parser("ask", help="Poser une question (RAG tracable)", parents=[db_parent])
-    p_ask.add_argument("question", help="Question a poser")
-    p_ask.add_argument("--limit", "-l", type=int, default=10)
-    p_ask.add_argument("--corpus", "-c", help="Filtrer par corpus")
-    p_ask.add_argument("--search-mode", choices=["fts", "semantic", "hybrid"], default="hybrid")
-    p_ask.add_argument("--format", "-f", choices=["text", "json", "markdown"], default="text")
-    p_ask.add_argument("--no-context-check", action="store_true", help="Desactiver le niveau 0")
-    p_ask.add_argument("--no-verify", action="store_true", help="Desactiver la verification grounding")
-    p_ask.add_argument("--deep-verify", action="store_true", help="Verification LLM-as-judge (niveau 2+)")
-    p_ask.set_defaults(func=cmd_ask)
 
     args = parser.parse_args()
 

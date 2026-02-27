@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rtfm"
-version = "0.2.3"
+version = "0.3.0"
 description = "RTFM — The open retrieval layer for AI agents. Indexes code, docs, legal, research, data. Extensible parser system. Serves surgical context via MCP."
 readme = "README.md"
 license = "MIT"
@@ -13,7 +13,7 @@ authors = [
     { name = "roomi-fields" }
 ]
 keywords = [
-    "mcp", "claude-code", "retrieval", "context", "rag",
+    "mcp", "claude-code", "retrieval", "context",
     "search", "indexing", "fts5", "sqlite", "embeddings",
     "ai-agent", "knowledge-base", "developer-tools",
     "open-source", "extensible", "multi-domain",
@@ -30,7 +30,9 @@ classifiers = [
     "Topic :: Text Processing :: Indexing",
 ]
 
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0",
+]
 
 [project.optional-dependencies]
 pdf = [

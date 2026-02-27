@@ -23,9 +23,7 @@ rtfm/
 │   ├── library.py      # Main Library class (SQLite + FTS5)
 │   ├── models.py       # Chunk, SearchResult, SearchResults
 │   ├── embeddings.py   # Semantic search (MiniLM)
-│   ├── sync.py         # Incremental file sync
-│   ├── ask.py          # Traceable RAG (question answering)
-│   └── llm.py          # LLM client
+│   └── sync.py         # Incremental file sync
 ├── parsers/
 │   ├── base.py         # BaseParser, ParserRegistry
 │   ├── markdown.py     # Markdown (header-based)

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0] — 2026-02-27
+
+### Removed
+- **biblirag dissociation** — Removed all RAG/question-answering code (`ask.py`, `llm.py`, `cmd_ask`, `Citation`, `GroundingResult`, `Answer` models). RTFM is now a pure retrieval layer.
+- **Legacy code** — Removed `src/` (biblirag legacy), `config/`, `extract.py`, `query.py`, `requirements.txt`.
+- **Gemini dependency** — No more LLM client code. RTFM indexes and retrieves; generation is the agent's job.
+
 ## [0.2.3] — 2026-02-25
 
 ### Fixed
