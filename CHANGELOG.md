@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.1] — 2026-03-01
+
+### Changed
+- **`rtfm_expand` reads raw file lines** — Content is now read from disk between `line_start` and `line_end`, guaranteeing line numbers match `Read`/`Edit` exactly.
+- **Strict path resolution** — `rtfm_expand` uses exact path matching instead of fuzzy slug lookup. No more ambiguous results from duplicate files.
+- **CLAUDE.md template mentions `rtfm_expand`** — Guides agents to use `rtfm_search` then `rtfm_expand` instead of defaulting to `Read`.
+- **Batch corpus resolution** — Search formatting resolves corpus paths in a single query instead of per-result SQL.
+
+### Fixed
+- **Markdown/LaTeX parser `line_start` off-by-one** — Content line numbers now point to first content line after the header.
+- **Double search removed in expand query mode** — Was falling back to unscoped search, causing irrelevant matches.
+
+### Added
+- **`count` parameter for `rtfm_expand`** — Read multiple consecutive chunks in one call.
+- **End-to-end search→expand→Edit test** — Proves line numbers from expand match the real file.
+
 ## [0.3.0] — 2026-02-27
 
 ### Removed
