@@ -12,9 +12,7 @@ This project has been indexed with RTFM.
 
 For any **exploratory search** (finding which files/modules/classes are relevant
 to a topic), use `rtfm_search` instead of Glob, find, ls, or broad Grep.
-
-This returns file paths + context metadata. Then continue normally — Read the
-files, Grep for exact patterns within them, Edit to modify.
+Then use `rtfm_expand` to read easily most relevant files/sections.
 """
 
 
