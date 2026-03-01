@@ -123,20 +123,24 @@ class TestOutputSize:
         search_result = rtfm_search("flags grammaires BP3", limit=5, search_type="fts")
         search_size = len(search_result)
 
-        # Get all slugs from the DB (search results are metadata-only)
+        # Get file paths for all books (filename not in list_books, query directly)
         lib = multilang_db["lib_factory"]()
-        books = lib.list_books()
-        slugs = [b["slug"] for b in books]
+        conn = lib._get_conn()
+        rows = conn.execute(
+            "SELECT filename FROM books WHERE filename IS NOT NULL AND filename != ''"
+        ).fetchall()
+        project = multilang_db["project"]
+        filepaths = [str(project / row["filename"]) for row in rows]
         lib.close()
-        assert slugs, "Should have indexed books"
+        assert filepaths, "Should have indexed books"
 
         import rtfm.mcp as mcp_mod
 
         # Expand all sources and sum their sizes
         total_expand_size = 0
-        for slug in slugs:
+        for fp in filepaths:
             mcp_mod._library = None
-            expand_result = rtfm_expand(slug)
+            expand_result = rtfm_expand(fp)
             total_expand_size += len(expand_result)
 
         print(f"\n  Search output:        {search_size} chars")
@@ -167,38 +171,36 @@ class TestMetadataCompleteness:
     """Verify search results contain all expected metadata fields."""
 
     def test_search_has_required_fields(self, multilang_db):
-        """Each search result must have: score, chunks count, file path, expand hint."""
+        """Each search result must have: score, file path, section, header."""
         from rtfm.mcp import rtfm_search
 
         result = rtfm_search("flags BP3", limit=5, search_type="fts")
 
         assert "score:" in result, "Missing score"
-        assert "chunks" in result, "Missing chunk count"
-        assert "file:" in result, "Missing file path"
-        assert "file:" in result, "Missing file path as actionable ref"
+        assert "B4_Flags.md" in result, "Missing file path"
+        assert ">" in result, "Missing section indicator"
         assert "Found" in result, "Missing header"
 
-    def test_en_articles_show_lang(self, multilang_db):
-        """English articles must show lang: en in search results."""
+    def test_en_articles_identifiable_by_path(self, multilang_db):
+        """English articles must be identifiable by _en/ in their file path."""
         from rtfm.mcp import rtfm_search
 
         result = rtfm_search("flags derivation", limit=5, search_type="fts")
 
-        # Should find both FR and EN versions
-        # EN version should have lang: en
-        assert "lang: en" in result, (
-            f"EN articles should show 'lang: en' in results.\nActual output:\n{result}"
+        # EN articles are in _en/ subdirectory — path distinguishes language
+        assert "_en/" in result, (
+            f"EN articles should be identifiable by '_en/' in path.\nActual output:\n{result}"
         )
 
-    def test_fr_articles_show_lang(self, multilang_db):
-        """French articles should show lang: fr in search results."""
+    def test_fr_articles_identifiable_by_path(self, multilang_db):
+        """French articles should have paths without _en/ prefix."""
         from rtfm.mcp import rtfm_search
 
         result = rtfm_search("flags dérivation poids", limit=5, search_type="fts")
 
-        # FR articles with explicit lang: fr frontmatter should show it
-        assert "lang: fr" in result, (
-            f"FR articles with frontmatter lang: fr should show it.\nActual output:\n{result}"
+        # FR articles should appear with direct paths (no _en/)
+        assert "B4_Flags.md" in result, (
+            f"FR articles should show B4_Flags.md in results.\nActual output:\n{result}"
         )
 
     def test_file_path_distinguishes_en(self, multilang_db):
@@ -212,32 +214,36 @@ class TestMetadataCompleteness:
         )
 
     def test_context_has_required_fields(self, multilang_db):
-        """rtfm_context should have the same metadata fields."""
+        """rtfm_context should have score and path in results."""
         from rtfm.mcp import rtfm_context
 
         result = rtfm_context("grammaires musicales BP3")
 
-        assert "file:" in result or "slug:" in result, "Missing actionable ref"
+        assert "score:" in result, "Missing score"
         assert "Context for" in result or "No context" in result
 
-    def test_expand_header_has_file_and_lang(self, multilang_db):
-        """Expand should show file path and lang in its header."""
+    def test_expand_header_has_path_and_section(self, multilang_db):
+        """Expand should show file path and section in its header."""
         from rtfm.mcp import rtfm_expand
 
         lib = multilang_db["lib_factory"]()
-        books = lib.list_books(corpus="published")
+        conn = lib._get_conn()
+        # Get EN B4 book with filename
+        rows = conn.execute(
+            "SELECT slug, filename FROM books WHERE slug LIKE '%en%b4%'"
+        ).fetchall()
+        project = multilang_db["project"]
         lib.close()
+        assert rows, "Should find EN B4"
 
         import rtfm.mcp as mcp_mod
         mcp_mod._library = None
 
-        # Find EN B4
-        en_books = [b for b in books if "en" in b["slug"] and "b4" in b["slug"].lower()]
-        assert en_books, "Should find EN B4"
-
-        result = rtfm_expand(en_books[0]["slug"])
-        assert "path:" in result, "Expand should show file path"
-        assert "lang:" in result, "Expand should show language"
+        filepath = str(project / rows[0]["filename"])
+        result = rtfm_expand(filepath)
+        assert "_en/" in result, "Expand should show _en/ in path"
+        assert ">" in result, "Expand should show section"
+        assert "[1/" in result, "Expand should show chunk position"
 
 
 # ── Test: Content isolation ──────────────────────────────────────────────
@@ -269,16 +275,20 @@ class TestContentIsolation:
         from rtfm.mcp import rtfm_expand
 
         lib = multilang_db["lib_factory"]()
-        books = lib.list_books(corpus="published")
+        conn = lib._get_conn()
+        # Get FR B4 with filename
+        rows = conn.execute(
+            "SELECT slug, filename FROM books WHERE slug LIKE 'published--b4%'"
+        ).fetchall()
+        project = multilang_db["project"]
         lib.close()
+        assert rows, "Should find FR B4"
 
         import rtfm.mcp as mcp_mod
         mcp_mod._library = None
 
-        fr_b4 = [b for b in books if b["slug"].startswith("published--b4")]
-        assert fr_b4, "Should find FR B4"
-
-        result = rtfm_expand(fr_b4[0]["slug"])
+        filepath = str(project / rows[0]["filename"])
+        result = rtfm_expand(filepath)
         assert len(result) > 200, "Expand should return substantial content"
         # Should contain actual text from the article
         assert "flag" in result.lower() or "poids" in result.lower(), (

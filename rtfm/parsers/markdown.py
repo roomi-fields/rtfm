@@ -225,7 +225,7 @@ class MarkdownParser(BaseParser):
                     'num': num,
                     'content_lines': [],
                     'char_start': char_pos,
-                    'line_start': line_num,
+                    'line_start': line_num + 1,  # content starts after the header
                 }
             else:
                 current_section['content_lines'].append(line)

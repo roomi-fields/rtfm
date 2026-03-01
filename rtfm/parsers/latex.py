@@ -116,7 +116,7 @@ def _split_sections(text: str) -> list[dict]:
         if not content:
             continue
 
-        line_start = text[:m.start()].count("\n") + 1
+        line_start = text[:start].count("\n") + 1  # content starts after \section{...}
         line_end = text[:end].count("\n") + 1
 
         sec_type = "chapter" if level <= 1 else "section"

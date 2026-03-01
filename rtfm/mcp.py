@@ -15,6 +15,7 @@ Environment variables:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import threading
@@ -29,22 +30,76 @@ mcp = FastMCP("rtfm")
 # ── Progressive disclosure helpers ───────────────────────────────────────
 
 def _deduplicate_by_source(results, limit: int):
-    """Keep only the best chunk per unique source (book_slug).
+    """Keep only the best chunk per unique source file.
 
-    Returns a list of dicts with best result, chunk count, and metadata,
-    sorted by score, limited to *limit* unique sources.
+    Two-pass dedup:
+    1. First dedup by book_slug (multiple chunks from same book → keep best)
+    2. Then dedup by filename basename (copies in libs/skinny/, libs/tracing/ etc.)
+       Keep the entry with the shortest path (= the canonical copy).
+
+    Returns a list of dicts with best result, count, and others (top 3 chunks
+    besides the best), sorted by score, limited to *limit* unique sources.
     """
-    seen: dict[str, dict] = {}  # book_slug -> {best, count}
+    # Pass 1: group by book_slug
+    seen: dict[str, dict] = {}  # book_slug -> {best, all}
     for r in results:
         slug = r.chunk.book_slug
         if slug not in seen:
-            seen[slug] = {"best": r, "count": 1}
+            seen[slug] = {"best": r, "all": [r]}
         else:
-            seen[slug]["count"] += 1
+            seen[slug]["all"].append(r)
             if r.score > seen[slug]["best"].score:
                 seen[slug]["best"] = r
 
-    ranked = sorted(seen.values(), key=lambda x: x["best"].score, reverse=True)
+    # Pass 2: dedup by filename basename when files share the same relative
+    # path within their subtree (e.g. libs/skinny/mlflow/x.py vs mlflow/x.py).
+    by_key: dict[str, dict] = {}  # dedup_key -> {best, all}
+    for entry in seen.values():
+        r = entry["best"]
+        fname = r.chunk.book_file or r.chunk.book_slug
+        basename = os.path.basename(fname)
+
+        parts = fname.replace("\\", "/").split("/")
+        dedup_key = "/".join(parts[-2:]) if len(parts) >= 2 else basename
+
+        if dedup_key not in by_key:
+            by_key[dedup_key] = {"best": r, "all": list(entry["all"])}
+        else:
+            existing = by_key[dedup_key]
+            existing["all"].extend(entry["all"])
+            existing_path = existing["best"].chunk.book_file or ""
+            new_path = r.chunk.book_file or ""
+            if len(new_path) < len(existing_path) or r.score > existing["best"].score:
+                existing["best"] = r
+
+    # Compute count, top-3 others, and resolve absolute paths per source
+    ranked = sorted(by_key.values(), key=lambda x: x["best"].score, reverse=True)
+
+    # Batch-resolve corpus → abs_path (avoids per-result SQL in _format_source_line)
+    corpus_cache: dict[str, str] = {}
+    try:
+        lib = _get_library()
+        conn = lib._get_conn()
+        for row in conn.execute("SELECT slug, corpus FROM books").fetchall():
+            corpus_cache[row["slug"]] = row["corpus"] or ""
+    except Exception:
+        pass
+
+    for entry in ranked:
+        entry["count"] = len(entry["all"])
+        others = sorted(
+            [r for r in entry["all"] if r is not entry["best"]],
+            key=lambda r: r.score, reverse=True,
+        )[:3]
+        entry["others"] = others
+        del entry["all"]
+
+        # Pre-resolve absolute path
+        r = entry["best"]
+        filepath = r.chunk.book_file or ""
+        corpus = corpus_cache.get(r.chunk.book_slug, "")
+        entry["abs_path"] = _resolve_abs_path(filepath, corpus) if filepath else ""
+
     return ranked[:limit]
 
 
@@ -66,46 +121,126 @@ def _resolve_abs_path(filepath: str, corpus: str) -> str:
     return filepath
 
 
-def _format_source_line(r, count: int, slug: str) -> str:
-    """Format a single source as a compact metadata line.
+def _render_chunk(abs_path: str, line_start: int | None, line_end: int | None) -> str:
+    """Read raw lines from the actual file and format with line numbers.
 
-    Level 0: metadata only — title, score, chunk count, lang, absolute file path.
-    No content preview. Agent uses Read(file_path) to get content.
+    Guarantees line numbers match what Read/Edit see — always reads the real
+    file on disk.  Returns an error message if the file is unavailable.
     """
-    filepath = r.chunk.book_file or ""
-
-    # lang and corpus come from book metadata
-    lang = ""
-    corpus = ""
+    if not abs_path or not line_start:
+        return "[file not available — no path or line info]"
     try:
-        lib = _get_library()
-        conn = lib._get_conn()
-        import json as _json
-        row = conn.execute("SELECT metadata, corpus FROM books WHERE slug = ?", (slug,)).fetchone()
-        if row:
-            corpus = row["corpus"] or ""
-            if row["metadata"]:
-                book_meta = _json.loads(row["metadata"])
-                lang = book_meta.get("lang", "")
-    except Exception:
-        pass
+        p = Path(abs_path)
+        if not p.is_file():
+            return f"[file not found on disk: {abs_path}]"
+        all_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        start = (line_start or 1) - 1  # 0-indexed
+        end = line_end or len(all_lines)
+        selected = all_lines[start:end]
+        result = []
+        for i, line in enumerate(selected):
+            result.append(f"{start + i + 1:>6}\t{line}")
+        return "\n".join(result)
+    except Exception as e:
+        return f"[error reading {abs_path}: {e}]"
 
-    # Resolve to absolute path so agent can Read directly
-    if filepath:
-        filepath = _resolve_abs_path(filepath, corpus)
 
-    parts = [f"{r.source} ({r.page})"]
-    parts.append(f"score: {r.score:.3f}")
-    parts.append(f"{count} chunks")
-    if lang:
-        parts.append(f"lang: {lang}")
+def _resolve_book_by_path(conn, filepath: str):
+    """Resolve an absolute file path to a book row.
 
-    if filepath:
-        parts.append(f"file: {filepath}")
-    else:
-        parts.append(f"slug: {slug}")
+    Strict matching — no LIKE, no fuzzy:
+    1. Exact match on books.filename = filepath
+    2. Strip each sync_root prefix, match relative path
 
-    return " — ".join(parts)
+    Returns sqlite3.Row or None.
+    """
+    # 1. Exact match (covers directly ingested files with absolute paths)
+    row = conn.execute(
+        "SELECT id, slug, title, filename, corpus, metadata FROM books WHERE filename = ?",
+        (filepath,),
+    ).fetchone()
+    if row:
+        return row
+
+    # 2. Strip sync_root and try relative path
+    roots = conn.execute("SELECT corpus, root_path FROM sync_roots").fetchall()
+    candidates = []
+    for root_row in roots:
+        root_path = root_row["root_path"].rstrip("/").rstrip("\\")
+        prefix = root_path + "/"
+        if filepath.startswith(prefix):
+            rel = filepath[len(prefix):]
+            row = conn.execute(
+                "SELECT id, slug, title, filename, corpus, metadata FROM books WHERE filename = ?",
+                (rel,),
+            ).fetchone()
+            if row:
+                candidates.append(row)
+
+    if len(candidates) == 1:
+        return candidates[0]
+    elif len(candidates) > 1:
+        # Dedup by last 2 path components, keep shortest path
+        by_key: dict[str, dict] = {}
+        for c in candidates:
+            fname = c["filename"] or ""
+            parts = fname.replace("\\", "/").split("/")
+            dedup_key = "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+            if dedup_key not in by_key or len(fname) < len(by_key[dedup_key]["filename"] or ""):
+                by_key[dedup_key] = c
+        results = list(by_key.values())
+        if len(results) == 1:
+            return results[0]
+        return min(results, key=lambda r: len(r["filename"] or ""))
+
+    return None
+
+
+def _format_source_line(entry: dict, rank: int) -> str:
+    """Format a source as a search result line.
+
+    Format:
+      [rank] /abs/path > best_section — L<start>-<end> — score: 0.89
+          Also: section2 (L<start>-<end>), section3 (L<start>-<end>)
+
+    Expects entry["abs_path"] to be pre-resolved by _deduplicate_by_source.
+    """
+    r = entry["best"]
+    others = entry.get("others", [])
+
+    # Best chunk info
+    section = r.chunk.chapter_title or ""
+    ls = r.chunk.line_start
+    le = r.chunk.line_end
+
+    # Build: path > section — L<lines> — score
+    display = entry.get("abs_path") or r.chunk.book_file or r.chunk.book_slug
+    if section:
+        display += f" > {section}"
+
+    parts = [display]
+    if ls:
+        line_str = f"L{ls}-{le}" if le and le != ls else f"L{ls}"
+        parts.append(line_str)
+    parts.append(f"score: {r.score:.2f}")
+
+    main_line = f"[{rank}] {' — '.join(parts)}"
+
+    # "Also:" line for other chunks in the same file
+    if others:
+        also_items = []
+        for o in others:
+            s = o.chunk.chapter_title or "?"
+            o_ls = o.chunk.line_start
+            o_le = o.chunk.line_end
+            if o_ls:
+                line_str = f"L{o_ls}-{o_le}" if o_le and o_le != o_ls else f"L{o_ls}"
+                also_items.append(f"{s} ({line_str})")
+            else:
+                also_items.append(s)
+        main_line += f"\n    Also: {', '.join(also_items)}"
+
+    return main_line
 
 
 
@@ -199,10 +334,7 @@ def rtfm_search(
     # Metadata-only output — no content, minimal tokens
     lines = [f"Found {len(deduped)} sources for \"{query}\":\n"]
     for rank, entry in enumerate(deduped, 1):
-        r = entry["best"]
-        count = entry["count"]
-        slug = r.chunk.book_slug
-        lines.append(f"[{rank}] {_format_source_line(r, count, slug)}")
+        lines.append(_format_source_line(entry, rank))
 
     return "\n".join(lines)
 
@@ -472,10 +604,7 @@ def rtfm_context(
     # Metadata-only output — no content, minimal tokens
     lines = [f"Context for \"{subject}\" ({len(deduped)} sources):\n"]
     for rank, entry in enumerate(deduped, 1):
-        r = entry["best"]
-        count = entry["count"]
-        slug = r.chunk.book_slug
-        lines.append(f"[{rank}] {_format_source_line(r, count, slug)}")
+        lines.append(_format_source_line(entry, rank))
 
     return "\n".join(lines)
 
@@ -485,121 +614,196 @@ def rtfm_context(
 @mcp.tool()
 def rtfm_expand(
     source: str,
+    target: str | None = None,
     query: str | None = None,
-    limit: int = 20,
+    offset: int = 0,
+    count: int = 1,
 ) -> str:
-    """Drill into a specific source document. Shows all matching chunks.
+    """Read content from an indexed source with line numbers.
 
-    Use this AFTER rtfm_search or rtfm_context identified a relevant source.
-    Like clicking a search result to read the full page.
+    Use AFTER rtfm_search to read actual content. Like Read, but for indexed files.
 
     Args:
-        source: Book slug (shown in search results as the expand hint).
-        query: Optional query to rank chunks by relevance. If omitted, returns all chunks in order.
-        limit: Maximum chunks to return (default 20).
+        source: Absolute file path (from search results).
+        target: Jump to a section name ("class Foo") or line ("L120").
+        query: Filter chunks by relevance within the file.
+        offset: Pagination offset for query results (default 0).
+        count: Number of chunks to return (default 1). Use 0 for all remaining.
     """
     t0 = time.time()
     lib = _get_library()
-
-    # Get book metadata for header
     conn = lib._get_conn()
-    book_row = conn.execute(
-        "SELECT title, filename, metadata FROM books WHERE slug = ?",
-        (source,),
-    ).fetchone()
 
+    # Resolve path → book (strict matching, no fuzzy)
+    book_row = _resolve_book_by_path(conn, source)
     if not book_row:
-        return f"Source not found: {source}"
+        return f"File not found in RTFM index: {source}\nTip: use rtfm_search to find indexed files."
 
+    book_slug = book_row["slug"]
     book_title = book_row["title"]
     book_file = book_row["filename"] or ""
-    import json as _json
-    book_meta = _json.loads(book_row["metadata"]) if book_row["metadata"] else {}
-    lang = book_meta.get("lang", "")
-
-    # Resolve absolute path for expand (actionable output)
-    corpus = ""
-    try:
-        c_row = conn.execute("SELECT corpus FROM books WHERE slug = ?", (source,)).fetchone()
-        corpus = c_row["corpus"] if c_row else ""
-    except Exception:
-        pass
+    corpus = book_row["corpus"] or ""
     abs_path = _resolve_abs_path(book_file, corpus)
 
-    header_parts = [f"Expanding \"{book_title}\""]
-    if lang:
-        header_parts.append(f"lang: {lang}")
-    if abs_path:
-        header_parts.append(f"path: {abs_path}")
+    # All chunks in file order
+    all_chunks = conn.execute(
+        """SELECT c.*, b.title as book_title, b.slug as book_slug,
+                  b.filename as book_file
+           FROM chunks c
+           JOIN books b ON c.book_id = b.id
+           WHERE b.slug = ?
+           ORDER BY c.page_start, c.paragraph""",
+        (book_slug,),
+    ).fetchall()
 
+    if not all_chunks:
+        return f"No content indexed for: {source}"
+
+    total = len(all_chunks)
+    display_path = abs_path or source
+
+    # --- Query mode: search within file ---
     if query:
-        # Search within this specific book (FTS — fast, no model loading)
-        results = lib.search(query, limit=limit, corpus=None)
-
-        # Filter to only this book
-        filtered = [r for r in results if r.chunk.book_slug == source]
+        filtered = list(lib.search(query, limit=50, book=book_slug))
 
         if not filtered:
-            # Fallback: try FTS with book filter
-            results = lib.search(query, limit=limit, book=source)
-            filtered = list(results)
+            return f"No chunks in {display_path} match: {query}"
 
-        elapsed = time.time() - t0
-        log("expand", f"source={source!r} query={query!r} chunks={len(filtered)} time={elapsed:.3f}s")
+        total_relevant = len(filtered)
+        if offset >= total_relevant:
+            return f"No more results for \"{query}\" in {display_path} (offset={offset}, total={total_relevant})"
 
-        if not filtered:
-            return f"No chunks found in '{source}' for: {query}"
+        # Return count results starting from offset
+        end_offset = total_relevant if count == 0 else min(offset + count, total_relevant)
+        selected = filtered[offset:end_offset]
 
-        lines = [f"{' | '.join(header_parts)} — {len(filtered)} chunks for \"{query}\":\n"]
-        for i, r in enumerate(filtered, 1):
-            section = r.chunk.chapter_title or ""
-            page = r.page
-            loc_parts = [f"{section} ({page})"]
-            if r.chunk.line_start:
-                if r.chunk.line_end and r.chunk.line_end != r.chunk.line_start:
-                    loc_parts.append(f"L{r.chunk.line_start}-{r.chunk.line_end}")
-                else:
-                    loc_parts.append(f"L{r.chunk.line_start}")
-            lines.append(f"[{i}] {' — '.join(loc_parts)} — score: {r.score:.3f}")
-            lines.append(f"    {r.content}\n")
-    else:
-        # No query — return all chunks from this book, in page order
-        cursor = conn.execute(
-            """SELECT c.*, b.title as book_title, b.slug as book_slug,
-                      b.filename as book_file
-               FROM chunks c
-               JOIN books b ON c.book_id = b.id
-               WHERE b.slug = ?
-               ORDER BY c.page_start, c.paragraph
-               LIMIT ?""",
-            (source, limit),
+        # Header from first result
+        r0 = selected[0]
+        chunk_idx = next(
+            (i for i, row in enumerate(all_chunks) if row["chunk_id"] == r0.chunk.id),
+            0,
         )
-        rows = cursor.fetchall()
+        section = r0.chunk.chapter_title or book_title
+        ls = r0.chunk.line_start
+        le = r0.chunk.line_end
+        line_info = f"L{ls}-{le}" if ls and le else (f"L{ls}" if ls else "")
+        n_shown = len(selected)
+        pos = f"[{chunk_idx + 1}/{total}]" if n_shown == 1 else f"[{n_shown} chunks]"
+
+        header = f"{display_path} > {section} {pos}"
+        if line_info:
+            header += f" — {line_info}"
+
+        lines = [header, "", _render_chunk(display_path, ls, le)]
+
+        # Additional results
+        for r in selected[1:]:
+            s = r.chunk.chapter_title or ""
+            r_ls = r.chunk.line_start
+            r_le = r.chunk.line_end
+            r_line = f"L{r_ls}-{r_le}" if r_ls and r_le else (f"L{r_ls}" if r_ls else "")
+            r_idx = next(
+                (i for i, row in enumerate(all_chunks) if row["chunk_id"] == r.chunk.id),
+                0,
+            )
+            lines.append(f"\n─── {s} [{r_idx + 1}/{total}] — {r_line} ───\n")
+            lines.append(_render_chunk(display_path, r_ls, r_le))
+
+        # Navigation hints
+        if n_shown == 1 and chunk_idx + 1 < total:
+            nx = all_chunks[chunk_idx + 1]
+            ns = nx["chapter_title"] or ""
+            nls, nle = nx["line_start"], nx["line_end"]
+            nl = f"L{nls}-{nle}" if nls and nle else (f"L{nls}" if nls else "")
+            lines.append(f"\n⏹ Next in file [{chunk_idx + 2}/{total}]: \"{ns}\" {nl}")
+
+        remaining = total_relevant - end_offset
+        if remaining > 0:
+            lines.append(f"  {remaining} more relevant chunks. Next: rtfm_expand(\"{source}\", query=\"{query}\", offset={end_offset})")
 
         elapsed = time.time() - t0
-        log("expand", f"source={source!r} query=None chunks={len(rows)} time={elapsed:.3f}s")
+        log("expand", f"source={source!r} query={query!r} offset={offset} count={n_shown} time={elapsed:.3f}s")
+        return "\n".join(lines)
 
-        if not rows:
-            return f"Source not found: {source}"
+    # --- Target or default mode ---
+    if target:
+        chunk_idx = None
+        if re.match(r'^L\d+', target):
+            target_line = int(re.match(r'^L(\d+)', target).group(1))
+            # Find chunk containing target_line
+            for i, row in enumerate(all_chunks):
+                ls, le = row["line_start"], row["line_end"]
+                if ls and le and ls <= target_line <= le:
+                    chunk_idx = i
+                    break
+            # Fallback: first chunk starting at or after target_line
+            if chunk_idx is None:
+                for i, row in enumerate(all_chunks):
+                    if row["line_start"] and row["line_start"] >= target_line:
+                        chunk_idx = i
+                        break
+        else:
+            # Section name — exact match on chapter_title
+            for i, row in enumerate(all_chunks):
+                if row["chapter_title"] == target:
+                    chunk_idx = i
+                    break
 
-        lines = [f"{' | '.join(header_parts)} — {len(rows)} chunks (page order):\n"]
-        for i, row in enumerate(rows, 1):
-            section = row["chapter_title"] or ""
-            ps = row["page_start"] or "?"
-            pe = row["page_end"] or ps
-            page = f"p.{ps}" if ps == pe else f"pp.{ps}-{pe}"
-            loc_parts = [f"{section} ({page})"]
-            ls = row["line_start"]
-            le = row["line_end"]
-            if ls:
-                if le and le != ls:
-                    loc_parts.append(f"L{ls}-{le}")
-                else:
-                    loc_parts.append(f"L{ls}")
-            lines.append(f"[{i}] {' — '.join(loc_parts)}")
-            lines.append(f"    {row['content']}\n")
+        if chunk_idx is None:
+            sections = [
+                f"\"{row['chapter_title']}\" L{row['line_start']}"
+                for row in all_chunks if row["chapter_title"]
+            ]
+            return f"Target not found in {display_path}: {target}\nAvailable sections: {', '.join(sections)}"
+    else:
+        chunk_idx = 0
 
-    lines.append("⏹")
+    # Return count consecutive chunks starting from chunk_idx
+    end_idx = total if count == 0 else min(chunk_idx + count, total)
+    selected_rows = all_chunks[chunk_idx:end_idx]
+    n_shown = len(selected_rows)
+
+    # Header
+    first = selected_rows[0]
+    section = first["chapter_title"] or book_title
+    ls = first["line_start"]
+    last_le = selected_rows[-1]["line_end"]
+    if n_shown == 1:
+        le = first["line_end"]
+        line_info = f"L{ls}-{le}" if ls and le else (f"L{ls}" if ls else "")
+        pos = f"[{chunk_idx + 1}/{total}]"
+    else:
+        line_info = f"L{ls}-{last_le}" if ls and last_le else (f"L{ls}" if ls else "")
+        pos = f"[{chunk_idx + 1}-{end_idx}/{total}]"
+
+    header = f"{display_path} > {section} {pos}"
+    if line_info:
+        header += f" — {line_info}"
+
+    lines = [header, "", _render_chunk(display_path, ls, first["line_end"])]
+
+    # Additional chunks
+    for j, row in enumerate(selected_rows[1:], 1):
+        s = row["chapter_title"] or ""
+        r_ls = row["line_start"]
+        r_le = row["line_end"]
+        r_line = f"L{r_ls}-{r_le}" if r_ls and r_le else (f"L{r_ls}" if r_ls else "")
+        r_idx = chunk_idx + j
+        lines.append(f"\n─── {s} [{r_idx + 1}/{total}] — {r_line} ───\n")
+        lines.append(_render_chunk(display_path, r_ls, r_le))
+
+    # Navigation: next in file
+    if end_idx < total:
+        nx = all_chunks[end_idx]
+        ns = nx["chapter_title"] or ""
+        nls, nle = nx["line_start"], nx["line_end"]
+        nl = f"L{nls}-{nle}" if nls and nle else (f"L{nls}" if nls else "")
+        lines.append(f"\n⏹ Next in file [{end_idx + 1}/{total}]: \"{ns}\" {nl}")
+    else:
+        lines.append("\n⏹")
+
+    elapsed = time.time() - t0
+    log("expand", f"source={source!r} target={target!r} chunk={chunk_idx + 1}-{end_idx}/{total} time={elapsed:.3f}s")
     return "\n".join(lines)
 
 
