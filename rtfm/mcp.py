@@ -293,6 +293,8 @@ def rtfm_search(
     limit: int = 5,
     corpus: str | None = None,
     search_type: str = "fts",
+    freshness_weight: float = 0.0,
+    centrality_weight: float = 0.0,
 ) -> str:
     """Search the knowledge base. Returns metadata only — no content.
 
@@ -304,6 +306,8 @@ def rtfm_search(
         limit: Maximum number of unique sources to return (default 5).
         corpus: Filter by corpus name (optional).
         search_type: One of "fts", "semantic", or "hybrid" (default "fts").
+        freshness_weight: Boost recently indexed files (0.0 = off, 0.1 = mild).
+        centrality_weight: Boost files with many incoming edges (0.0 = off, 0.1 = mild).
     """
     t0 = time.time()
     lib = _get_library()
@@ -320,6 +324,11 @@ def rtfm_search(
             results = lib.hybrid_search(query, limit=fetch_limit, corpus=corpus)
     except Exception:
         results = lib.search(query, limit=fetch_limit, corpus=corpus)
+
+    # Apply reranking if weights are provided
+    if freshness_weight > 0 or centrality_weight > 0:
+        results = lib.rerank(results, freshness_weight=freshness_weight,
+                             centrality_weight=centrality_weight)
 
     elapsed = time.time() - t0
 
@@ -804,6 +813,124 @@ def rtfm_expand(
 
     elapsed = time.time() - t0
     log("expand", f"source={source!r} target={target!r} chunk={chunk_idx + 1}-{end_idx}/{total} time={elapsed:.3f}s")
+    return "\n".join(lines)
+
+
+# ── Graph tools ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+def rtfm_graph(
+    source: str,
+    direction: str = "both",
+    relation_type: str | None = None,
+) -> str:
+    """Show dependency graph neighbors of a file.
+
+    Shows which files import/link/include the source and which files
+    the source depends on. Useful for understanding code structure.
+
+    Args:
+        source: Book slug or absolute file path.
+        direction: "outgoing" (dependencies), "incoming" (dependents), or "both".
+        relation_type: Filter by type: "import", "link", "include", "cite" (optional).
+    """
+    log("graph", f"source={source!r} direction={direction} type={relation_type!r}")
+    lib = _get_library()
+    conn = lib._get_conn()
+
+    # Resolve source: try as slug first, then as file path
+    book_slug = source
+    book_row = conn.execute("SELECT slug FROM books WHERE slug = ?", (source,)).fetchone()
+    if not book_row:
+        book_row = _resolve_book_by_path(conn, source)
+        if book_row:
+            book_slug = book_row["slug"]
+        else:
+            return f"Source not found: {source}"
+
+    neighbors = lib.get_neighbors(book_slug, direction=direction, relation_type=relation_type)
+
+    if not neighbors:
+        return f"No edges found for: {book_slug} (direction={direction})"
+
+    # Group by direction
+    outgoing = [n for n in neighbors if n["direction"] == "outgoing"]
+    incoming = [n for n in neighbors if n["direction"] == "incoming"]
+
+    lines = [f"Graph for {book_slug}:"]
+
+    if outgoing:
+        lines.append(f"\nOutgoing ({len(outgoing)} dependencies):")
+        for n in outgoing:
+            detail = f" — {n['source_detail']}" if n.get("source_detail") else ""
+            lines.append(f"  -> {n['filename'] or n['slug']} [{n['relation_type']}]{detail}")
+
+    if incoming:
+        lines.append(f"\nIncoming ({len(incoming)} dependents):")
+        for n in incoming:
+            detail = f" — {n['source_detail']}" if n.get("source_detail") else ""
+            lines.append(f"  <- {n['filename'] or n['slug']} [{n['relation_type']}]{detail}")
+
+    # Graph stats
+    stats = lib.get_graph_stats()
+    lines.append(f"\nGraph: {stats['total_edges']} edges, {stats['books_with_edges']} connected files")
+
+    return "\n".join(lines)
+
+
+# ── History tools ────────────────────────────────────────────────────────
+
+@mcp.tool()
+def rtfm_history(
+    source: str,
+    version: int | None = None,
+) -> str:
+    """Show version history of an indexed file, or retrieve a specific version.
+
+    Each time a file is re-synced, its previous content is saved as a snapshot.
+
+    Args:
+        source: Book slug or absolute file path.
+        version: Version number to retrieve (optional). If omitted, lists all versions.
+    """
+    log("history", f"source={source!r} version={version!r}")
+    lib = _get_library()
+    conn = lib._get_conn()
+
+    # Resolve source
+    book_slug = source
+    book_row = conn.execute("SELECT slug FROM books WHERE slug = ?", (source,)).fetchone()
+    if not book_row:
+        book_row = _resolve_book_by_path(conn, source)
+        if book_row:
+            book_slug = book_row["slug"]
+        else:
+            return f"Source not found: {source}"
+
+    if version is not None:
+        # Return specific version content
+        ver = lib.get_file_version(book_slug, version)
+        if not ver:
+            return f"Version {version} not found for: {book_slug}"
+        return (
+            f"{book_slug} v{ver['version_num']} — {ver['created_at']} "
+            f"({ver['file_size'] or 0:,} bytes, hash: {ver['content_hash'][:8]})\n\n"
+            f"{ver['snapshot']}"
+        )
+
+    # List versions
+    history = lib.get_file_history(book_slug)
+    if not history:
+        return f"No version history for: {book_slug}"
+
+    lines = [f"Version history for {book_slug} ({len(history)} versions):"]
+    for v in history:
+        size = v.get("file_size") or 0
+        lines.append(
+            f"  v{v['version_num']}: {v['created_at']} — "
+            f"{size:,} bytes (hash: {v['content_hash'][:8]})"
+        )
+    lines.append(f"\nUse rtfm_history(\"{source}\", version=N) to read a specific version.")
     return "\n".join(lines)
 
 

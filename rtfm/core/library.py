@@ -148,6 +148,35 @@ CREATE TABLE IF NOT EXISTS sync_roots (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Dependency graph edges (book-level: imports, links, includes, citations)
+CREATE TABLE IF NOT EXISTS edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_book_id INTEGER NOT NULL,
+    target_book_id INTEGER NOT NULL,
+    relation_type TEXT NOT NULL,
+    source_detail TEXT,
+    target_detail TEXT,
+    FOREIGN KEY (source_book_id) REFERENCES books(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_book_id);
+CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_book_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique
+    ON edges(source_book_id, target_book_id, relation_type, source_detail);
+
+-- File version snapshots (content before re-ingest)
+CREATE TABLE IF NOT EXISTS file_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER NOT NULL,
+    version_num INTEGER NOT NULL DEFAULT 1,
+    content_hash TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    file_size INTEGER,
+    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_file_versions_book ON file_versions(book_id, version_num);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_chunks_book ON chunks(book_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_chapter ON chunks(chapter_id);
@@ -266,6 +295,48 @@ class Library:
                     root_path TEXT NOT NULL,
                     updated_at TEXT DEFAULT (datetime('now'))
                 );
+            """)
+
+        # Create edges table if missing
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='edges'"
+        )
+        if not cursor.fetchone():
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS edges (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_book_id INTEGER NOT NULL,
+                    target_book_id INTEGER NOT NULL,
+                    relation_type TEXT NOT NULL,
+                    source_detail TEXT,
+                    target_detail TEXT,
+                    FOREIGN KEY (source_book_id) REFERENCES books(id) ON DELETE CASCADE,
+                    FOREIGN KEY (target_book_id) REFERENCES books(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_book_id);
+                CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_book_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique
+                    ON edges(source_book_id, target_book_id, relation_type, source_detail);
+            """)
+
+        # Create file_versions table if missing
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='file_versions'"
+        )
+        if not cursor.fetchone():
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS file_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER NOT NULL,
+                    version_num INTEGER NOT NULL DEFAULT 1,
+                    content_hash TEXT NOT NULL,
+                    snapshot TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    file_size INTEGER,
+                    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_file_versions_book
+                    ON file_versions(book_id, version_num);
             """)
 
     def close(self):
@@ -632,12 +703,208 @@ class Library:
             return False
 
         book_id = row["id"]
+        conn.execute("DELETE FROM edges WHERE source_book_id = ? OR target_book_id = ?", (book_id, book_id))
         conn.execute("DELETE FROM chunks WHERE book_id = ?", (book_id,))
         conn.execute("DELETE FROM chapters WHERE book_id = ?", (book_id,))
         conn.execute("DELETE FROM books WHERE id = ?", (book_id,))
         conn.commit()
 
         return True
+
+    # =========================================================================
+    # Dependency graph
+    # =========================================================================
+
+    def get_neighbors(
+        self,
+        book_slug: str,
+        direction: str = "both",
+        relation_type: Optional[str] = None,
+    ) -> list[dict]:
+        """Get graph neighbors of a book.
+
+        Args:
+            book_slug: Slug of the book to query.
+            direction: "outgoing", "incoming", or "both".
+            relation_type: Filter by relation type (optional).
+
+        Returns:
+            List of dicts with slug, filename, relation_type, direction, source_detail.
+        """
+        conn = self._get_conn()
+
+        # Resolve book_id
+        row = conn.execute("SELECT id FROM books WHERE slug = ?", (book_slug,)).fetchone()
+        if not row:
+            return []
+        book_id = row["id"]
+
+        results = []
+
+        if direction in ("outgoing", "both"):
+            sql = """SELECT b.slug, b.filename, e.relation_type, e.source_detail
+                     FROM edges e JOIN books b ON e.target_book_id = b.id
+                     WHERE e.source_book_id = ?"""
+            params: list = [book_id]
+            if relation_type:
+                sql += " AND e.relation_type = ?"
+                params.append(relation_type)
+            for r in conn.execute(sql, params).fetchall():
+                results.append({
+                    "slug": r["slug"], "filename": r["filename"],
+                    "relation_type": r["relation_type"], "direction": "outgoing",
+                    "source_detail": r["source_detail"],
+                })
+
+        if direction in ("incoming", "both"):
+            sql = """SELECT b.slug, b.filename, e.relation_type, e.source_detail
+                     FROM edges e JOIN books b ON e.source_book_id = b.id
+                     WHERE e.target_book_id = ?"""
+            params = [book_id]
+            if relation_type:
+                sql += " AND e.relation_type = ?"
+                params.append(relation_type)
+            for r in conn.execute(sql, params).fetchall():
+                results.append({
+                    "slug": r["slug"], "filename": r["filename"],
+                    "relation_type": r["relation_type"], "direction": "incoming",
+                    "source_detail": r["source_detail"],
+                })
+
+        return results
+
+    def get_in_degree(self, book_id: Optional[int] = None) -> dict[int, int]:
+        """Get in-degree counts for books in the graph.
+
+        Args:
+            book_id: If given, return only for this book. Otherwise, all books.
+
+        Returns:
+            Dict mapping book_id to in-degree count.
+        """
+        conn = self._get_conn()
+        if book_id is not None:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM edges WHERE target_book_id = ?",
+                (book_id,),
+            ).fetchone()
+            return {book_id: row["cnt"]}
+
+        rows = conn.execute(
+            "SELECT target_book_id, COUNT(*) as cnt FROM edges GROUP BY target_book_id"
+        ).fetchall()
+        return {r["target_book_id"]: r["cnt"] for r in rows}
+
+    def get_graph_stats(self) -> dict:
+        """Get statistics about the dependency graph."""
+        conn = self._get_conn()
+
+        total_edges = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+
+        relation_rows = conn.execute(
+            "SELECT relation_type, COUNT(*) as cnt FROM edges GROUP BY relation_type"
+        ).fetchall()
+        relation_types = {r["relation_type"]: r["cnt"] for r in relation_rows}
+
+        books_with_edges = conn.execute(
+            """SELECT COUNT(DISTINCT id) FROM (
+                SELECT source_book_id as id FROM edges
+                UNION
+                SELECT target_book_id as id FROM edges
+            )"""
+        ).fetchone()[0]
+
+        return {
+            "total_edges": total_edges,
+            "relation_types": relation_types,
+            "books_with_edges": books_with_edges,
+        }
+
+    # =========================================================================
+    # Reranking
+    # =========================================================================
+
+    def rerank(
+        self,
+        results: "SearchResults",
+        freshness_weight: float = 0.0,
+        centrality_weight: float = 0.0,
+    ) -> "SearchResults":
+        """Rerank search results with freshness and centrality boosts.
+
+        final_score = base_score * (1 + freshness_boost + centrality_boost)
+
+        Args:
+            results: Original SearchResults.
+            freshness_weight: Weight for freshness boost (0 = disabled).
+            centrality_weight: Weight for centrality boost (0 = disabled).
+
+        Returns:
+            New SearchResults with adjusted scores and ranks.
+        """
+        if not results or (freshness_weight == 0.0 and centrality_weight == 0.0):
+            return results
+
+        conn = self._get_conn()
+        now = datetime.now()
+
+        # Batch-fetch book metadata: slug → (book_id, indexed_at)
+        book_rows = conn.execute(
+            "SELECT id, slug, indexed_at FROM books"
+        ).fetchall()
+        slug_to_info: dict[str, dict] = {}
+        for r in book_rows:
+            slug_to_info[r["slug"]] = {
+                "book_id": r["id"],
+                "indexed_at": r["indexed_at"],
+            }
+
+        # Batch-fetch in-degree for centrality
+        in_degrees: dict[int, int] = {}
+        max_in_degree = 0
+        if centrality_weight > 0:
+            in_degrees = self.get_in_degree()
+            max_in_degree = max(in_degrees.values()) if in_degrees else 0
+
+        # Recompute scores
+        scored = []
+        for r in results:
+            base_score = r.score
+            freshness_boost = 0.0
+            centrality_boost = 0.0
+
+            info = slug_to_info.get(r.chunk.book_slug, {})
+
+            if freshness_weight > 0 and info.get("indexed_at"):
+                try:
+                    indexed_dt = datetime.fromisoformat(info["indexed_at"])
+                    days_since = (now - indexed_dt).total_seconds() / 86400
+                    freshness_boost = freshness_weight * (0.99 ** days_since)
+                except (ValueError, TypeError):
+                    pass
+
+            if centrality_weight > 0 and max_in_degree > 0:
+                book_id = info.get("book_id")
+                if book_id:
+                    in_deg = in_degrees.get(book_id, 0)
+                    centrality_boost = centrality_weight * min(in_deg / max_in_degree, 1.0)
+
+            final_score = base_score * (1 + freshness_boost + centrality_boost)
+            scored.append((final_score, r))
+
+        # Sort by final score descending
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        from rtfm.core.models import SearchResult
+        reranked = []
+        for rank, (score, r) in enumerate(scored, 1):
+            reranked.append(SearchResult(chunk=r.chunk, score=score, rank=rank))
+
+        return SearchResults(
+            results=reranked,
+            query=results.query,
+            total_found=results.total_found,
+        )
 
     # =========================================================================
     # Tag management
@@ -1155,6 +1422,132 @@ class Library:
             "chars_v1": len(versions[v1]["content"]),
             "chars_v2": len(versions[v2]["content"]),
             "chars_diff": len(versions[v2]["content"]) - len(versions[v1]["content"]),
+        }
+
+    # =========================================================================
+    # File versioning (snapshots before re-ingest)
+    # =========================================================================
+
+    def save_file_version(self, book_slug: str, content_hash: str) -> Optional[int]:
+        """Save a snapshot of the current content before re-ingest.
+
+        Reads content from chunks, stores as a single snapshot.
+        Prunes versions beyond 50 per book.
+
+        Returns:
+            Version ID, or None if book not found or no content.
+        """
+        conn = self._get_conn()
+
+        row = conn.execute("SELECT id FROM books WHERE slug = ?", (book_slug,)).fetchone()
+        if not row:
+            return None
+        book_id = row["id"]
+
+        # Concatenate chunk content in order
+        chunks = conn.execute(
+            """SELECT content FROM chunks WHERE book_id = ?
+               ORDER BY page_start, paragraph""",
+            (book_id,),
+        ).fetchall()
+
+        if not chunks:
+            return None
+
+        snapshot = "\n\n".join(r["content"] for r in chunks)
+        file_size = len(snapshot.encode("utf-8"))
+
+        # Get next version number
+        max_row = conn.execute(
+            "SELECT MAX(version_num) as mx FROM file_versions WHERE book_id = ?",
+            (book_id,),
+        ).fetchone()
+        next_version = (max_row["mx"] or 0) + 1
+
+        cursor = conn.execute(
+            """INSERT INTO file_versions
+               (book_id, version_num, content_hash, snapshot, created_at, file_size)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (book_id, next_version, content_hash, snapshot,
+             datetime.now().isoformat(), file_size),
+        )
+        version_id = cursor.lastrowid
+
+        # Prune: keep only the last 50 versions
+        conn.execute(
+            """DELETE FROM file_versions WHERE book_id = ? AND id NOT IN (
+                SELECT id FROM file_versions WHERE book_id = ?
+                ORDER BY version_num DESC LIMIT 50
+            )""",
+            (book_id, book_id),
+        )
+
+        conn.commit()
+        return version_id
+
+    def get_file_history(self, book_slug: str) -> list[dict]:
+        """Get version history for a file (without content).
+
+        Returns:
+            List of dicts with version_num, content_hash, created_at, file_size.
+        """
+        conn = self._get_conn()
+
+        row = conn.execute("SELECT id FROM books WHERE slug = ?", (book_slug,)).fetchone()
+        if not row:
+            return []
+        book_id = row["id"]
+
+        rows = conn.execute(
+            """SELECT version_num, content_hash, created_at, file_size
+               FROM file_versions WHERE book_id = ?
+               ORDER BY version_num ASC""",
+            (book_id,),
+        ).fetchall()
+
+        return [dict(r) for r in rows]
+
+    def get_file_version(self, book_slug: str, version_num: int) -> Optional[dict]:
+        """Get a specific version snapshot (with content).
+
+        Returns:
+            Dict with version_num, content_hash, created_at, file_size, snapshot.
+        """
+        conn = self._get_conn()
+
+        row = conn.execute("SELECT id FROM books WHERE slug = ?", (book_slug,)).fetchone()
+        if not row:
+            return None
+        book_id = row["id"]
+
+        row = conn.execute(
+            """SELECT version_num, content_hash, created_at, file_size, snapshot
+               FROM file_versions WHERE book_id = ? AND version_num = ?""",
+            (book_id, version_num),
+        ).fetchone()
+
+        return dict(row) if row else None
+
+    def compare_file_versions(self, book_slug: str, v1: int, v2: int) -> dict:
+        """Compare metadata of two file versions.
+
+        Returns:
+            Dict with both versions' metadata and size diff.
+        """
+        ver1 = self.get_file_version(book_slug, v1)
+        ver2 = self.get_file_version(book_slug, v2)
+
+        if not ver1 or not ver2:
+            return {"error": "One or both versions not found"}
+
+        return {
+            "book_slug": book_slug,
+            "v1": {"version_num": ver1["version_num"], "content_hash": ver1["content_hash"],
+                    "created_at": ver1["created_at"], "file_size": ver1["file_size"]},
+            "v2": {"version_num": ver2["version_num"], "content_hash": ver2["content_hash"],
+                    "created_at": ver2["created_at"], "file_size": ver2["file_size"]},
+            "size_diff": (ver2["file_size"] or 0) - (ver1["file_size"] or 0),
+            "content_changed": ver1["content_hash"] != ver2["content_hash"],
         }
 
     # ==================== Embeddings ====================

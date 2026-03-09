@@ -9,6 +9,16 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class EdgeCandidate:
+    """A dependency edge extracted by a parser, before resolution."""
+
+    source_file: str       # relative path of the source file
+    target_ref: str        # raw reference ("foo.bar", "./utils.md")
+    relation_type: str     # "import" | "link" | "cite" | "include"
+    source_detail: str = ""  # e.g. "from foo.bar import baz"
+
+
+@dataclass
 class Chunk:
     """A chunk of content from a document."""
 

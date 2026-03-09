@@ -2,6 +2,8 @@
 
 # RTFM
 
+***Retrieve The Forgotten Memory***
+
 **The open retrieval layer for AI agents**
 
 Index your entire project — code, docs, legal, research, data — and serve your AI agent exactly the context it needs.

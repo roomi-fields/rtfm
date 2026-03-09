@@ -691,6 +691,74 @@ def cmd_monitor(args):
         print("\nStopped.")
 
 
+def cmd_graph(args):
+    """Show dependency graph for a source."""
+    lib = _get_lib(args)
+
+    neighbors = lib.get_neighbors(
+        args.source,
+        direction=args.direction,
+        relation_type=args.type,
+    )
+
+    if not neighbors:
+        print(f"No edges found for: {args.source}")
+        lib.close()
+        return
+
+    outgoing = [n for n in neighbors if n["direction"] == "outgoing"]
+    incoming = [n for n in neighbors if n["direction"] == "incoming"]
+
+    if outgoing:
+        print(f"Outgoing ({len(outgoing)} dependencies):")
+        for n in outgoing:
+            detail = f" — {n['source_detail']}" if n.get("source_detail") else ""
+            print(f"  -> {n['filename'] or n['slug']} [{n['relation_type']}]{detail}")
+
+    if incoming:
+        print(f"\nIncoming ({len(incoming)} dependents):")
+        for n in incoming:
+            detail = f" — {n['source_detail']}" if n.get("source_detail") else ""
+            print(f"  <- {n['filename'] or n['slug']} [{n['relation_type']}]{detail}")
+
+    stats = lib.get_graph_stats()
+    print(f"\nGraph: {stats['total_edges']} edges, {stats['books_with_edges']} connected files")
+    if stats["relation_types"]:
+        types_str = ", ".join(f"{k}: {v}" for k, v in stats["relation_types"].items())
+        print(f"Types: {types_str}")
+
+    lib.close()
+
+
+def cmd_history(args):
+    """Show file version history or specific version."""
+    lib = _get_lib(args)
+
+    if args.version is not None:
+        ver = lib.get_file_version(args.source, args.version)
+        if not ver:
+            print(f"Version {args.version} not found for: {args.source}")
+        elif args.format == "json":
+            print(json.dumps(ver, indent=2))
+        else:
+            print(f"{args.source} v{ver['version_num']} — {ver['created_at']}")
+            print(f"Size: {ver.get('file_size', 0):,} bytes | Hash: {ver['content_hash'][:8]}")
+            print(f"\n{ver['snapshot']}")
+    else:
+        history = lib.get_file_history(args.source)
+        if not history:
+            print(f"No version history for: {args.source}")
+        elif args.format == "json":
+            print(json.dumps(history, indent=2))
+        else:
+            print(f"Version history for {args.source} ({len(history)} versions):")
+            for v in history:
+                size = v.get("file_size") or 0
+                print(f"  v{v['version_num']}: {v['created_at']} — {size:,} bytes (hash: {v['content_hash'][:8]})")
+
+    lib.close()
+
+
 def cmd_semantic_search(args):
     """Search using semantic similarity."""
     lib = _get_lib(args)
@@ -864,6 +932,20 @@ def main():
     # sources (list registered sources)
     p_sources = subparsers.add_parser("sources", help="List registered sources")
     p_sources.set_defaults(func=cmd_sources)
+
+    # graph
+    p_graph = subparsers.add_parser("graph", help="Show dependency graph for a source", parents=[db_parent])
+    p_graph.add_argument("source", help="Book slug to query")
+    p_graph.add_argument("--direction", "-D", choices=["outgoing", "incoming", "both"], default="both")
+    p_graph.add_argument("--type", "-t", help="Filter by relation type (import, link, include, cite)")
+    p_graph.set_defaults(func=cmd_graph)
+
+    # history
+    p_history = subparsers.add_parser("history", help="Show file version history", parents=[db_parent])
+    p_history.add_argument("source", help="Book slug to query")
+    p_history.add_argument("--version", "-v", type=int, help="Show specific version content")
+    p_history.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_history.set_defaults(func=cmd_history)
 
     # serve (start MCP server)
     p_serve = subparsers.add_parser("serve", help="Start the RTFM MCP server", parents=[db_parent])

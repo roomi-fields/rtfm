@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Iterator, Optional, Type
-from rtfm.core.models import Chunk
+from rtfm.core.models import Chunk, EdgeCandidate
 
 
 class BaseParser(ABC):
@@ -47,6 +47,14 @@ class BaseParser(ABC):
             Chunk objects ready for indexing
         """
         pass
+
+    def extract_edges(self, path: Path, metadata: Optional[dict] = None) -> list[EdgeCandidate]:
+        """Extract dependency edges from the document.
+
+        Override in subclasses to extract imports, links, citations, etc.
+        Returns EdgeCandidate objects; resolution to book_ids happens in sync.
+        """
+        return []
 
     def extract_metadata(self, path: Path) -> dict:
         """

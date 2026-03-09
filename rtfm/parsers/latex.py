@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Iterator, Optional
 
-from rtfm.core.models import Chunk
+from rtfm.core.models import Chunk, EdgeCandidate
 from rtfm.parsers.base import BaseParser, ParserRegistry
 
 TARGET_CHUNK_CHARS = 1500
@@ -212,6 +212,42 @@ class LaTeXParser(BaseParser):
                 content_hash=_content_hash(chunk_text),
                 metadata=metadata.get("extended", {}),
             )
+
+    def extract_edges(self, path: Path, metadata: Optional[dict] = None) -> list[EdgeCandidate]:
+        """Extract include/cite edges from LaTeX files."""
+        source_file = (metadata or {}).get("source_file", str(path))
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except (OSError, UnicodeDecodeError):
+            return []
+
+        edges: list[EdgeCandidate] = []
+
+        # \input{file} and \include{file}
+        for m in re.finditer(r'\\(input|include)\s*\{([^}]+)\}', content):
+            cmd = m.group(1)
+            target = m.group(2).strip()
+            edges.append(EdgeCandidate(
+                source_file=source_file,
+                target_ref=target,
+                relation_type="include",
+                source_detail=m.group(0),
+            ))
+
+        # \cite{key}, \citep{key}, \citet{key}, \autocite{key}
+        for m in re.finditer(r'\\(?:cite[pt]?|autocite)\s*\{([^}]+)\}', content):
+            keys = m.group(1).split(",")
+            for key in keys:
+                key = key.strip()
+                if key:
+                    edges.append(EdgeCandidate(
+                        source_file=source_file,
+                        target_ref=key,
+                        relation_type="cite",
+                        source_detail=m.group(0),
+                    ))
+
+        return edges
 
     def extract_metadata(self, path: Path) -> dict:
         meta = {

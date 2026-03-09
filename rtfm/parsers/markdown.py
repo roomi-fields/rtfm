@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Iterator, Optional
 
-from rtfm.core.models import Chunk
+from rtfm.core.models import Chunk, EdgeCandidate
 from rtfm.parsers.base import BaseParser, ParserRegistry
 
 
@@ -253,6 +253,43 @@ class MarkdownParser(BaseParser):
             }]
 
         return sections
+
+    def extract_edges(self, path: Path, metadata: Optional[dict] = None) -> list[EdgeCandidate]:
+        """Extract link edges from Markdown files."""
+        source_file = (metadata or {}).get("source_file", str(path))
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except (OSError, UnicodeDecodeError):
+            return []
+
+        edges: list[EdgeCandidate] = []
+
+        # Standard markdown links: [text](path) — skip http/https/mailto/#
+        for m in re.finditer(r'\[([^\]]*)\]\(([^)]+)\)', content):
+            target = m.group(2).split("#")[0].strip()  # strip anchor
+            if not target:
+                continue
+            if re.match(r'^(https?://|mailto:|#)', target):
+                continue
+            edges.append(EdgeCandidate(
+                source_file=source_file,
+                target_ref=target,
+                relation_type="link",
+                source_detail=f"[{m.group(1)}]({m.group(2)})",
+            ))
+
+        # Wikilinks: [[target]] or [[target|display]]
+        for m in re.finditer(r'\[\[([^\]|]+)(?:\|[^\]]+)?\]\]', content):
+            target = m.group(1).strip()
+            if target:
+                edges.append(EdgeCandidate(
+                    source_file=source_file,
+                    target_ref=target,
+                    relation_type="link",
+                    source_detail=m.group(0),
+                ))
+
+        return edges
 
     def extract_metadata(self, path: Path) -> dict:
         """Extract metadata from markdown file."""

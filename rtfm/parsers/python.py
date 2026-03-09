@@ -12,7 +12,7 @@ import hashlib
 from pathlib import Path
 from typing import Iterator, Optional
 
-from rtfm.core.models import Chunk
+from rtfm.core.models import Chunk, EdgeCandidate
 from rtfm.parsers.base import BaseParser, ParserRegistry
 
 TARGET_CHUNK_CHARS = 1200
@@ -183,6 +183,36 @@ class PythonParser(BaseParser):
                 content_hash=_content_hash(chunk_text),
                 metadata=metadata.get("extended", {}),
             )
+
+    def extract_edges(self, path: Path, metadata: Optional[dict] = None) -> list[EdgeCandidate]:
+        """Extract import edges from Python AST."""
+        source_file = (metadata or {}).get("source_file", str(path))
+        try:
+            source = path.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(source)
+        except (SyntaxError, UnicodeDecodeError):
+            return []
+
+        edges: list[EdgeCandidate] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    edges.append(EdgeCandidate(
+                        source_file=source_file,
+                        target_ref=alias.name,
+                        relation_type="import",
+                        source_detail=f"import {alias.name}",
+                    ))
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    names = ", ".join(a.name for a in node.names)
+                    edges.append(EdgeCandidate(
+                        source_file=source_file,
+                        target_ref=node.module,
+                        relation_type="import",
+                        source_detail=f"from {node.module} import {names}",
+                    ))
+        return edges
 
     def extract_metadata(self, path: Path) -> dict:
         return {

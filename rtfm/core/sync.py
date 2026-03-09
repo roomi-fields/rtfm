@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from rtfm.parsers.base import ParserRegistry
+
 if TYPE_CHECKING:
     from rtfm.core.library import Library
 
@@ -218,6 +220,107 @@ def compute_diff(
     return diff
 
 
+# ── edge sync ─────────────────────────────────────────────────────────────
+
+def _resolve_import_to_relpath(target_ref: str, root: Path) -> str | None:
+    """Resolve a Python import reference to a relative file path within root."""
+    parts = target_ref.replace(".", "/")
+    # Try module.py first, then package/__init__.py
+    for candidate in [f"{parts}.py", f"{parts}/__init__.py"]:
+        if (root / candidate).is_file():
+            return candidate
+    return None
+
+
+def _resolve_link_to_relpath(target_ref: str, source_file: str, root: Path) -> str | None:
+    """Resolve a relative link/include to a relative file path within root."""
+    source_dir = (root / source_file).parent
+    candidate = (source_dir / target_ref).resolve()
+    try:
+        rel = str(candidate.relative_to(root))
+        if candidate.is_file():
+            return rel
+        # LaTeX \input may omit .tex extension
+        if not candidate.suffix:
+            for ext in [".tex", ".latex"]:
+                with_ext = candidate.with_suffix(ext)
+                if with_ext.is_file():
+                    return str(with_ext.relative_to(root))
+    except ValueError:
+        pass
+    return None
+
+
+def _sync_edges(
+    library: "Library",
+    root: Path,
+    corpus: str,
+    files: list[Path],
+) -> None:
+    """Extract edges from files and write them to the edges table."""
+    conn = library._get_conn()
+
+    # Build lookup: relative_path → book_id
+    rows = conn.execute(
+        "SELECT id, filename FROM books WHERE corpus = ?", (corpus,)
+    ).fetchall()
+    path_to_book_id: dict[str, int] = {}
+    for row in rows:
+        if row["filename"]:
+            path_to_book_id[row["filename"]] = row["id"]
+
+    for fpath in files:
+        try:
+            rel = str(fpath.relative_to(root))
+        except ValueError:
+            rel = str(fpath)
+
+        source_book_id = path_to_book_id.get(rel)
+        if not source_book_id:
+            continue
+
+        parser = ParserRegistry.get_parser(fpath)
+        if not parser:
+            continue
+
+        try:
+            candidates = parser.extract_edges(fpath, metadata={"source_file": rel})
+        except Exception:
+            continue
+
+        if not candidates:
+            continue
+
+        # Clear old edges for this source
+        conn.execute("DELETE FROM edges WHERE source_book_id = ?", (source_book_id,))
+
+        for edge in candidates:
+            # Resolve target_ref to a relative file path
+            if edge.relation_type == "import":
+                target_rel = _resolve_import_to_relpath(edge.target_ref, root)
+            elif edge.relation_type in ("link", "include"):
+                target_rel = _resolve_link_to_relpath(edge.target_ref, rel, root)
+            else:
+                # cite: skip resolution for now
+                continue
+
+            if not target_rel:
+                continue
+
+            target_book_id = path_to_book_id.get(target_rel)
+            if not target_book_id or target_book_id == source_book_id:
+                continue
+
+            conn.execute(
+                """INSERT OR IGNORE INTO edges
+                   (source_book_id, target_book_id, relation_type, source_detail)
+                   VALUES (?, ?, ?, ?)""",
+                (source_book_id, target_book_id, edge.relation_type, edge.source_detail),
+            )
+
+    conn.commit()
+
+
 # ── main sync ─────────────────────────────────────────────────────────────
 
 def sync(
@@ -350,6 +453,14 @@ def sync(
                 if old_info and old_info.get("book_slug") and old_info["book_slug"] != book_slug:
                     library.delete_book(old_info["book_slug"])
 
+                # Save version snapshot before re-ingest
+                snap_slug = old_info["book_slug"] if old_info and old_info.get("book_slug") else book_slug
+                old_hash = old_info["file_hash"] if old_info else ""
+                try:
+                    library.save_file_version(snap_slug, old_hash)
+                except Exception:
+                    pass  # Non-critical — versioning is best-effort
+
             # Pass slug and relative path to parser so it doesn't generate its own
             stats = library.ingest(
                 fpath, corpus=corpus,
@@ -388,6 +499,14 @@ def sync(
             if on_progress:
                 on_progress("error", rel, str(exc))
             print(f"[sync] error removing {rel}: {exc}", file=sys.stderr)
+
+    # 6b. Extract and resolve edges
+    if result.added or result.modified:
+        try:
+            _sync_edges(library, root, corpus, diff.added + diff.modified)
+        except Exception as exc:
+            result.errors.append(f"edges: {exc}")
+            print(f"[sync] edge extraction error: {exc}", file=sys.stderr)
 
     # 7. Embeddings (optional, may be slow)
     if generate_embeddings and (result.added or result.modified):
