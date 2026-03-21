@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "rtfm"
-version = "0.3.1"
+name = "rtfm-ai"
+version = "0.3.2"
 description = "RTFM — The open retrieval layer for AI agents. Indexes code, docs, legal, research, data. Extensible parser system. Serves surgical context via MCP."
 readme = "README.md"
 license = "MIT"
@@ -61,6 +61,9 @@ Issues = "https://github.com/roomi-fields/rtfm/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rtfm"]
+
+[tool.mcp]
+name = "io.github.roomi-fields/rtfm"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

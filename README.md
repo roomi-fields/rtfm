@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.roomi-fields/rtfm -->
 <div align="center">
 
 # RTFM

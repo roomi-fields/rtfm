@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.roomi-fields/rtfm",
+  "title": "RTFM",
+  "description": "The open retrieval layer for AI agents — index code, docs, data. Search via MCP.",
+  "repository": {
+    "url": "https://github.com/roomi-fields/rtfm",
+    "source": "github"
+  },
+  "version": "0.3.2",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "rtfm-ai",
+      "version": "0.3.2",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
