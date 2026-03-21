@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "rtfm": {
+      "command": "rtfm-serve",
+      "args": [],
+      "env": {
+        "RTFM_DB": ".rtfm/library.db"
+      }
+    }
+  }
+}
