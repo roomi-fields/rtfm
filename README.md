@@ -11,7 +11,7 @@ Index your entire project — code, docs, legal, research, data — and serve yo
 
 <!-- Badges -->
 
-[![PyPI version](https://badge.fury.io/py/rtfm-ai.svg)](https://pypi.org/project/rtfm-ai/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/) [![MCP](https://img.shields.io/badge/MCP-2025-green.svg)](https://modelcontextprotocol.io/) [![Claude Code](https://img.shields.io/badge/Claude_Code-MCP-8A2BE2)](https://claude.ai/claude-code) [![GitHub](https://img.shields.io/github/stars/roomi-fields/rtfm?style=social)](https://github.com/roomi-fields/rtfm)
+[![PyPI version](https://badge.fury.io/py/rtfm-ai.svg)](https://pypi.org/project/rtfm-ai/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/) [![MCP](https://img.shields.io/badge/MCP-2026-green.svg)](https://modelcontextprotocol.io/) [![Claude Code](https://img.shields.io/badge/Claude_Code-MCP-8A2BE2)](https://claude.ai/claude-code) [![GitHub](https://img.shields.io/github/stars/roomi-fields/rtfm?style=social)](https://github.com/roomi-fields/rtfm)
 
 <!-- End Badges -->
 
@@ -41,6 +41,7 @@ pip install rtfm-ai[mcp] && cd your-project && rtfm init
 - **Semantic search** — optional embeddings (FastEmbed/ONNX, no GPU needed)
 - **Metadata-first** — search returns file paths + scores (~300 tokens), not content dumps
 - **Progressive disclosure** — the agent reads only what it needs via `Read(file_path)`
+- **Knowledge graph** — wikilink + import resolution, hub detection, centrality-based ranking
 
 ### Indexing
 
@@ -48,11 +49,18 @@ pip install rtfm-ai[mcp] && cd your-project && rtfm init
 - **Extensible** — add any format in ~50 lines of Python
 - **Incremental sync** — only re-indexes what changed
 - **Auto-sync** — hooks keep the index fresh every prompt, zero manual work
+- **Wikilink resolution** — `[[links]]` resolved following Obsidian rules, stored as graph edges
+
+### Obsidian
+
+- **`rtfm vault`** — one command to index an Obsidian vault with auto corpus mapping
+- **`_rtfm/` output** — auto-generated navigation files with wikilinks, Mermaid, Dataview frontmatter
+- **Karpathy-compatible** — augments the LLM Wiki pattern with real retrieval at scale
 
 ### Integration
 
 - **MCP server** — works with Claude Code, Cursor, Codex, any MCP client
-- **CLI** — `rtfm search`, `rtfm sync`, `rtfm status`, ...
+- **CLI** — `rtfm search`, `rtfm sync`, `rtfm vault`, `rtfm status`, ...
 - **Python API** — `Library`, `SearchResults`, custom parsers
 - **Non-invasive** — doesn't touch your code, doesn't replace your workflow tools
 
@@ -102,6 +110,8 @@ pip install rtfm-ai[mcp,embeddings,pdf]  # Everything
 | `rtfm_tags`       | List all tags                                         |
 | `rtfm_tag_chunks` | Add tags to specific chunks                           |
 | `rtfm_remove`     | Remove a file from the index                          |
+| `rtfm_graph`      | Show dependency graph for a source (imports, links)   |
+| `rtfm_history`    | File version history and snapshots                    |
 
 ---
 
