@@ -6,7 +6,7 @@ from pathlib import Path
 
 from rtfm import Library
 from rtfm.core.models import EdgeCandidate
-from rtfm.core.sync import sync, _sync_edges
+from rtfm.core.sync import sync, _sync_edges, _resolve_wikilink_to_relpath
 from rtfm.parsers.python import PythonParser
 from rtfm.parsers.markdown import MarkdownParser
 from rtfm.parsers.latex import LaTeXParser
@@ -329,3 +329,109 @@ class TestEdgeCandidate:
             relation_type="import",
         )
         assert edge.source_detail == ""
+
+
+# ── Wikilink Resolution ─────────────────────────────────────────────────
+
+class TestWikilinkResolution:
+    """Tests for _resolve_wikilink_to_relpath."""
+
+    def _files(self, *paths):
+        """Build a {rel_path: fake_book_id} dict."""
+        return {p: i + 1 for i, p in enumerate(paths)}
+
+    def test_exact_basename(self, tmp_path):
+        files = self._files("guide.md", "api/reference.md")
+        result = _resolve_wikilink_to_relpath("guide", "index.md", tmp_path, files)
+        assert result == "guide.md"
+
+    def test_case_insensitive(self, tmp_path):
+        files = self._files("Guide.md", "api/reference.md")
+        result = _resolve_wikilink_to_relpath("guide", "index.md", tmp_path, files)
+        assert result == "Guide.md"
+
+    def test_with_md_extension(self, tmp_path):
+        files = self._files("guide.md")
+        result = _resolve_wikilink_to_relpath("guide.md", "index.md", tmp_path, files)
+        assert result == "guide.md"
+
+    def test_with_anchor(self, tmp_path):
+        files = self._files("guide.md")
+        result = _resolve_wikilink_to_relpath("guide#section", "index.md", tmp_path, files)
+        assert result == "guide.md"
+
+    def test_path_suffix(self, tmp_path):
+        files = self._files("docs/api/reference.md", "other.md")
+        result = _resolve_wikilink_to_relpath("api/reference", "index.md", tmp_path, files)
+        assert result == "docs/api/reference.md"
+
+    def test_ambiguous_prefers_nearest(self, tmp_path):
+        files = self._files("a/notes.md", "b/sub/notes.md")
+        # Source is in "a/" → "a/notes.md" is closer
+        result = _resolve_wikilink_to_relpath("notes", "a/index.md", tmp_path, files)
+        assert result == "a/notes.md"
+
+    def test_ambiguous_prefers_nearest_reverse(self, tmp_path):
+        files = self._files("a/notes.md", "b/sub/notes.md")
+        # Source is in "b/sub/" → "b/sub/notes.md" is closer
+        result = _resolve_wikilink_to_relpath("notes", "b/sub/index.md", tmp_path, files)
+        assert result == "b/sub/notes.md"
+
+    def test_unresolved_returns_none(self, tmp_path):
+        files = self._files("guide.md")
+        result = _resolve_wikilink_to_relpath("nonexistent", "index.md", tmp_path, files)
+        assert result is None
+
+    def test_anchor_only_returns_none(self, tmp_path):
+        files = self._files("guide.md")
+        result = _resolve_wikilink_to_relpath("#section", "index.md", tmp_path, files)
+        assert result is None
+
+    def test_empty_returns_none(self, tmp_path):
+        files = self._files("guide.md")
+        result = _resolve_wikilink_to_relpath("", "index.md", tmp_path, files)
+        assert result is None
+
+
+class TestWikilinkSyncIntegration:
+    """Test that wikilinks produce resolved edges during sync."""
+
+    def test_wikilink_edges_resolved(self, graph_db, tmp_path):
+        """Wikilinks in markdown should produce edges with resolved book_ids."""
+        (tmp_path / "index.md").write_text(
+            "# Index\n\n"
+            "Check [[guide]] for getting started.\n"
+            "Also see [[api/reference]] for the API.\n"
+            "Enough content to pass minimum chunk size for indexing.\n"
+            "We need at least 100 chars of content for the parser.\n"
+        )
+        (tmp_path / "guide.md").write_text(
+            "# Guide\n\n"
+            "Back to [[index]] for overview.\n"
+            "Enough content to pass minimum chunk size for indexing.\n"
+            "We need at least 100 chars of content for the parser.\n"
+        )
+        api_dir = tmp_path / "api"
+        api_dir.mkdir()
+        (api_dir / "reference.md").write_text(
+            "# API Reference\n\n"
+            "See [[guide]] for getting started.\n"
+            "Enough content to pass minimum chunk size for indexing.\n"
+            "We need at least 100 chars of content for the parser.\n"
+        )
+
+        sync(graph_db, tmp_path, corpus="test", generate_embeddings=False)
+
+        # Check edges exist
+        stats = graph_db.get_graph_stats()
+        assert stats["total_edges"] > 0, "Wikilinks should produce edges"
+
+        # index.md links to guide.md → outgoing edge
+        neighbors = graph_db.get_neighbors("test--index", direction="outgoing")
+        neighbor_files = [n["filename"] for n in neighbors]
+        assert "guide.md" in neighbor_files, f"Expected guide.md in {neighbor_files}"
+
+        # guide.md links back to index.md → index has incoming
+        incoming = graph_db.get_neighbors("test--index", direction="incoming")
+        incoming_files = [n["filename"] for n in incoming]
+        assert "guide.md" in incoming_files, f"Expected guide.md in {incoming_files}"

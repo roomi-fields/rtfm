@@ -87,3 +87,11 @@ rtfm init --no-embeddings
 3. **Zero config** — `rtfm init` should just work
 4. **Incremental** — Only re-index what changed
 5. **Complementary** — Works WITH workflow tools, doesn't replace them
+
+## RTFM — Indexed Knowledge Base
+
+This project has been indexed with RTFM.
+
+For any **exploratory search** (finding which files/modules/classes are relevant
+to a topic), use `rtfm_search` instead of Glob, find, ls, or broad Grep.
+Then use `rtfm_expand` to read easily most relevant files/sections.

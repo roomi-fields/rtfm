@@ -232,6 +232,67 @@ def _resolve_import_to_relpath(target_ref: str, root: Path) -> str | None:
     return None
 
 
+def _resolve_wikilink_to_relpath(
+    target_ref: str,
+    source_file: str,
+    root: Path,
+    all_files: dict[str, int],
+) -> str | None:
+    """Resolve an Obsidian-style wikilink to a relative file path.
+
+    Follows Obsidian resolution rules:
+    1. Strip anchor (``[[Note#Section]]`` → ``Note``)
+    2. Exact path match (with or without ``.md``)
+    3. Basename match (case-insensitive)
+    4. Path-suffix match for qualified refs (``[[folder/Note]]``)
+    5. Disambiguate by shortest path distance from source file
+    """
+    target = target_ref.split("#")[0].strip()
+    if not target:
+        return None
+
+    target_lower = target.lower()
+    target_md_lower = f"{target_lower}.md" if not target_lower.endswith(".md") else target_lower
+
+    # Exact path match
+    for rel_path in all_files:
+        if rel_path == target or rel_path == f"{target}.md":
+            return rel_path
+
+    # Basename + path-suffix match
+    candidates: list[str] = []
+    target_stem = Path(target).stem.lower()
+    for rel_path in all_files:
+        p = Path(rel_path)
+        # Basename match (case-insensitive, .md files)
+        if p.stem.lower() == target_stem and p.suffix.lower() == ".md":
+            candidates.append(rel_path)
+        # Path-suffix match: [[folder/Note]] matches "some/folder/Note.md"
+        elif rel_path.lower().endswith(target_md_lower) or rel_path.lower().endswith(target_lower):
+            candidates.append(rel_path)
+
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Disambiguate: prefer file closest to source in directory tree
+    source_parts = Path(source_file).parent.parts
+
+    def _distance(c: str) -> int:
+        c_parts = Path(c).parent.parts
+        common = 0
+        for a, b in zip(source_parts, c_parts):
+            if a == b:
+                common += 1
+            else:
+                break
+        return len(source_parts) + len(c_parts) - 2 * common
+
+    candidates.sort(key=_distance)
+    return candidates[0]
+
+
 def _resolve_link_to_relpath(target_ref: str, source_file: str, root: Path) -> str | None:
     """Resolve a relative link/include to a relative file path within root."""
     source_dir = (root / source_file).parent
@@ -299,7 +360,13 @@ def _sync_edges(
             if edge.relation_type == "import":
                 target_rel = _resolve_import_to_relpath(edge.target_ref, root)
             elif edge.relation_type in ("link", "include"):
-                target_rel = _resolve_link_to_relpath(edge.target_ref, rel, root)
+                if edge.source_detail.startswith("[["):
+                    # Wikilink: basename-based resolution (Obsidian style)
+                    target_rel = _resolve_wikilink_to_relpath(
+                        edge.target_ref, rel, root, path_to_book_id
+                    )
+                else:
+                    target_rel = _resolve_link_to_relpath(edge.target_ref, rel, root)
             else:
                 # cite: skip resolution for now
                 continue
@@ -507,6 +574,17 @@ def sync(
         except Exception as exc:
             result.errors.append(f"edges: {exc}")
             print(f"[sync] edge extraction error: {exc}", file=sys.stderr)
+
+    # 6c. Update vault output (lightweight: recent page only)
+    if result.added or result.modified:
+        try:
+            from rtfm.config import load_config
+            cfg = load_config(root)
+            if cfg.get("vault_type") == "obsidian":
+                from rtfm.plugin.vault_output import update_recent_page
+                update_recent_page(library, root)
+        except Exception:
+            pass  # Non-critical
 
     # 7. Embeddings (optional, may be slow)
     if generate_embeddings and (result.added or result.modified):

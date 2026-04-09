@@ -180,6 +180,31 @@ RTFM works anywhere your project isn't just code:
 
 ---
 
+## Obsidian Vault Integration
+
+RTFM is the retrieval layer for [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern. When your Obsidian vault outgrows `index.md`, RTFM takes over — with real search, wikilink resolution, and auto-generated navigation.
+
+```bash
+cd /path/to/your-obsidian-vault
+rtfm vault
+```
+
+This indexes the vault by corpus, resolves `[[wikilinks]]` into a knowledge graph, and generates `_rtfm/` — Obsidian-native navigation files with frontmatter, backlink counts, Mermaid diagrams, and Dataview-queryable metadata.
+
+```
+_rtfm/
+├── index.md      # Hub: corpus list, top connected documents
+├── graph.md      # Hub documents, orphans, broken links, Mermaid
+├── recent.md     # Recently modified files
+└── corpus/       # Per-corpus indexes
+```
+
+The LLM still writes your wiki. RTFM handles the retrieval that `index.md` can't scale.
+
+**[Full guide →](docs/obsidian-vault-guide.md)**
+
+---
+
 ## CLI Reference
 
 ```bash
@@ -195,6 +220,11 @@ rtfm sync . --force                    # Force re-index
 # Source management
 rtfm add /path/to/docs --corpus docs --extensions md,pdf
 rtfm sources
+
+# Obsidian vault
+rtfm vault                             # Initialize for Obsidian vault (cwd)
+rtfm vault /path/to/vault              # Initialize specific vault
+rtfm vault --regenerate                # Regenerate _rtfm/ navigation files
 
 # Status & info
 rtfm status

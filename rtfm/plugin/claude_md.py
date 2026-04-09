@@ -15,8 +15,16 @@ to a topic), use `rtfm_search` instead of Glob, find, ls, or broad Grep.
 Then use `rtfm_expand` to read easily most relevant files/sections.
 """
 
+RTFM_VAULT_TEMPLATE = """## RTFM — Indexed Knowledge Base
 
-def inject_claude_md(project_root: str | Path) -> str:
+This vault is indexed by RTFM. See [[_rtfm/index]] for navigation.
+
+Use `rtfm_search` for exploratory search, `rtfm_expand` to read sections.
+Browse the knowledge graph at [[_rtfm/graph]].
+"""
+
+
+def inject_claude_md(project_root: str | Path, vault_mode: bool = False) -> str:
     """Inject RTFM instructions into the project's CLAUDE.md.
 
     Creates the file if it doesn't exist. Appends the RTFM section if not
@@ -24,12 +32,14 @@ def inject_claude_md(project_root: str | Path) -> str:
 
     Args:
         project_root: Path to the project root.
+        vault_mode: If True, use vault template with wikilinks.
 
     Returns:
         One of "created", "appended", or "skipped".
     """
     project_root = Path(project_root)
     claude_md = project_root / "CLAUDE.md"
+    template = RTFM_VAULT_TEMPLATE if vault_mode else RTFM_TEMPLATE
 
     if claude_md.exists():
         content = claude_md.read_text(encoding="utf-8")
@@ -41,10 +51,10 @@ def inject_claude_md(project_root: str | Path) -> str:
         # Append
         separator = "\n" if content.endswith("\n") else "\n\n"
         claude_md.write_text(
-            content + separator + RTFM_TEMPLATE,
+            content + separator + template,
             encoding="utf-8",
         )
         return "appended"
     else:
-        claude_md.write_text(RTFM_TEMPLATE, encoding="utf-8")
+        claude_md.write_text(template, encoding="utf-8")
         return "created"

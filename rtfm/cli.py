@@ -654,6 +654,11 @@ def cmd_init(args):
 
     root = Path(".").resolve()
 
+    # Hint: if this looks like an Obsidian vault, suggest rtfm vault
+    if (root / ".obsidian").is_dir():
+        print("Tip: This looks like an Obsidian vault. "
+              "Run 'rtfm vault' for Obsidian-specific features.\n")
+
     print(f"Initializing RTFM in {root} ...")
 
     summary = init_project(
@@ -673,6 +678,75 @@ def cmd_init(args):
     sync_info = summary["sync"]
     print(f"Synced: {sync_info['added']} entry-point files")
     print("Done.")
+
+
+def cmd_vault(args):
+    """Initialize RTFM for an Obsidian vault."""
+    from rtfm.plugin.vault import detect_obsidian_vault, init_vault, propose_corpus_mapping
+
+    vault_path = Path(args.path).resolve()
+
+    # Detect vault
+    vault_info = detect_obsidian_vault(vault_path)
+    if not vault_info:
+        print(f"No Obsidian vault found at {vault_path}")
+        print("(Looking for .obsidian/ directory)")
+        sys.exit(1)
+
+    print(f"Obsidian vault detected: {vault_path}\n")
+
+    # Regenerate-only mode
+    if args.regenerate:
+        from rtfm.config import load_config, resolve_db
+        from rtfm.core.library import Library
+        from rtfm.plugin.vault_output import generate_vault_output
+
+        db_path = resolve_db(None)
+        lib = Library(db_path)
+        config = load_config(vault_path)
+        result = generate_vault_output(lib, vault_path, config)
+        lib.close()
+        print(f"Regenerated {result['count']} files:")
+        for f in result["files_written"]:
+            print(f"  {f}")
+        return
+
+    # Propose corpus mapping
+    mapping = propose_corpus_mapping(vault_path)
+    print(f"Corpus mapping ({len(mapping)} corpora):")
+    for m in mapping:
+        print(f"  [{m['corpus']}] {m['path']} ({m['file_count']} files)")
+    print()
+
+    # Initialize
+    print("Initializing...")
+    summary = init_vault(
+        vault_path,
+        corpus_mapping=mapping,
+        no_embeddings=args.no_embeddings,
+        generate_output=not args.no_output,
+    )
+
+    if "error" in summary:
+        print(f"Error: {summary['error']}")
+        sys.exit(1)
+
+    print(f"\nDatabase: {summary['db_path']}")
+    print(f".mcp.json: {summary.get('mcp_json', '?')}")
+    print(f"CLAUDE.md: {summary.get('claude_md', '?')}")
+
+    sync_info = summary.get("sync", {})
+    for corpus_name, info in sync_info.items():
+        if "error" in info:
+            print(f"  [{corpus_name}] error: {info['error']}")
+        else:
+            print(f"  [{corpus_name}] +{info.get('added', 0)} files")
+
+    output = summary.get("output", {})
+    if isinstance(output, dict) and "count" in output:
+        print(f"\n_rtfm/ output: {output['count']} files generated")
+
+    print("\nDone. Open Obsidian and check _rtfm/index.md")
 
 
 def cmd_monitor(args):
@@ -959,6 +1033,14 @@ def main():
     p_init.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
     p_init.add_argument("--no-hook", action="store_true", help="Don't install auto-sync hook")
     p_init.set_defaults(func=cmd_init)
+
+    # vault (Obsidian vault initialization)
+    p_vault = subparsers.add_parser("vault", help="Initialize RTFM for an Obsidian vault")
+    p_vault.add_argument("path", nargs="?", default=".", help="Path to Obsidian vault (default: cwd)")
+    p_vault.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
+    p_vault.add_argument("--no-output", action="store_true", help="Skip _rtfm/ output generation")
+    p_vault.add_argument("--regenerate", action="store_true", help="Only regenerate _rtfm/ output")
+    p_vault.set_defaults(func=cmd_vault)
 
     # monitor
     p_monitor = subparsers.add_parser("monitor", help="Tail the RTFM log (live MCP/hook activity)")
