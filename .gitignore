@@ -56,3 +56,6 @@ tests/real_*.html
 
 # Scratch/local scripts
 scripts/
+
+# RTFM
+_rtfm/

@@ -1,0 +1,16 @@
+{
+  "userIgnoreFilters": [
+    ".venv/",
+    "node_modules/",
+    ".git/",
+    ".pytest_cache/",
+    "__pycache__/",
+    "dist/",
+    ".eggs/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    "*.pyc",
+    "*.whl",
+    "*.egg-info"
+  ]
+}
