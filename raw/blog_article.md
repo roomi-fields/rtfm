@@ -1,290 +1,290 @@
-# Et si un agent IA savait qu'il ne sait pas ?
+# What if an AI agent knew what it didn't know?
 
-## Comment un simple outil de recherche transforme les performances des agents codeurs sur les grands projets
+## How a simple search tool transforms coding-agent performance on large projects
 
-*Romi Fields — Mars 2026*
+*Romi Fields — March 2026*
 
 ---
 
-## 1. Le problème que personne ne mesure
+## 1. The problem nobody measures
 
-Les agents codeurs sont partout. Claude Code, Cursor, Windsurf, SWE-agent — ils écrivent du code, corrigent des bugs, implémentent des fonctionnalités. Les benchmarks se succèdent : SWE-bench affiche 74% de résolution avec les meilleurs modèles, et les entreprises rivalisent de chiffres impressionnants.
+Coding agents are everywhere. Claude Code, Cursor, Windsurf, SWE-agent — they write code, fix bugs, implement features. Benchmarks pile up: SWE-bench reports 74% resolution with the best models, and companies compete with impressive numbers.
 
-Mais il y a un angle mort.
+But there's a blind spot.
 
-Quand on observe ce que fait réellement un agent codeur pendant une tâche, on découvre quelque chose de surprenant : **il ne code pas la plupart du temps**. Une étude de trajectoires d'agents sur SWE-bench (Trajectory Study, 2025) révèle que 38% des actions sont de l'exploration — des `grep`, des `find`, des lectures de fichiers — pas de l'écriture de code. L'agent cherche. Il tâtonne. Il ouvre des fichiers, les referme, en ouvre d'autres. Sur les agents qui échouent, ce ratio monte encore : ils tournent en boucle dans le code source sans trouver ce qu'ils cherchent.
+When you actually observe what a coding agent does during a task, you discover something surprising: **it isn't coding most of the time**. A trajectory study of agents on SWE-bench (Trajectory Study, 2025) reveals that 38% of actions are exploration — `grep`, `find`, file reads — not code writing. The agent searches. It fumbles. It opens files, closes them, opens others. On failing agents, this ratio is even higher: they loop through the source code without finding what they're looking for.
 
-Ce phénomène porte un nom dans la littérature : **le goulot de localisation**. Avant de pouvoir coder, l'agent doit d'abord *trouver* où coder. Et c'est là que les choses se compliquent.
+This phenomenon has a name in the literature: **the localization bottleneck**. Before being able to code, the agent must first *find* where to code. And that's where things get complicated.
 
-PatchPilot (ICML 2025) a quantifié ce problème : la capacité de localisation compte pour environ 47% de l'amélioration totale d'un agent. Dit autrement, si vous améliorez la capacité d'un agent à *trouver* le bon code, vous améliorez presque autant ses résultats que si vous amélioriez sa capacité à *écrire* du code. Agentless (Xia et al., 2024) a montré qu'une approche hiérarchique — chercher d'abord le bon fichier, puis la bonne fonction, puis la bonne ligne — atteint 77.7% de rappel au niveau fichier mais seulement 50.8% au niveau ligne. Localiser est difficile.
+PatchPilot (ICML 2025) quantified this problem: localization capability accounts for roughly 47% of the total improvement of an agent. In other words, if you improve an agent's ability to *find* the right code, you improve its results almost as much as if you improved its ability to *write* code. Agentless (Xia et al., 2024) showed that a hierarchical approach — first find the right file, then the right function, then the right line — reaches 77.7% file-level recall but only 50.8% line-level recall. Localization is hard.
 
-Et plus le projet est grand, plus c'est difficile. Un repo de 600 fichiers, un agent le parcourt assez vite. Un repo de 8 000 fichiers ? C'est une autre histoire.
+And the bigger the project, the harder it is. A repo of 600 files, an agent can traverse it quickly. A repo of 8,000 files? That's another story.
 
-### Le gap oracle : la preuve que le retrieval compte
+### The oracle gap: proof that retrieval matters
 
-Le résultat le plus frappant vient de CodeRAG-Bench (Wang et al., NAACL 2025). Les auteurs ont mesuré la performance de modèles de code dans trois conditions : sans contexte, avec du contexte récupéré par un système de recherche (BM25), et avec le *contexte parfait* — un oracle qui donne exactement les fichiers pertinents.
+The most striking result comes from CodeRAG-Bench (Wang et al., NAACL 2025). The authors measured the performance of code models under three conditions: without context, with context retrieved by a search system (BM25), and with the *perfect context* — an oracle that hands exactly the relevant files.
 
-Les résultats sont vertigineux :
+The results are staggering:
 
-| Condition | StarCoder2-7B sur HumanEval |
+| Condition | StarCoder2-7B on HumanEval |
 |---|---|
-| Sans contexte | 31.7% |
-| Avec BM25 (recherche lexicale) | 43.9% |
-| **Avec contexte oracle** | **94.5%** |
+| Without context | 31.7% |
+| With BM25 (lexical search) | 43.9% |
+| **With oracle context** | **94.5%** |
 
-De 31.7% à 94.5%. Le même modèle, la même tâche. La seule différence : la qualité du contexte fourni. L'écart entre le meilleur retrieval actuel et l'oracle est de 9 à 50 points de pourcentage selon le modèle et la tâche. Chaque point de qualité de retrieval se traduit directement en performance.
+From 31.7% to 94.5%. Same model, same task. The only difference: the quality of context provided. The gap between the best current retrieval and the oracle is 9 to 50 percentage points depending on the model and task. Every point of retrieval quality translates directly into performance.
 
-La conclusion est limpide : **le facteur limitant n'est pas le modèle, c'est le contexte**.
-
----
-
-## 2. Les outils aveugles des agents actuels
-
-Comment un agent codeur explore-t-il un projet aujourd'hui ? Avec `grep`, `glob`, `find` et `cat`. Des outils conçus pour les humains dans les années 1970. L'agent fait un `grep -r "validate" .` et obtient 847 résultats. Il en lit 12, abandonne, essaie une autre requête. Recommence.
-
-Ces outils ont trois problèmes fondamentaux quand ils sont utilisés par un agent IA :
-
-**1. Ils sont aveugles.** `grep` ne connaît pas la structure du projet. Il ne sait pas que `validation.py` est lié à `scorers.py` qui dépend de `data.py`. Il cherche des motifs textuels dans des fichiers, sans notion de sémantique ni de structure.
-
-**2. Ils sont coûteux en contexte.** Chaque résultat de `grep` est chargé dans la fenêtre de contexte de l'agent. Et la littérature montre que trop de contexte *dégrade* la performance. Hong et al. (2025) ont démontré ce qu'ils appellent le "context rot" : au-delà d'un certain seuil, ajouter du contexte fait baisser la qualité des réponses du modèle. ContextBench (2025) va plus loin : même quand les agents trouvent le bon contexte (AUC-Cov > 0.70), seuls 50 à 70% de l'information est effectivement retenue dans la réponse finale. Voir n'est pas utiliser.
-
-**3. Ils ne savent pas quand s'arrêter.** L'agent n'a pas de signal lui indiquant "tu as trouvé ce qu'il faut" ou "cette piste est une impasse". AgentDiet (2025) a montré que 40 à 60% des tokens d'exploration sont du gaspillage pur — on peut les retirer sans affecter le résultat final.
-
-### Le paradoxe métacognitif
-
-Il y a un problème plus profond encore. Les LLMs ne savent pas ce qu'ils ne savent pas. Ackerman et al. (2025) ont étudié les capacités métacognitives des modèles de langage et conclu qu'elles sont "croissantes mais limitées en résolution, dépendantes du contexte, et qualitativement différentes de l'humain". En clair : un LLM ne peut pas évaluer finement ce qui lui manque comme information.
-
-C'est là que réside notre intuition centrale. L'agent n'a pas besoin de *savoir* ce qu'il ne sait pas. Il a besoin d'un moyen de *vérifier* à faible coût. Un outil de recherche, c'est exactement ça : une prothèse métacognitive. L'agent peut se demander "est-ce que ce projet a un module de validation ?" et obtenir une réponse en 300 tokens au lieu de naviguer pendant 15 minutes dans l'arborescence.
+The conclusion is clear: **the limiting factor is not the model, it's the context**.
 
 ---
 
-## 3. RTFM : un outil qui ne touche qu'à ce qu'il doit
+## 2. The blind tools of today's agents
 
-### La philosophie agnostique
+How does a coding agent explore a project today? With `grep`, `glob`, `find` and `cat`. Tools designed for humans in the 1970s. The agent runs `grep -r "validate" .` and gets 847 results. It reads 12, gives up, tries another query. Starts over.
 
-Face à ce constat, nous avons construit RTFM — un outil de retrieval conçu selon un principe simple : **aider là où c'est nécessaire, ne rien toucher au reste**.
+These tools have three fundamental problems when used by an AI agent:
 
-RTFM n'est pas un outil de code. C'est un outil de connaissance. Cette distinction est importante. Les outils existants — Augment Context Engine, Sourcegraph Cody, Code-Index-MCP — indexent du code. RTFM indexe *tout* : code Python (via l'AST), documentation Markdown, fichiers LaTeX, configurations YAML et JSON, scripts shell, documents PDF, textes juridiques XML, pages HTML. Le même outil peut servir un développeur qui cherche une fonction, un juriste qui cherche un article de loi, ou un chercheur qui cherche une référence dans ses notes.
+**1. They are blind.** `grep` doesn't know the project's structure. It doesn't know that `validation.py` is linked to `scorers.py` which depends on `data.py`. It searches for textual patterns in files, with no notion of semantics or structure.
 
-Cette universalité n'est pas un caprice d'ingénierie. C'est une conséquence directe de la thèse : si le facteur limitant est la capacité à trouver le bon contexte, alors l'outil de recherche ne devrait pas présumer de la nature du contexte. Un agent qui travaille sur un projet réel a besoin de trouver à la fois le code existant, la documentation des contraintes métier, les tests correspondants, et peut-être les spécifications du client — tout ça dans le même projet, avec le même outil.
+**2. They are context-expensive.** Every `grep` result is loaded into the agent's context window. And the literature shows that too much context *degrades* performance. Hong et al. (2025) demonstrated what they call "context rot": beyond a certain threshold, adding context decreases model answer quality. ContextBench (2025) goes further: even when agents find the right context (AUC-Cov > 0.70), only 50 to 70% of the information is actually retained in the final response. Seeing is not using.
 
-Cinq principes de design guident RTFM :
+**3. They don't know when to stop.** The agent has no signal telling it "you found what you needed" or "this trail is a dead end". AgentDiet (2025) showed that 40 to 60% of exploration tokens are pure waste — you can strip them without affecting the final result.
 
-**Domain-agnostic.** 10 parsers embarqués, mais surtout : ajouter un nouveau format demande environ 50 lignes de Python. Hériter de `BaseParser`, implémenter `parse()`, c'est tout. Le système ne présume pas du format — il s'adapte.
+### The metacognitive paradox
 
-**Protocol-agnostic.** RTFM est exposé via MCP (Model Context Protocol), le standard ouvert d'Anthropic pour la communication agent-outils. Il fonctionne avec tout agent MCP-compatible : Claude Code, Continue.dev, Cursor, ou n'importe quel client MCP. Pas de dépendance à un IDE ou un fournisseur.
+There's an even deeper problem. LLMs do not know what they don't know. Ackerman et al. (2025) studied the metacognitive capabilities of language models and concluded they are "increasing but limited in resolution, context-dependent, and qualitatively different from humans." Plainly put: an LLM cannot finely evaluate what information it is missing.
 
-**Model-agnostic.** Pur retrieval, zéro génération. Pas de modèle de langage embarqué. RTFM renvoie des résultats de recherche ; le modèle de l'agent décide quoi en faire. Que l'agent tourne sur Claude, GPT, Gemini ou un modèle open-source ne change rien.
-
-**Non-invasif.** RTFM ne modifie pas le workflow de l'agent. Il ajoute des outils de recherche. L'agent peut les utiliser ou les ignorer. Il remplace la navigation aveugle quand c'est pertinent — et ne touche pas au reste. Pas de retrieval forcé, pas de contexte injecté silencieusement dans le prompt.
-
-**Économe en contexte.** C'est le point d'architecture le plus important.
-
-### Le pattern metadata-first
-
-RTFM utilise un pattern de *progressive disclosure* en deux étapes :
-
-1. **`rtfm_search("validation mlflow")`** → renvoie ~300 tokens de *métadonnées* : titre du chunk, chemin absolu du fichier source, score de pertinence. Pas de contenu. Juste assez pour que l'agent sache si le résultat est pertinent et où aller le lire.
-
-2. L'agent lit le fichier directement via son outil `Read(file_path)` standard — le chemin absolu est dans les résultats. Il charge uniquement ce dont il a besoin, quand il en a besoin.
-
-Ce pattern est l'opposé du "dump tout le contexte" qui provoque le context rot. L'agent ne consomme du contexte que pour ce qui est pertinent, au moment où c'est pertinent. Sur 5 résultats de recherche, l'agent ne lit peut-être que 2 fichiers — les 300 tokens de métadonnées des 3 autres n'ont pas pollué sa fenêtre de contexte avec du contenu inutile.
-
-En termes techniques : SQLite + FTS5 (BM25) comme socle, avec des embeddings optionnels via FastEmbed (ONNX). Base de données portable — un seul fichier `.db`. Synchronisation incrémentale par hash SHA-256.
-
-### Et le paysage concurrentiel ?
-
-Ce type d'outil n'est plus novel en 2026. Augment Code propose un Context Engine MCP (payant, propriétaire, $20-200/mois). Sourcegraph Cody expose ses capacités via MCP (enterprise-only). Plusieurs outils open-source existent : Code-Index-MCP, mcp-codebase-index, CodeCompass.
-
-Mais aucun d'entre eux n'a publié d'évaluation rigoureuse. Augment revendique "+80% de performance avec Claude Code" — sans protocole publié, sans benchmark standardisé, sans intervalles de confiance. CodeCompass a été évalué sur 30 micro-tâches synthétiques créées par les auteurs. Les outils open-source n'ont aucune évaluation publiée.
-
-C'est ce trou que nous avons décidé de combler : **pas un nouvel outil, mais la première évaluation contrôlée d'un outil de retrieval pour agents codeurs sur un benchmark standardisé.**
+That's where our central intuition lies. The agent doesn't need to *know* what it doesn't know. It needs a way to *check* at low cost. A search tool is exactly that: a metacognitive prosthesis. The agent can ask itself "does this project have a validation module?" and get an answer in 300 tokens instead of spending 15 minutes navigating the tree.
 
 ---
 
-## 4. L'expérience : 4 conditions, même tâches, même modèle
+## 3. RTFM: a tool that only touches what it should
 
-### FeatureBench comme terrain de jeu
+### The agnostic philosophy
 
-Pour évaluer rigoureusement l'impact du retrieval, il nous fallait un benchmark qui satisfasse trois critères : des tâches réalistes (pas des fonctions isolées), des projets de tailles variées, et une évaluation automatique fiable.
+Faced with this observation, we built RTFM — a retrieval tool designed around a simple principle: **help where it's needed, touch nothing else**.
 
-FeatureBench (ICLR 2026) coche ces cases. Contrairement à SWE-bench qui se concentre sur la correction de bugs (et souffre de contamination prouvée — SWE-Bench Illusion, 2025), FeatureBench demande d'*implémenter des fonctionnalités nouvelles* dans des projets réels. C'est plus dur : le meilleur score publié est 11%, contre 74% sur SWE-bench Verified. Et surtout, ça nécessite de comprendre l'architecture du projet avant de coder.
+RTFM is not a code tool. It is a knowledge tool. This distinction matters. Existing tools — Augment Context Engine, Sourcegraph Cody, Code-Index-MCP — index code. RTFM indexes *everything*: Python code (via AST), Markdown documentation, LaTeX files, YAML and JSON configurations, shell scripts, PDF documents, XML legal texts, HTML pages. The same tool can serve a developer looking for a function, a lawyer looking for a legal article, or a researcher looking for a reference in their notes.
 
-Nous avons sélectionné 11 tâches dans 4 repos de tailles croissantes :
+This universality is not an engineering whim. It is a direct consequence of the thesis: if the limiting factor is the ability to find the right context, then the search tool shouldn't presume the nature of the context. An agent working on a real project needs to find existing code, documentation of business constraints, the corresponding tests, and perhaps the client's specifications — all in the same project, with the same tool.
 
-| Repo | Fichiers indexés | Tâches |
+Five design principles guide RTFM:
+
+**Domain-agnostic.** 10 built-in parsers, but above all: adding a new format takes roughly 50 lines of Python. Inherit from `BaseParser`, implement `parse()`, that's it. The system doesn't presume the format — it adapts.
+
+**Protocol-agnostic.** RTFM is exposed via MCP (Model Context Protocol), Anthropic's open standard for agent-tool communication. It works with any MCP-compatible agent: Claude Code, Continue.dev, Cursor, or any MCP client. No dependency on a specific IDE or vendor.
+
+**Model-agnostic.** Pure retrieval, zero generation. No embedded language model. RTFM returns search results; the agent's model decides what to do with them. Whether the agent runs on Claude, GPT, Gemini, or an open-source model changes nothing.
+
+**Non-invasive.** RTFM doesn't modify the agent's workflow. It adds search tools. The agent can use or ignore them. It replaces blind navigation when relevant — and doesn't touch the rest. No forced retrieval, no context silently injected into the prompt.
+
+**Context-thrifty.** This is the most important architectural point.
+
+### The metadata-first pattern
+
+RTFM uses a two-step *progressive disclosure* pattern:
+
+1. **`rtfm_search("validation mlflow")`** → returns ~300 tokens of *metadata*: chunk title, absolute source-file path, relevance score. No content. Just enough for the agent to know whether the result is relevant and where to go read it.
+
+2. The agent reads the file directly via its standard `Read(file_path)` tool — the absolute path is in the results. It loads only what it needs, when it needs it.
+
+This pattern is the opposite of the "dump the whole context" approach that causes context rot. The agent only consumes context for what is relevant, when it is relevant. Out of 5 search results, the agent may only read 2 files — the 300 tokens of metadata for the other 3 never polluted its context window with useless content.
+
+On the technical side: SQLite + FTS5 (BM25) as the backbone, with optional embeddings via FastEmbed (ONNX). Portable database — a single `.db` file. Incremental synchronization via SHA-256 hashing.
+
+### What about the competitive landscape?
+
+This kind of tool is no longer novel in 2026. Augment Code offers a Context Engine MCP (paid, proprietary, $20-200/month). Sourcegraph Cody exposes its capabilities via MCP (enterprise-only). Several open-source tools exist: Code-Index-MCP, mcp-codebase-index, CodeCompass.
+
+But none of them has published a rigorous evaluation. Augment claims "+80% performance with Claude Code" — no published protocol, no standardized benchmark, no confidence intervals. CodeCompass was evaluated on 30 synthetic micro-tasks created by the authors. The open-source tools have no published evaluation at all.
+
+That is the gap we decided to fill: **not a new tool, but the first controlled evaluation of a retrieval tool for coding agents on a standardized benchmark.**
+
+---
+
+## 4. The experiment: 4 conditions, same tasks, same model
+
+### FeatureBench as the playground
+
+To rigorously evaluate the impact of retrieval, we needed a benchmark that meets three criteria: realistic tasks (not isolated functions), projects of varying sizes, and a reliable automatic evaluation.
+
+FeatureBench (ICLR 2026) checks those boxes. Unlike SWE-bench, which focuses on bug fixing (and suffers from proven contamination — SWE-Bench Illusion, 2025), FeatureBench asks agents to *implement new features* in real projects. It's harder: the best published score is 11%, versus 74% on SWE-bench Verified. And crucially, it requires understanding the project's architecture before coding.
+
+We selected 11 tasks across 4 repos of increasing size:
+
+| Repo | Indexed files | Tasks |
 |---|---|---|
 | metaflow (Netflix) | 624 | 1 |
 | pydantic | 771 | 1 |
-| astropy | 1 123 | 2 |
-| mlflow | 8 260 | 7 |
+| astropy | 1,123 | 2 |
+| mlflow | 8,260 | 7 |
 
-### Les 4 conditions
+### The 4 conditions
 
-La variable que nous isolons est simple : **est-ce que l'agent a accès à un outil de recherche pré-indexé ?**
+The variable we isolate is simple: **does the agent have access to a pre-indexed search tool?**
 
-Pour le tester proprement, nous avons conçu 4 configurations expérimentales :
+To test this cleanly, we designed 4 experimental configurations:
 
-**Config A — Standard (contrôle positif).** Le prompt FeatureBench original. Il contient les chemins des fichiers à modifier et les interfaces à implémenter. C'est une condition semi-oracle : l'agent sait déjà *où* coder. En pratique, c'est irréaliste — un développeur qui lance un agent sur un ticket Jira ne lui donne pas la liste des fichiers à modifier.
+**Config A — Standard (positive control).** The original FeatureBench prompt. It contains the paths of files to modify and the interfaces to implement. This is a semi-oracle condition: the agent already knows *where* to code. In practice, this is unrealistic — a developer launching an agent on a Jira ticket doesn't hand it the list of files to modify.
 
-**Config B — Discovery (baseline réaliste).** On retire les chemins du prompt. Concrètement, on supprime les lignes `Path: /testbed/...` — ça représente moins de 1% du prompt (751 caractères sur 78 000). Le reste est identique : description de la feature, interfaces attendues, signatures des fonctions. L'agent doit *découvrir* où coder. C'est la condition réaliste.
+**Config B — Discovery (realistic baseline).** We remove the paths from the prompt. Concretely, we strip the `Path: /testbed/...` lines — that's less than 1% of the prompt (751 characters out of 78,000). The rest is identical: feature description, expected interfaces, function signatures. The agent must *discover* where to code. This is the realistic condition.
 
-**Config C — Discovery + FTS.** Même prompt que B, mais l'agent a accès à RTFM avec recherche full-text (BM25). La base de données est pré-construite — comme en usage réel, où RTFM est déjà initialisé dans le projet.
+**Config C — Discovery + FTS.** Same prompt as B, but the agent has access to RTFM with full-text search (BM25). The database is pre-built — as in real use, where RTFM is already initialized in the project.
 
-**Config D — Discovery + FTS + Embeddings.** Même prompt que B, avec RTFM en mode hybride : recherche full-text + recherche sémantique par embeddings.
+**Config D — Discovery + FTS + Embeddings.** Same prompt as B, with RTFM in hybrid mode: full-text + semantic search via embeddings.
 
-La seule variable entre B et C/D est la présence de l'outil de recherche. Même agent (Claude Code), même modèle (Claude Sonnet 4.0), même environnement (Docker), même timeout (1200 secondes).
+The only variable between B and C/D is the presence of the search tool. Same agent (Claude Code), same model (Claude Sonnet 4.0), same environment (Docker), same timeout (1200 seconds).
 
 ---
 
-## 5. Les résultats : quand la taille du repo change tout
+## 5. The results: when repo size changes everything
 
-### Le résultat principal : test_validation sur mlflow
+### The headline result: test_validation on mlflow
 
-La tâche `test_validation` demande d'implémenter un module de validation de données dans mlflow — un projet de 8 260 fichiers. La difficulté : le module doit interagir avec trois composants existants dispersés dans le projet (`validation.py`, `scorers.py`, `data.py`). Pour réussir, l'agent doit trouver ces dépendances cross-module.
+The `test_validation` task requires implementing a data validation module in mlflow — a 8,260-file project. The difficulty: the module must interact with three existing components scattered across the project (`validation.py`, `scorers.py`, `data.py`). To succeed, the agent must find these cross-module dependencies.
 
-| Condition | F2P (fail-to-pass) | Résolu ? |
+| Condition | F2P (fail-to-pass) | Resolved? |
 |---|---|---|
-| A — Standard (chemins donnés) | 55% (6/11 tests) | Non |
-| B — Discovery (pas de retrieval) | 64% (7/11 tests) | Non |
-| C — Discovery + FTS | **100% (11/11 tests)** | **Oui** |
-| D — Discovery + FTS+Embed | **100% (11/11 tests)** | **Oui** |
+| A — Standard (paths given) | 55% (6/11 tests) | No |
+| B — Discovery (no retrieval) | 64% (7/11 tests) | No |
+| C — Discovery + FTS | **100% (11/11 tests)** | **Yes** |
+| D — Discovery + FTS+Embed | **100% (11/11 tests)** | **Yes** |
 
-Avec retrieval (C et D), 100% des tests passent. Sans retrieval (A et B), entre 55% et 64%.
+With retrieval (C and D), 100% of tests pass. Without retrieval (A and B), between 55% and 64%.
 
-Et attention : la Config A, celle où les chemins sont *donnés dans le prompt*, ne résout pas non plus. Savoir *où* coder ne suffit pas — l'agent doit aussi comprendre *comment* les modules interagissent. C'est précisément ce que le retrieval apporte : une recherche sur "validation scorers" renvoie les fichiers pertinents *et leur contexte*.
+And note: Config A, the one where paths are *given in the prompt*, also fails to resolve. Knowing *where* to code is not enough — the agent must also understand *how* the modules interact. That is precisely what retrieval brings: a search on "validation scorers" returns the relevant files *and their context*.
 
-Les configs A et B échouent systématiquement sur les mêmes tests : ceux qui nécessitent la compréhension des interactions entre `validation.py`, `scorers.py` et `data.py`. L'agent sans retrieval implémente le module de validation de manière isolée — correcte syntaxiquement, mais incompatible avec le reste du projet.
+Configs A and B systematically fail on the same tests: those that require understanding the interactions between `validation.py`, `scorers.py` and `data.py`. The agent without retrieval implements the validation module in isolation — syntactically correct, but incompatible with the rest of the project.
 
-### Le contre-exemple : test_stub_generator sur metaflow
+### The counter-example: test_stub_generator on metaflow
 
-À l'opposé, la tâche `test_stub_generator` porte sur metaflow — un repo de 624 fichiers. Résultat :
+At the other end, the `test_stub_generator` task is on metaflow — a 624-file repo. Result:
 
-| Condition | F2P | Résolu ? |
+| Condition | F2P | Resolved? |
 |---|---|---|
-| A — Standard | 100% (31/31) | Oui |
-| B — Discovery | 100% (31/31) | Oui |
-| C — Discovery + FTS | 100% (31/31) | Oui |
-| D — Discovery + FTS+Embed | 96.8% (30/31) | Non (1 test raté) |
+| A — Standard | 100% (31/31) | Yes |
+| B — Discovery | 100% (31/31) | Yes |
+| C — Discovery + FTS | 100% (31/31) | Yes |
+| D — Discovery + FTS+Embed | 96.8% (30/31) | No (1 test missed) |
 
-Les quatre configs résolvent la tâche (sauf D qui rate un test sur 31 — un artefact). Et RTFM est même contre-productif : Config C est 23% plus lente et 22% plus chère que A. L'agent RTFM n'utilise quasiment pas l'outil (1-2 appels) — il navigue directement car le repo est petit.
+All four configs resolve the task (except D, which misses 1 test out of 31 — an artifact). And RTFM is even counter-productive: Config C is 23% slower and 22% more expensive than A. The RTFM agent barely uses the tool (1-2 calls) — it navigates directly because the repo is small.
 
-**Sur un repo de 624 fichiers, `grep` suffit.** Le goulot de localisation n'existe pas. RTFM est un outil pour les grands repos.
+**On a 624-file repo, `grep` is enough.** The localization bottleneck does not exist. RTFM is a tool for large repos.
 
-### FTS vs Embeddings : la surprise
+### FTS vs Embeddings: the surprise
 
-La comparaison entre Config C (FTS seul) et Config D (FTS + embeddings) révèle un résultat qui confirme la littérature récente :
+Comparing Config C (FTS only) and Config D (FTS + embeddings) reveals a result that confirms the recent literature:
 
-| Métrique | Config C (FTS) | Config D (FTS+Embed) |
+| Metric | Config C (FTS) | Config D (FTS+Embed) |
 |---|---|---|
-| Résolu | Oui (100%) | Oui (100%) |
+| Resolved | Yes (100%) | Yes (100%) |
 | Turns | 81 | **50** |
-| Coût | $4.04 | **$2.23** |
+| Cost | $4.04 | **$2.23** |
 | Read calls | 23 | **12** |
 | Bash calls | 20 | **9** |
 
-Le resolve rate est identique. Mais D est significativement plus efficient : moins de tours (-38%), moins cher (-45%), moins de lectures de fichiers (-48%). Les embeddings ne changent pas le *résultat*, mais ils changent le *chemin* : l'agent va plus directement aux bons fichiers au lieu de tâtonner avec des requêtes textuelles.
+The resolve rate is identical. But D is significantly more efficient: fewer turns (-38%), cheaper (-45%), fewer file reads (-48%). Embeddings don't change the *outcome*, but they change the *path*: the agent goes more directly to the right files instead of groping with text queries.
 
-Ce résultat est cohérent avec Galimzyanov (2025) et GrepRAG (ISSTA 2026) qui montrent que BM25 est compétitif avec les embeddings denses pour la recherche de code. La recherche lexicale suffit souvent — les embeddings ajoutent une couche d'efficience, pas de capacité.
+This result is consistent with Galimzyanov (2025) and GrepRAG (ISSTA 2026), which show that BM25 is competitive with dense embeddings for code search. Lexical search is often enough — embeddings add a layer of efficiency, not capability.
 
-### Le cas d'échec : quand le retrieval ne suffit pas
+### The failure case: when retrieval is not enough
 
-`test_responses_agent` est la tâche la plus complexe du benchmark : 78 000 caractères de prompt, 15 interfaces à implémenter, un ground truth de 226 000 caractères sur 60 fichiers. Résultat : **aucune configuration ne résout la tâche**. Ni A, ni B, ni C, ni D.
+`test_responses_agent` is the most complex task in the benchmark: 78,000-character prompt, 15 interfaces to implement, a ground truth of 226,000 characters across 60 files. Result: **no configuration resolves the task**. Neither A, nor B, nor C, nor D.
 
-Mais l'analyse révèle des nuances intéressantes :
+But the analysis reveals interesting nuances:
 
-| Métrique | A (Standard) | B (Discovery) | C (FTS) | D (Embed+) |
+| Metric | A (Standard) | B (Discovery) | C (FTS) | D (Embed+) |
 |---|---|---|---|---|
-| Résolu | Non (3.5%) | Non (TIMEOUT) | Non (0%) | Non (0%) |
-| Interfaces couvertes | 15/15 | 0/15 (timeout) | 8/15 | 12/15 |
+| Resolved | No (3.5%) | No (TIMEOUT) | No (0%) | No (0%) |
+| Interfaces covered | 15/15 | 0/15 (timeout) | 8/15 | 12/15 |
 | Patch size | 92K chars | 0 | 51K chars | 91K chars |
 | Cache read | 23.8M | 18.9M | 8.7M | 9.0M |
 
-Config B ne produit même pas de code — elle tombe en timeout à 1200 secondes, perdue dans les 8 260 fichiers. Config D couvre 12 interfaces sur 15 et produit un patch presque aussi gros que A (qui avait les chemins). Les embeddings guident l'agent vers les bons fichiers, mais Sonnet 4.0 ne peut tout simplement pas gérer la complexité de 15 interfaces simultanées.
+Config B doesn't even produce code — it times out at 1200 seconds, lost in the 8,260 files. Config D covers 12 out of 15 interfaces and produces a patch nearly as large as A (which had the paths). Embeddings guide the agent to the right files, but Sonnet 4.0 simply cannot handle the complexity of 15 simultaneous interfaces.
 
-**Le retrieval est nécessaire mais pas suffisant.** Il résout le goulot de localisation, pas le goulot de capacité du modèle.
+**Retrieval is necessary but not sufficient.** It resolves the localization bottleneck, not the model's capability bottleneck.
 
-Un détail notable : les configs C et D consomment 2 à 3 fois moins de cache read que A et B (8-9M vs 19-24M tokens). Le pattern metadata-first fonctionne — l'agent charge moins de contexte et fait un travail plus ciblé.
-
----
-
-## 6. L'agent décide seul quand chercher
-
-Un résultat inattendu de notre étude concerne la façon dont l'agent utilise l'outil de recherche.
-
-La littérature sur le retrieval adaptatif (Self-RAG, Repoformer, FLARE) a établi un résultat important : le retrieval systématique dégrade la performance. Repoformer (ICML 2024) montre que 70% des retrievals de code sont inutiles. Self-RAG (ICLR 2024) montre qu'un retrieval adaptatif surpasse le retrieval systématique de 40% en relatif. Le sweet spot n'est ni "toujours chercher" ni "jamais chercher" — c'est "chercher quand c'est nécessaire".
-
-Ces systèmes utilisent des classificateurs entraînés ou du fine-tuning pour décider quand retriever. Notre approche est plus simple : **on donne l'outil à l'agent et on le laisse décider seul.**
-
-Et ça marche. Sur `test_validation`, l'agent fait 2 à 3 appels RTFM — juste assez pour localiser les modules critiques. Sur `test_stub_generator` (petit repo), il fait 1 appel et n'y revient pas. Sur `test_responses_agent` (la tâche monstre), il fait 10 à 15 appels pour couvrir un maximum d'interfaces.
-
-L'agent fait du retrieval sélectif naturellement, sans entraînement spécifique, sans classificateur. Cela suggère que les LLMs actuels (ou au moins Claude Sonnet 4.0) ont une métacognition suffisante pour décider quand un outil de recherche est utile — à condition que l'outil soit disponible et que son coût d'utilisation soit faible (300 tokens de métadonnées par requête).
-
-C'est peut-être le résultat le plus important de cette étude, au-delà des chiffres de performance : **il n'est pas nécessaire de forcer le retrieval. Il suffit de le rendre possible.**
+A notable detail: configs C and D consume 2 to 3 times less cache read than A and B (8-9M vs 19-24M tokens). The metadata-first pattern works — the agent loads less context and does more targeted work.
 
 ---
 
-## 7. Ce que ça change en pratique
+## 6. The agent decides alone when to search
 
-### La règle des 1 000 fichiers
+An unexpected result of our study concerns how the agent uses the search tool.
 
-Nos résultats préliminaires dessinent une frontière nette :
+The literature on adaptive retrieval (Self-RAG, Repoformer, FLARE) has established an important result: systematic retrieval degrades performance. Repoformer (ICML 2024) shows that 70% of code retrievals are useless. Self-RAG (ICLR 2024) shows that adaptive retrieval outperforms systematic retrieval by 40% relative. The sweet spot is neither "always search" nor "never search" — it's "search when necessary".
 
-- **Sous ~600 fichiers** : la navigation directe (`grep`, `glob`, `find`) suffit. L'agent parcourt le projet assez vite pour trouver ce qu'il cherche. Le retrieval est un overhead sans bénéfice.
+These systems use trained classifiers or fine-tuning to decide when to retrieve. Our approach is simpler: **we give the tool to the agent and let it decide on its own.**
 
-- **Au-dessus de ~8 000 fichiers** : le retrieval transforme les résultats. L'agent sans retrieval se perd dans l'arborescence, entre dans des boucles d'exploration, et échoue à trouver les dépendances cross-module. L'agent avec retrieval les trouve immédiatement.
+And it works. On `test_validation`, the agent makes 2 to 3 RTFM calls — just enough to locate the critical modules. On `test_stub_generator` (small repo), it makes 1 call and never returns to it. On `test_responses_agent` (the monster task), it makes 10 to 15 calls to cover as many interfaces as possible.
 
-La zone intermédiaire (1 000 à 5 000 fichiers) reste à explorer — c'est précisément ce que nos runs en cours sur pydantic (771 fichiers) et astropy (1 123 fichiers) visent à clarifier.
+The agent does selective retrieval naturally, with no specific training, no classifier. This suggests that current LLMs (at least Claude Sonnet 4.0) have sufficient metacognition to decide when a search tool is useful — provided the tool is available and its cost of use is low (300 tokens of metadata per query).
 
-Si ce seuil se confirme, la recommandation pratique est simple : **déployez un outil de retrieval pré-indexé sur tout projet de plus de 1 000 fichiers.** Le coût d'initialisation est négligeable — 10 à 78 secondes de parsing selon la taille du repo — et le bénéfice potentiel est considérable.
-
-### Le vrai coût : par tâche résolue
-
-Un argument contre le retrieval est qu'il augmente le coût par tâche. Et c'est vrai : sur `test_validation`, Config D coûte $2.23 contre $1.50 pour Config B. +49%.
-
-Mais Config B ne résout pas la tâche. Config D oui. Le coût pertinent n'est pas le coût par tentative — c'est le coût par tâche *résolue*. Un run à $2.23 qui résout vaut infiniment mieux qu'un run à $1.50 qui échoue, qu'on devra relancer, peut-être plusieurs fois, ou compléter manuellement.
-
-### Au-delà du code
-
-Nous avons testé RTFM sur du code, mais sa philosophie agnostique le destine à un usage plus large. Dans un test A/B séparé sur la rédaction d'un article académique (un cas d'usage documentation, pas code), RTFM v3 a réduit le coût de 51% et la durée de 16% par rapport à la baseline, tout en produisant un article plus complet.
-
-L'outil remplace la navigation aveugle là où c'est nécessaire — recherche de dépendances, localisation de fichiers pertinents, découverte de contenu lié — et ne touche pas au reste. Il ne modifie pas l'édition, l'exécution, le debug. C'est un amplificateur, pas un remplacement.
+This may be the most important result of this study, beyond the performance numbers: **you don't need to force retrieval. You just need to make it possible.**
 
 ---
 
-## 8. Ce que la littérature ne prouve pas (et nous non plus, pas encore)
+## 7. What this changes in practice
 
-Soyons honnêtes sur les limites de cette étude — et de celles des autres.
+### The 1,000-file rule
 
-**Ce que personne n'a prouvé rigoureusement :**
+Our preliminary results draw a clear boundary:
 
-Augment Code revendique "+80% de performance avec Claude Code + Opus 4.5". Pas de protocole publié, pas de benchmark standardisé, pas d'intervalles de confiance. Sourcegraph Cody n'a aucun benchmark public. Les outils open-source MCP (Code-Index-MCP, mcp-codebase-index) n'ont aucune évaluation publiée. Le papier Navigation Paradox évalue CodeCompass sur 30 micro-tâches synthétiques créées par les auteurs — pas sur un benchmark tiers.
+- **Under ~600 files**: direct navigation (`grep`, `glob`, `find`) is enough. The agent traverses the project quickly enough to find what it needs. Retrieval is overhead with no benefit.
 
-**Nos propres limites :**
+- **Above ~8,000 files**: retrieval transforms results. The agent without retrieval gets lost in the tree, falls into exploration loops, and fails to find cross-module dependencies. The agent with retrieval finds them immediately.
 
-- Un seul modèle (Sonnet 4.0). La généralisation à d'autres modèles est non mesurée.
-- Un seul outil (RTFM). Un outil concurrent pourrait donner des résultats différents.
-- 11 tâches, 4 repos. L'échantillon est petit.
-- Python uniquement. FeatureBench lite ne couvre que des projets Python.
-- Les données présentées ici sont issues de runs uniques. La matrice complète (11 tâches × 4 conditions × N répétitions) est en cours.
+The middle zone (1,000 to 5,000 files) remains to be explored — this is precisely what our in-progress runs on pydantic (771 files) and astropy (1,123 files) aim to clarify.
 
-Ce que nous revendiquons, c'est la démarche : **un protocole contrôlé sur un benchmark standardisé, avec une variable isolée et des métriques reproductibles.** Quand les résultats complets seront disponibles, ils seront soumis à *Empirical Software Engineering* (EMSE) — la revue de référence pour les études empiriques en génie logiciel.
+If this threshold is confirmed, the practical recommendation is simple: **deploy a pre-indexed retrieval tool on any project over 1,000 files.** The initialization cost is negligible — 10 to 78 seconds of parsing depending on repo size — and the potential benefit is considerable.
 
----
+### The real cost: per resolved task
 
-## 9. Conclusion : donner le choix à l'agent
+An argument against retrieval is that it increases the per-task cost. And that's true: on `test_validation`, Config D costs $2.23 versus $1.50 for Config B. +49%.
 
-La question de départ était simple : **est-ce que ça aide de donner un outil de recherche à un agent codeur ?**
+But Config B does not resolve the task. Config D does. The relevant cost is not the cost per attempt — it's the cost per *resolved* task. A $2.23 run that resolves is infinitely better than a $1.50 run that fails, which you'll have to re-run, maybe several times, or complete manually.
 
-La réponse est nuancée mais claire : **oui, sur les grands projets.** Sur mlflow (8 260 fichiers), le retrieval fait passer le resolve rate de 55-64% à 100%. Sur metaflow (624 fichiers), pas de gain mesurable.
+### Beyond code
 
-Mais au-delà des chiffres, le résultat le plus intéressant est peut-être philosophique. On n'a pas besoin de forcer l'agent à chercher, ni de l'entraîner à décider quand chercher. Il suffit de lui *donner le choix*. Quand l'outil est là, qu'il coûte peu en contexte (300 tokens par requête), et qu'il ne modifie pas le reste du workflow — l'agent s'en sert intelligemment, quand il en a besoin, et l'ignore quand il n'en a pas besoin.
+We tested RTFM on code, but its agnostic philosophy extends to broader uses. In a separate A/B test on writing an academic article (a documentation use case, not code), RTFM v3 cut cost by 51% and duration by 16% versus the baseline, while producing a more complete article.
 
-C'est la leçon pratique de cette étude : les agents codeurs ne sont pas limités par leur intelligence. Ils sont limités par leurs outils de navigation. Donnez-leur une carte du territoire — pas un GPS qui dicte le chemin, juste une carte qu'ils peuvent consulter — et ils trouvent leur route.
+The tool replaces blind navigation where necessary — dependency search, locating relevant files, discovering related content — and doesn't touch the rest. It does not change editing, execution, or debugging. It is an amplifier, not a replacement.
 
 ---
 
-## Références
+## 8. What the literature does not prove (and neither do we, yet)
+
+Let's be honest about the limits of this study — and of others.
+
+**What nobody has rigorously proven:**
+
+Augment Code claims "+80% performance with Claude Code + Opus 4.5". No published protocol, no standardized benchmark, no confidence intervals. Sourcegraph Cody has no public benchmark. The open-source MCP tools (Code-Index-MCP, mcp-codebase-index) have no published evaluation. The Navigation Paradox paper evaluates CodeCompass on 30 synthetic micro-tasks created by the authors — not on a third-party benchmark.
+
+**Our own limits:**
+
+- A single model (Sonnet 4.0). Generalization to other models is unmeasured.
+- A single tool (RTFM). A competing tool could give different results.
+- 11 tasks, 4 repos. The sample is small.
+- Python only. FeatureBench lite covers only Python projects.
+- The data presented here are from single runs. The full matrix (11 tasks × 4 conditions × N repetitions) is in progress.
+
+What we do claim is the method: **a controlled protocol on a standardized benchmark, with an isolated variable and reproducible metrics.** When the full results are available, they will be submitted to *Empirical Software Engineering* (EMSE) — the reference journal for empirical software engineering studies.
+
+---
+
+## 9. Conclusion: give the agent a choice
+
+The opening question was simple: **does giving a coding agent a search tool help?**
+
+The answer is nuanced but clear: **yes, on large projects.** On mlflow (8,260 files), retrieval lifts the resolve rate from 55-64% to 100%. On metaflow (624 files), no measurable gain.
+
+But beyond the numbers, the most interesting result may be philosophical. We don't need to force the agent to search, nor to train it to decide when to search. We just need to *give it the choice*. When the tool is there, costs little in context (300 tokens per query), and doesn't change the rest of the workflow — the agent uses it intelligently, when it needs to, and ignores it when it doesn't.
+
+That is the practical lesson of this study: coding agents are not limited by their intelligence. They are limited by their navigation tools. Give them a map of the territory — not a GPS that dictates the route, just a map they can consult — and they find their way.
+
+---
+
+## References
 
 1. Jimenez, C.E. et al. (2024). SWE-bench: Can Language Models Resolve Real-World GitHub Issues? ICLR 2024. arXiv:2310.06770.
 2. FeatureBench (2026). ICLR 2026. arXiv:2602.10975.

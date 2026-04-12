@@ -1,239 +1,239 @@
-# A/B Test : Rédaction B10 avec vs sans RTFM
+# A/B Test: Writing B10 with vs without RTFM
 
-## Date : 2026-02-21
+## Date: 2026-02-21
 
-## Sessions analysées
-- **Session A (avec RTFM)**: `66c7e81b-00e4-4bde-a9e4-d70e2cbb8a3d` dans musicology-phd
-- **Session B (sans RTFM)**: `586966f3-50e0-41b6-be1e-1b7b9dc449be` dans musicology-phd
-- **Prompt identique** : "j'aimerai que tu me fasses la redaction de l'article B10"
+## Sessions analyzed
+- **Session A (with RTFM)**: `66c7e81b-00e4-4bde-a9e4-d70e2cbb8a3d` in musicology-phd
+- **Session B (without RTFM)**: `586966f3-50e0-41b6-be1e-1b7b9dc449be` in musicology-phd
+- **Identical prompt**: "j'aimerai que tu me fasses la redaction de l'article B10"
 
 ---
 
-## Résultats globaux
+## Overall results
 
-| Métrique | Session A (RTFM) | Session B (sans) | Delta |
+| Metric | Session A (RTFM) | Session B (without) | Delta |
 |----------|-------------------|-------------------|-------|
-| Durée | **12 min** | 8 min 16s | **+45%** |
-| Tokens totaux | **3.95M** | 1.70M | **+132%** |
-| Coût | **~$13** | ~$6 | **+117%** |
-| Tool calls directs | 38 | 37 | +3% |
-| Tool calls total (subagents) | 38 | **85** | -55% |
-| Langue produite | **Anglais (FAUX)** | Français (correct) | **régression** |
-| Article taille | 36K chars, 8 sections | 31K chars, 10 sections, glossaire | |
+| Duration | **12 min** | 8 min 16s | **+45%** |
+| Total tokens | **3.95M** | 1.70M | **+132%** |
+| Cost | **~$13** | ~$6 | **+117%** |
+| Direct tool calls | 38 | 37 | +3% |
+| Total tool calls (subagents) | 38 | **85** | -55% |
+| Output language | **English (WRONG)** | French (correct) | **regression** |
+| Article size | 36K chars, 8 sections | 31K chars, 10 sections, glossary | |
 
-**Constat : RTFM fait pire sur les 4 axes** (durée, tokens, coût, qualité).
-
----
-
-## Analyse comportementale Session A (avec RTFM)
-
-### Appels RTFM : 18 total (10 search + 8 expand)
-
-| Catégorie | Count | % |
-|-----------|-------|---|
-| Nécessaires (info utilisée) | 7 | 39% |
-| Redondants | 6 | 33% |
-| Inutiles/mal ciblés | 5 | 28% |
-
-### Appels nécessaires détaillés :
-1. `rtfm_expand(kanban, "B10")` → confirmé B10 = "EBNF de BP3"
-2. `rtfm_expand(b10_ebnf_bp3, ...)` → draft/spec existant
-3. `rtfm_search("B8 trois directions")` → B8 en anglais (a causé le bug langue)
-4. `rtfm_search("B4 flags poids")` → B4 en anglais (a causé le bug langue)
-5. `rtfm_expand(paper1, "Annexe EBNF")` → **contenu EBNF principal** (le vrai apport)
-6. `rtfm_expand(l3_ebnf, "notation")` → variants EBNF (contenu pas sur disque)
-7. `rtfm_expand(b8, "style article")` → style TikZ et layout
-
-### Appels redondants :
-- 3 searches initiales pour trouver B10 (Kanban suffisait)
-- Search de BLOG_STRATEGY alors qu'il était lu en parallèle via Read
-- Re-expand de B4 (même contenu qu'avant)
-- Search MOC alors que Glob suffisait
-
-### Problème critique : la langue
-- RTFM a indexé les articles B4 et B8 depuis le répertoire `_en/` (traductions anglaises)
-- Corpus `published` = 39 articles, TOUS en `lang: en`
-- L'agent a vu `lang: en` dans les métadonnées et conclu "les articles B sont en anglais"
-- Le draft B10 existant était en français → ignoré
-- **Cause racine** : bug d'indexation — même `book_slug` pour FR et EN, EN écrase FR
-
-### Coût par appel RTFM
-Chaque search/expand injecte ~2000-3000 tokens dans le contexte (contenu + metadata + hints).
-18 appels × ~2500 tokens = ~45000 tokens de contexte RTFM seul.
-
-### rtfm_remember : jamais appelé
-L'instruction existait dans CLAUDE.md mais l'agent l'a ignorée. Le corpus `learned` était vide.
+**Finding: RTFM performs worse on all 4 axes** (duration, tokens, cost, quality).
 
 ---
 
-## Analyse comportementale Session B (sans RTFM)
+## Behavioral analysis Session A (with RTFM)
 
-### Répartition tool calls (37 directs + 48 subagents = 85)
+### RTFM calls: 18 total (10 search + 8 expand)
 
-| Catégorie | Count | % |
+| Category | Count | % |
 |-----------|-------|---|
-| Nécessaires | 17 | 46% |
+| Necessary (info used) | 7 | 39% |
+| Redundant | 6 | 33% |
+| Useless/poorly targeted | 5 | 28% |
+
+### Necessary calls in detail:
+1. `rtfm_expand(kanban, "B10")` → confirmed B10 = "EBNF of BP3"
+2. `rtfm_expand(b10_ebnf_bp3, ...)` → existing draft/spec
+3. `rtfm_search("B8 three directions")` → B8 in English (caused the language bug)
+4. `rtfm_search("B4 flags weights")` → B4 in English (caused the language bug)
+5. `rtfm_expand(paper1, "EBNF Appendix")` → **main EBNF content** (the real contribution)
+6. `rtfm_expand(l3_ebnf, "notation")` → EBNF variants (content not on disk)
+7. `rtfm_expand(b8, "article style")` → TikZ style and layout
+
+### Redundant calls:
+- 3 initial searches to find B10 (Kanban was sufficient)
+- Search for BLOG_STRATEGY while it was read in parallel via Read
+- Re-expand of B4 (same content as before)
+- Search MOC while Glob would have sufficed
+
+### Critical problem: language
+- RTFM indexed articles B4 and B8 from the `_en/` directory (English translations)
+- Corpus `published` = 39 articles, ALL with `lang: en`
+- The agent saw `lang: en` in the metadata and concluded "the B articles are in English"
+- The existing B10 draft was in French → ignored
+- **Root cause**: indexing bug — same `book_slug` for FR and EN, EN overwrites FR
+
+### Cost per RTFM call
+Each search/expand injects ~2000-3000 tokens into the context (content + metadata + hints).
+18 calls × ~2500 tokens = ~45000 tokens of RTFM context alone.
+
+### rtfm_remember: never called
+The instruction existed in CLAUDE.md but the agent ignored it. The `learned` corpus was empty.
+
+---
+
+## Behavioral analysis Session B (without RTFM)
+
+### Tool call distribution (37 direct + 48 subagents = 85)
+
+| Category | Count | % |
+|-----------|-------|---|
+| Necessary | 17 | 46% |
 | Dead ends | 15 | 41% |
-| Redondants | 3 | 8% |
-| Partiellement utiles | 2 | 5% |
+| Redundant | 3 | 8% |
+| Partially useful | 2 | 5% |
 
-### Stratégie : parallélisation via subagents
-- **Subagent 1** (general-purpose, 2m14s, 22 calls) : lecture R2 + Paper 1
-- **Subagent 2** (Explore, 1m04s, 26 calls) : recherche articles publiés + style
-- Les deux en parallèle → recherche lourde en ~2min
-- L'agent RTFM a fait toutes ses recherches séquentiellement
+### Strategy: parallelization via subagents
+- **Subagent 1** (general-purpose, 2m14s, 22 calls): reading R2 + Paper 1
+- **Subagent 2** (Explore, 1m04s, 26 calls): search for published articles + style
+- Both in parallel → heavy research in ~2min
+- The RTFM agent did all its searches sequentially
 
-### Dead ends (15 calls, mais RAPIDES et GRATUITES)
-- 5 Glob dans le mauvais répertoire (repo git au lieu du vault Obsidian)
-- 8 Glob pour fichiers publiés en ligne (B1-B8, L3 pas dans le vault)
-- 3 Read avec mauvais nom de fichier (Formalisme vs Formalisation)
-- Coût : <1s et 0 tokens de contexte chacun
+### Dead ends (15 calls, but FAST and FREE)
+- 5 Globs in the wrong directory (git repo instead of Obsidian vault)
+- 8 Globs for online published files (B1-B8, L3 not in the vault)
+- 3 Reads with wrong filename (Formalisme vs Formalisation)
+- Cost: <1s and 0 context tokens each
 
-### Langue correcte : pourquoi ?
-- B9 (seul article complet trouvé sur disque) est en français
-- CLAUDE.md du projet dit "Langue de rédaction : Français"
-- Le draft B10 était en français
-- Sans RTFM, l'agent n'a pas vu les traductions anglaises → pas de confusion
+### Correct language: why?
+- B9 (only complete article found on disk) is in French
+- Project CLAUDE.md says "Writing language: French"
+- The B10 draft was in French
+- Without RTFM, the agent didn't see the English translations → no confusion
 
 ---
 
-## Diagnostic des causes racines
+## Root cause diagnosis
 
-| Cause | Impact | Détail |
+| Cause | Impact | Detail |
 |-------|--------|--------|
-| Appels RTFM coûteux en tokens | +132% tokens | Chaque appel injecte ~2500 tokens vs ~0 pour un Glob raté |
-| Pas de parallélisation RTFM | +45% durée | MCP = agent principal only, pas de subagents |
-| RTFM a surfacé du contenu trompeur | Qualité ↓ | Articles EN ont causé le choix de langue erroné |
-| Bug slug collision FR/EN | Qualité ↓ | `_en/B4.md` écrase `B4.md` car même slug |
-| rtfm_remember pas utilisé | Valeur = 0 | La seule feature unique n'a pas fonctionné |
-| Instructions trop agressives | Overhead | "NEVER Grep/Glob" forçait RTFM pour tout |
+| RTFM calls expensive in tokens | +132% tokens | Each call injects ~2500 tokens vs ~0 for a failed Glob |
+| No RTFM parallelization | +45% duration | MCP = main agent only, no subagents |
+| RTFM surfaced misleading content | Quality ↓ | EN articles caused incorrect language choice |
+| Slug collision FR/EN bug | Quality ↓ | `_en/B4.md` overwrites `B4.md` because same slug |
+| rtfm_remember not used | Value = 0 | The only unique feature did not work |
+| Instructions too aggressive | Overhead | "NEVER Grep/Glob" forced RTFM for everything |
 
 ---
 
-## Corrections implémentées (cette session)
+## Fixes implemented (this session)
 
-### 1. Progressive disclosure v2 : metadata-only (FAIT)
-- `rtfm_search` et `rtfm_context` retournent UNIQUEMENT les métadonnées (titre, fichier, score, nb chunks, lang)
-- Zéro contenu dans les résultats de niveau 0
-- ~300 tokens pour 5 résultats au lieu de ~2500
-- Le contenu est lu via `rtfm_expand` uniquement quand nécessaire
+### 1. Progressive disclosure v2: metadata-only (DONE)
+- `rtfm_search` and `rtfm_context` return ONLY metadata (title, file, score, chunk count, lang)
+- Zero content in level-0 results
+- ~300 tokens for 5 results instead of ~2500
+- Content is read via `rtfm_expand` only when necessary
 
-### 2. File paths dans les résultats (FAIT)
-- Chaque résultat montre `file: path/to/file.md`
-- Élimine les Glob redondants pour localiser les fichiers
+### 2. File paths in results (DONE)
+- Each result shows `file: path/to/file.md`
+- Eliminates redundant Globs to locate files
 
-### 3. Language metadata dans les résultats (FAIT)
-- Chaque résultat montre `lang: en` ou `lang: fr`
-- L'agent peut distinguer les versions FR/EN
+### 3. Language metadata in results (DONE)
+- Each result shows `lang: en` or `lang: fr`
+- The agent can distinguish FR/EN versions
 
-### 4. CLI `context` et `expand` pour subagents (FAIT)
+### 4. CLI `context` and `expand` for subagents (DONE)
 - `rtfm --db .rtfm/library.db context "subject"` via Bash
 - `rtfm --db .rtfm/library.db expand "slug" "query"` via Bash
-- Les subagents Task/Explore peuvent utiliser RTFM
+- Task/Explore subagents can use RTFM
 
-### 5. CLAUDE.md template réécrit (FAIT)
-- Plus de "NEVER Grep/Glob"
+### 5. CLAUDE.md template rewritten (DONE)
+- No more "NEVER Grep/Glob"
 - RTFM = knowledge/memory, Grep/Glob = code editing
-- Subagents autorisés via CLI
-- Remember = section dédiée MANDATORY
+- Subagents allowed via CLI
+- Remember = MANDATORY dedicated section
 
-### 6. Rappel actif pour remember (FAIT)
-- Quand le corpus `learned` est vide, les résultats search/context affichent un rappel
+### 6. Active reminder for remember (DONE)
+- When the `learned` corpus is empty, search/context results display a reminder
 - "⚠ Learned corpus is empty. Use rtfm_remember()"
 
-### 7. Fix slug collision (EN COURS)
-- `_path_to_slug()` inclut le répertoire parent dans le slug
+### 7. Fix slug collision (IN PROGRESS)
+- `_path_to_slug()` includes the parent directory in the slug
 - `_en/B4.md` → `en--b4_flags` vs `B4.md` → `b4_flags`
-- Le sync passe le slug au parser via metadata
+- Sync passes the slug to the parser via metadata
 
 ---
 
-## Tests : 33/33 MCP tests passent
+## Tests: 33/33 MCP tests pass
 
 ---
 
-## Session C : RTFM v2 post-corrections (2026-02-21)
+## Session C: RTFM v2 post-fixes (2026-02-21)
 
-- **Session C (RTFM v2)**: `268c7e8f-591a-4b52-ae59-10e668fb7d5b` dans musicology-phd
-- **Prompt identique** : "j'aimerai que tu me fasses la rédaction de l'article B10"
+- **Session C (RTFM v2)**: `268c7e8f-591a-4b52-ae59-10e668fb7d5b` in musicology-phd
+- **Identical prompt**: "j'aimerai que tu me fasses la rédaction de l'article B10"
 
-### Résultats Session C
+### Session C results
 
-| Métrique | Valeur |
+| Metric | Value |
 |---|---|
-| Durée | 11 min 23s |
-| Tokens totaux | 5.87M (dont 4.91M cache read) |
-| Coût estimé | ~$5.11 |
+| Duration | 11 min 23s |
+| Total tokens | 5.87M (of which 4.91M cache read) |
+| Estimated cost | ~$5.11 |
 | Tool calls | 64 (37 main + 27 subagent) |
-| Appels RTFM | 7 (3 context + 3 expand + 1 remember) |
-| Langue | Français (correct) |
-| Article | 38.5K chars, 14 sections (dont glossaire + refs) |
+| RTFM calls | 7 (3 context + 3 expand + 1 remember) |
+| Language | French (correct) |
+| Article | 38.5K chars, 14 sections (including glossary + refs) |
 
-### Corrections v2 validées
-- Langue correcte (distinction FR/EN visible dans résultats)
-- Metadata-only fonctionne (7 appels vs 18 en v1)
-- rtfm_remember utilisé (B10 rédigé indexé dans corpus learned)
-- Coût divisé par 2.5 vs v1 ($5.11 vs $13)
-- Subagent utilisé pour paralléliser la recherche
+### v2 fixes validated
+- Correct language (FR/EN distinction visible in results)
+- Metadata-only works (7 calls vs 18 in v1)
+- rtfm_remember used (written B10 indexed in learned corpus)
+- Cost divided by 2.5 vs v1 ($5.11 vs $13)
+- Subagent used to parallelize research
 
-### Problèmes restants
-- Durée +37% vs session B sans RTFM (11m23 vs 8m16)
-- Duplication : 15 Glob + 14 Read en parallèle des appels RTFM
-- Subagent tâtonne (15 Bash) au lieu de se fier aux résultats RTFM
-- Tokens gonflés (5.87M vs 1.70M sans RTFM) — cache read mitigue le coût
+### Remaining issues
+- Duration +37% vs session B without RTFM (11m23 vs 8m16)
+- Duplication: 15 Glob + 14 Read in parallel with RTFM calls
+- Subagent fumbles (15 Bash) instead of relying on RTFM results
+- Inflated tokens (5.87M vs 1.70M without RTFM) — cache read mitigates the cost
 
-### Tableau comparatif A/B/C
+### A/B/C comparison table
 
-| Métrique | A (RTFM v1) | B (sans) | C (RTFM v2) | Meilleur |
+| Metric | A (RTFM v1) | B (without) | C (RTFM v2) | Best |
 |---|---|---|---|---|
-| Durée | 12 min | **8m16s** | 11m23s | B |
-| Coût | ~$13 | ~$6 | **~$5.11** | C |
-| Langue | ANGLAIS (bug) | FR | **FR** | B/C |
-| Taille | 36K/8 sections | 31K/10 | **38.5K/14** | C |
+| Duration | 12 min | **8m16s** | 11m23s | B |
+| Cost | ~$13 | ~$6 | **~$5.11** | C |
+| Language | ENGLISH (bug) | FR | **FR** | B/C |
+| Size | 36K/8 sections | 31K/10 | **38.5K/14** | C |
 | RTFM calls | 18 | 0 | **7** | C |
-| remember | jamais | n/a | **oui** | C |
+| remember | never | n/a | **yes** | C |
 
 ---
 
-## Session D : RTFM v2+ template affiné (2026-02-21)
+## Session D: RTFM v2+ refined template (2026-02-21)
 
-- **Session D**: `1f783e5e-8d6f-4bff-be5d-d0e5d48fd95c` dans musicology-phd
-- **Prompt identique**
+- **Session D**: `1f783e5e-8d6f-4bff-be5d-d0e5d48fd95c` in musicology-phd
+- **Identical prompt**
 
-### Résultats Session D
+### Session D results
 
-| Métrique | Valeur |
+| Metric | Value |
 |---|---|
-| Durée | 15m48s (la pire) |
-| Tokens totaux | 3.97M (dont 3.6M cache read) |
-| Coût estimé | **$2.62** (le meilleur) |
+| Duration | 15m48s (the worst) |
+| Total tokens | 3.97M (of which 3.6M cache read) |
+| Estimated cost | **$2.62** (the best) |
 | Tool calls | 32 (0 subagents) |
-| Appels RTFM | 12 (3 context + 2 search + 7 expand) |
-| Langue | Français (correct) |
+| RTFM calls | 12 (3 context + 2 search + 7 expand) |
+| Language | French (correct) |
 | Article | 31.4K chars, 14+4 sections |
-| remember | NON (régression) |
+| remember | NO (regression) |
 
-### Problèmes identifiés
-- CLI `rtfm context` via Bash échoue (venv pas dans PATH)
-- Read après expand (B10 expand 27K puis Read x3)
-- Glob après context (5 Glob Blog/B* redondants)
-- Expand dupliqué (b11_ast_bp3 x2)
-- remember oublié malgré les instructions
+### Issues identified
+- CLI `rtfm context` via Bash fails (venv not in PATH)
+- Read after expand (B10 expand 27K then Read x3)
+- Glob after context (5 redundant Glob Blog/B*)
+- Duplicated expand (b11_ast_bp3 x2)
+- remember forgotten despite instructions
 
-### Corrections implémentées post-D
-1. Template CLAUDE.md v3 : anti-duplication explicite, CLI retiré
-2. Hook Stop : bloque l'arrêt si rtfm_remember pas appelé
-3. Hook PostToolUse : stamp quand rtfm_remember est appelé
-4. Hook SessionStart : clear le stamp au début
+### Fixes implemented post-D
+1. CLAUDE.md template v3: explicit anti-duplication, CLI removed
+2. Stop hook: blocks stopping if rtfm_remember not called
+3. PostToolUse hook: stamp when rtfm_remember is called
+4. SessionStart hook: clear the stamp at the start
 
-### Tableau comparatif A/B/C/D
+### A/B/C/D comparison table
 
-| Métrique | A (v1) | B (sans) | C (v2) | D (v2+) | Meilleur |
+| Metric | A (v1) | B (without) | C (v2) | D (v2+) | Best |
 |---|---|---|---|---|---|
-| Durée | 12m | **8m16s** | 11m23s | 15m48s | B |
-| Coût | ~$13 | ~$6 | ~$5.11 | **$2.62** | D |
-| Langue | BUG | FR | FR | FR | B/C/D |
+| Duration | 12m | **8m16s** | 11m23s | 15m48s | B |
+| Cost | ~$13 | ~$6 | ~$5.11 | **$2.62** | D |
+| Language | BUG | FR | FR | FR | B/C/D |
 | Article | 36K/8 | 31K/10 | **38.5K/14** | 31.4K/18 | C |
 | Tool calls | 38 | 85 | 64 | **32** | D |
 | Duplication | N/A | N/A | ~29 | **~10** | D |
-| remember | non | n/a | oui | non | C |
+| remember | no | n/a | yes | no | C |

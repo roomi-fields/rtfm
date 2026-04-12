@@ -1,210 +1,210 @@
 ---
 type: article
-title: "R5) L'agent calibre seul : retrieval sélectif sans entraînement"
-subtitle: "On guide l'agent vers l'outil. Mais c'est lui qui décide combien chercher — et il calibre l'intensité sans fine-tuning, sans classificateur, sans routeur."
-excerpt: "La littérature dit que le retrieval systématique dégrade la performance. Notre approche : guider l'agent vers l'outil avec 3 lignes d'instructions, et le laisser calibrer l'intensité seul. L'agent fait du retrieval sélectif naturellement."
-slug: retrieval-selectif-agent-autonome
-focus_keyword: retrieval sélectif agent autonome
+title: "R5) The Agent Calibrates Itself: Selective Retrieval Without Training"
+subtitle: "We guide the agent toward the tool. But the agent decides how much to search — and calibrates intensity without fine-tuning, without a classifier, without a router."
+excerpt: "The literature says systematic retrieval degrades performance. Our approach: guide the agent toward the tool with 3 lines of instructions, and let it calibrate intensity itself. The agent does selective retrieval naturally."
+slug: selective-retrieval-autonomous-agent
+focus_keyword: selective retrieval autonomous agent
 tags:
-  - retrieval-selectif
+  - selective-retrieval
   - self-rag
   - metacognition
-  - agent-autonome
+  - autonomous-agent
   - tool-use
   - repoformer
   - adaptive-rag
 ---
 
 > [!abstract]- SPEC
-> ## Brief — R5 : L'agent calibre seul
-> ### Position dans la série
-> - **Série** : R (Retrieval) — Does Retrieval Help? | **Prérequis** : [[R1_Le_Goulot_de_Localisation|R1]] à [[R4_Resultats|R4]]
-> - Analyse qualitative du comportement de l'agent
-> - Connexion avec la littérature sur le retrieval adaptatif
-> ### Sujets couverts
-> - Self-RAG, Repoformer, FLARE : le retrieval systématique dégrade
-> - Le pattern d'utilisation observé : chirurgical, pas systématique
-> - Guidage léger + calibration émergente de l'intensité
-> - L'universalité de l'outil : au-delà du code
-> - Le trade-off coût-qualité : le coût par tâche résolue
-> ### SOTAs sources
+> ## Brief — R5: The agent calibrates itself
+> ### Position in the series
+> - **Series**: R (Retrieval) — Does Retrieval Help? | **Prerequisites**: [[R1_Le_Goulot_de_Localisation_en|R1]] through [[R4_Resultats_en|R4]]
+> - Qualitative analysis of agent behavior
+> - Connection with the adaptive retrieval literature
+> ### Topics covered
+> - Self-RAG, Repoformer, FLARE: systematic retrieval degrades
+> - The observed usage pattern: surgical, not systematic
+> - Light guidance + emergent intensity calibration
+> - Tool universality: beyond code
+> - Cost-quality trade-off: cost per resolved task
+> ### SOTA sources
 > - `paper/sota/04_adaptive_selective_retrieval.md`
 > - `paper/sota/05_context_aware_retrieval_vs_exploration.md`
 
-# R5) L'agent calibre seul
+# R5) The agent calibrates itself
 
-## Retrieval sélectif sans entraînement — ou pourquoi trois lignes d'instructions suffisent
+## Selective retrieval without training — or why three lines of instructions are enough
 
-> L'agent n'a pas besoin qu'on lui dise *combien* chercher. Il a besoin qu'on lui dise *où* chercher.
+> The agent doesn't need to be told *how much* to search. It needs to be told *where* to search.
 
-## Où se situe cet article ?
+## Where does this article fit?
 
-[[R4_Resultats|R4]] a montré les chiffres bruts. RTFM fait passer le resolve rate de 55-64% à 100% sur test_validation (mlflow, 8 260 fichiers), n'apporte rien sur test_stub_generator (metaflow, 624 fichiers), et ne compense pas la complexité intrinsèque de test_responses_agent.
+[[R4_Resultats_en|R4]] showed the raw numbers. RTFM lifts the resolve rate from 55-64% to 100% on test_validation (mlflow, 8,260 files), adds nothing on test_stub_generator (metaflow, 624 files), and doesn't compensate for the intrinsic complexity of test_responses_agent.
 
-Mais les chiffres seuls ne racontent pas toute l'histoire. Il y a un résultat qualitatif, peut-être plus important que les chiffres : **l'agent calibre l'intensité de sa recherche en fonction de la tâche — sans qu'on le lui ait prescrit**. On lui dit *d'utiliser* l'outil. Mais c'est lui qui décide *combien*. Et ce comportement a des implications profondes.
-
----
-
-## Le piège du retrieval systématique
-
-La littérature sur le retrieval augmenté a établi un résultat contre-intuitif : **chercher tout le temps est pire que ne jamais chercher**.
-
-### Self-RAG : ne retriever que quand c'est utile
-
-Self-RAG (Asai et al., ICLR 2024) a proposé un modèle qui décide lui-même quand retriever, via des "reflection tokens" spéciaux appris pendant le fine-tuning. Le résultat principal : un retrieval adaptatif surpasse le retrieval systématique de **+40% en relatif** sur PopQA. Quand on force le modèle à toujours chercher, il se noie dans du contexte non pertinent. Quand on le laisse choisir, il cherche uniquement quand il en a besoin.
-
-### Repoformer : 70% des retrievals sont du gaspillage
-
-Repoformer (Wu et al., ICML 2024) a mesuré le phénomène spécifiquement pour le code. Leur classificateur a identifié que **70% des retrievals de code sont inutiles** — le modèle aurait produit le même résultat sans eux. En filtrant ces retrievals inutiles, ils obtiennent un **speedup de 70%** sans perte de performance.
-
-Soixante-dix pour cent. Sept retrievals sur dix ne servent à rien.
-
-### FLARE : le sweet spot est adaptatif
-
-FLARE (Jiang et al., EMNLP 2023) a exploré l'espace entre "jamais retriever" (θ=0) et "toujours retriever" (θ=1). Les deux extrêmes sont sous-optimaux. Le sweet spot est quelque part entre les deux — et il dépend du contexte.
-
-### Adaptive-RAG : router par complexité
-
-Adaptive-RAG (Jeong et al., NAACL 2024) va plus loin : il classifie les requêtes en trois niveaux de complexité (pas de retrieval / retrieval simple / retrieval multi-step) et route chaque requête vers le bon pipeline. La complexité de la question détermine l'intensité du retrieval.
-
-### Le point commun
-
-Tous ces travaux convergent vers la même conclusion : **le retrieval doit être adaptatif**. Ni toujours, ni jamais. Et pour être adaptatif, il faut un mécanisme de *décision* : quand chercher, quand ne pas chercher.
-
-La question est : quel mécanisme ?
-
-Self-RAG utilise du **fine-tuning** — des tokens spéciaux entraînés dans le modèle. Repoformer utilise un **classificateur** entraîné séparément. Adaptive-RAG utilise un **routeur** avec un petit modèle de classification.
-
-Notre approche est radicalement plus simple.
+But numbers alone don't tell the whole story. There's a qualitative result, perhaps more important than the numbers: **the agent calibrates the intensity of its search to the task — without anyone prescribing it**. We tell it *to use* the tool. But it decides *how much*. And that behavior has deep implications.
 
 ---
 
-## Notre approche : guider vers l'outil, laisser calibrer l'usage
+## The trap of systematic retrieval
 
-Nous n'avons rien entraîné. Pas de fine-tuning, pas de classificateur, pas de routeur. Mais — soyons honnêtes — nous n'avons pas non plus "juste donné l'outil sans rien dire".
+The literature on augmented retrieval has established a counterintuitive result: **searching all the time is worse than never searching**.
 
-### Ce qu'on dit à l'agent
+### Self-RAG: only retrieve when useful
 
-L'outil est déclaré dans la configuration MCP de l'agent. Il apparaît dans la liste des outils disponibles au même titre que `Read`, `Grep`, `Glob`, `Edit`, `Bash`. Jusque-là, rien de spécial.
+Self-RAG (Asai et al., ICLR 2024) proposed a model that decides itself when to retrieve, via special "reflection tokens" learned during fine-tuning. The main result: adaptive retrieval beats systematic retrieval by **+40% relative** on PopQA. When you force the model to always search, it drowns in irrelevant context. When you let it choose, it searches only when it needs to.
 
-Mais `rtfm init` injecte aussi **trois lignes d'instructions** dans le fichier `CLAUDE.md` du projet — le fichier de consignes que l'agent lit au démarrage de chaque session :
+### Repoformer: 70% of retrievals are waste
+
+Repoformer (Wu et al., ICML 2024) measured the phenomenon specifically for code. Their classifier identified that **70% of code retrievals are useless** — the model would have produced the same result without them. By filtering these useless retrievals, they get a **70% speedup** with no performance loss.
+
+Seventy percent. Seven out of ten retrievals serve no purpose.
+
+### FLARE: the sweet spot is adaptive
+
+FLARE (Jiang et al., EMNLP 2023) explored the space between "never retrieve" (θ=0) and "always retrieve" (θ=1). Both extremes are suboptimal. The sweet spot is somewhere in between — and it depends on context.
+
+### Adaptive-RAG: route by complexity
+
+Adaptive-RAG (Jeong et al., NAACL 2024) goes further: it classifies queries into three complexity levels (no retrieval / simple retrieval / multi-step retrieval) and routes each query to the appropriate pipeline. Question complexity determines retrieval intensity.
+
+### The common thread
+
+All these works converge on the same conclusion: **retrieval must be adaptive**. Neither always nor never. And to be adaptive, you need a *decision* mechanism: when to search, when not to.
+
+The question is: what mechanism?
+
+Self-RAG uses **fine-tuning** — special tokens trained into the model. Repoformer uses a separately trained **classifier**. Adaptive-RAG uses a **router** with a small classification model.
+
+Our approach is radically simpler.
+
+---
+
+## Our approach: guide toward the tool, let it calibrate usage
+
+We trained nothing. No fine-tuning, no classifier, no router. But — let's be honest — we didn't "just give the tool without saying anything" either.
+
+### What we tell the agent
+
+The tool is declared in the agent's MCP configuration. It appears in the list of available tools alongside `Read`, `Grep`, `Glob`, `Edit`, `Bash`. Nothing special so far.
+
+But `rtfm init` also injects **three lines of instructions** into the project's `CLAUDE.md` file — the guidelines file the agent reads at the start of each session:
 
 > *For any **exploratory search** (finding which files/modules/classes are relevant to a topic), use `rtfm_search` instead of Glob, find, ls, or broad Grep.*
 >
 > *This returns file paths + context metadata. Then continue normally — Read the files, Grep for exact patterns within them, Edit to modify.*
 
-C'est tout. Trois lignes. Pas de règle sur *combien* chercher, pas de seuil, pas de condition "si le repo a plus de N fichiers alors cherche davantage". L'instruction dit *quoi utiliser* pour l'exploration. Elle ne dit pas *quand s'arrêter*.
+That's it. Three lines. No rule about *how much* to search, no threshold, no "if the repo has more than N files then search more" condition. The instruction says *what to use* for exploration. It doesn't say *when to stop*.
 
-### Ce que l'agent fait tout seul
+### What the agent does on its own
 
-Et c'est là que ça devient intéressant. Avec ces trois lignes identiques dans tous les projets, l'agent produit des comportements **radicalement différents** selon le contexte.
+And that's where it gets interesting. With these three identical lines across all projects, the agent produces **radically different behaviors** depending on context.
 
-Sur `test_validation` (mlflow, 8 260 fichiers), l'agent fait **2-3 appels** `rtfm_search` — en début de session, pour localiser les modules pertinents. Puis il passe aux outils standard (`Read`, `Edit`) pour le reste de la tâche. Les 2-3 recherches suffisent à identifier `validation.py`, `scorers.py` et `data.py` — les trois fichiers critiques que l'agent sans retrieval ne trouve pas.
+On `test_validation` (mlflow, 8,260 files), the agent makes **2-3 `rtfm_search` calls** — at the start of the session, to locate the relevant modules. Then it switches to standard tools (`Read`, `Edit`) for the rest of the task. The 2-3 searches are enough to identify `validation.py`, `scorers.py`, and `data.py` — the three critical files the agent without retrieval can't find.
 
-Sur `test_stub_generator` (metaflow, 624 fichiers), l'agent fait **1 appel** `rtfm_search`. Il voit que le repo est petit, que les résultats ne lui apprennent rien de plus que ce qu'il peut trouver directement. Il n'y revient pas.
+On `test_stub_generator` (metaflow, 624 files), the agent makes **1 `rtfm_search` call**. It sees the repo is small, that results don't tell it more than it can find directly. It doesn't come back.
 
-Sur `test_responses_agent` (mlflow, 78K de prompt, 15 interfaces), l'agent fait **10-15 appels** `rtfm_search` — un par interface, ou presque. Il utilise l'outil intensivement parce que la tâche est massive et qu'il a besoin de localiser de nombreux fichiers.
+On `test_responses_agent` (mlflow, 78K prompt, 15 interfaces), the agent makes **10-15 `rtfm_search` calls** — roughly one per interface. It uses the tool intensively because the task is massive and it needs to locate many files.
 
-| Tâche                | Repo     | Fichiers | Appels RTFM | Pattern                      |
-| -------------------- | -------- | -------- | ----------- | ---------------------------- |
-| test_stub_generator  | metaflow | 624      | 1-2         | Essai rapide, abandon        |
-| test_validation      | mlflow   | 8 260    | 2-3         | Localisation ciblée en début |
-| test_responses_agent | mlflow   | 8 260    | 10-15       | Utilisation intensive        |
+| Task                 | Repo     | Files | RTFM calls | Pattern                      |
+| -------------------- | -------- | ----- | ---------- | ---------------------------- |
+| test_stub_generator  | metaflow | 624   | 1-2        | Quick try, abandon           |
+| test_validation      | mlflow   | 8,260 | 2-3        | Targeted early localization  |
+| test_responses_agent | mlflow   | 8,260 | 10-15      | Intensive usage              |
 
-L'instruction est la même dans les trois cas. Mais l'agent ajuste l'intensité du retrieval à la complexité de la tâche et à la taille du repo — **sans qu'aucune règle ne le prescrive**. C'est cette calibration qui est émergente, pas l'usage lui-même.
+The instruction is identical in all three cases. But the agent adjusts retrieval intensity to task complexity and repo size — **without any rule prescribing it**. What's emergent is the calibration, not the usage itself.
 
-> **Encart : La différence entre guider et calibrer**
+> **Sidebar: The difference between guiding and calibrating**
 >
-> Il faut distinguer deux niveaux de décision. Le premier : *utiliser ou non* l'outil de recherche. C'est guidé — les instructions CLAUDE.md disent explicitement de l'utiliser pour l'exploration. Le second : *combien* l'utiliser, avec quelle intensité, quand s'arrêter. C'est émergent — rien dans les instructions ne prescrit 1 appel plutôt que 15. Et c'est ce second niveau qui produit le retrieval sélectif.
+> Two decision levels must be distinguished. The first: *to use or not* the search tool. That's guided — CLAUDE.md instructions explicitly say to use it for exploration. The second: *how much* to use it, with what intensity, when to stop. That's emergent — nothing in the instructions prescribes 1 call rather than 15. And it's this second level that produces selective retrieval.
 
 ---
 
-## Métacognition suffisante
+## Sufficient metacognition
 
-Ce résultat est en tension avec la littérature sur la métacognition des LLMs. Ackerman et al. (2025) ont montré que les capacités métacognitives des modèles sont "limitées en résolution et qualitativement différentes de l'humain". Les LLMs ne savent pas finement ce qu'ils savent et ce qu'ils ne savent pas.
+This result is in tension with the literature on LLM metacognition. Ackerman et al. (2025) showed that model metacognitive capabilities are "limited in resolution and qualitatively different from human." LLMs don't finely know what they know and what they don't.
 
-Mais nos observations suggèrent une nuance : **les LLMs n'ont pas besoin d'une métacognition fine pour faire du retrieval sélectif**. Ils ont besoin de deux capacités beaucoup plus grossières :
+But our observations suggest a nuance: **LLMs don't need fine metacognition to do selective retrieval**. They need two much coarser capabilities:
 
-1. **Détecter qu'il manque quelque chose.** "Je dois implémenter un module de validation, mais je ne vois pas de code de validation existant dans mon contexte." Ce n'est pas de la métacognition fine — c'est de la détection d'absence.
+1. **Detecting that something is missing.** "I have to implement a validation module, but I don't see any existing validation code in my context." That isn't fine metacognition — it's absence detection.
 
-2. **Évaluer si un outil pourrait aider.** "J'ai un outil de recherche. Ma requête porte sur la validation dans un grand repo. L'outil pourrait m'aider." Ce n'est pas de la décision sophistiquée — c'est du pattern matching sur la disponibilité des outils.
+2. **Evaluating whether a tool might help.** "I have a search tool. My query is about validation in a big repo. The tool might help." That isn't sophisticated decision-making — it's pattern matching on tool availability.
 
-La combinaison de ces deux capacités grossières, avec un outil qui coûte peu en contexte (~300 tokens par requête), produit un comportement qui *ressemble* au retrieval adaptatif — sans le mécanisme complexe.
+The combination of these two coarse capabilities, with a tool that costs little context (~300 tokens per query), produces behavior that *resembles* adaptive retrieval — without the complex mechanism.
 
-> **Encart : La prothèse métacognitive revisitée**
+> **Sidebar: The metacognitive prosthesis revisited**
 >
-> Dans [[R1_Le_Goulot_de_Localisation|R1]], nous avons décrit l'outil de recherche comme une "prothèse métacognitive". L'idée était que l'agent peut *vérifier* à moindre coût ce qu'il ne sait pas, sans avoir besoin de *savoir* qu'il ne sait pas. Les résultats confirment cette intuition : l'agent ne "sait" pas qu'il lui manque `scorers.py`. Mais il peut chercher "validation scorers" et obtenir la réponse en 300 tokens. Le coût de vérification est si bas que la question "est-ce que je sais ?" devient sans objet.
+> In [[R1_Le_Goulot_de_Localisation_en|R1]] we described the search tool as a "metacognitive prosthesis." The idea was the agent can *check* cheaply what it doesn't know, without needing to *know* that it doesn't know. The results confirm this intuition: the agent doesn't "know" it's missing `scorers.py`. But it can search "validation scorers" and get the answer in 300 tokens. Verification cost is so low the "do I know?" question becomes moot.
 
 ---
 
-## Le trade-off coût-qualité
+## The cost-quality trade-off
 
-Un argument contre le retrieval est qu'il augmente le coût par tâche. Et c'est vrai.
+One argument against retrieval is that it increases per-task cost. And that's true.
 
-Sur test_validation :
+On test_validation:
 
-| Condition     | Coût  | Résolu ? | Coût par tâche résolue |
-| ------------- | ----- | -------- | ---------------------- |
-| B (Discovery) | $1.50 | Non      | ∞ (jamais résolu)      |
-| C (FTS)       | $2.42 | Oui      | **$2.42**              |
-| D (FTS+Embed) | $1.33 | Oui      | **$1.33**              |
+| Condition     | Cost  | Resolved? | Cost per resolved task |
+| ------------- | ----- | --------- | ---------------------- |
+| B (Discovery) | $1.50 | No        | ∞ (never resolved)     |
+| C (FTS)       | $2.42 | Yes       | **$2.42**              |
+| D (FTS+Embed) | $1.33 | Yes       | **$1.33**              |
 
-Config B coûte moins cher *par tentative*. Mais elle ne résout jamais la tâche. En pratique, un développeur qui lance un agent sans succès va relancer, peut-être 2-3 fois, puis intervenir manuellement. Le coût réel de "pas de retrieval" n'est pas $1.50 — c'est $1.50 × N tentatives + le temps humain d'intervention.
+Config B costs less *per attempt*. But it never resolves the task. In practice, a developer who launches an agent unsuccessfully will re-run, maybe 2-3 times, then intervene manually. The real cost of "no retrieval" isn't $1.50 — it's $1.50 × N attempts + human intervention time.
 
-Config D résout au premier essai pour $1.33. **Le coût pertinent n'est pas le coût par tentative — c'est le coût par tâche *résolue*.**
+Config D resolves on the first try for $1.33. **The relevant cost isn't cost per attempt — it's cost per *resolved* task.**
 
-Sur test_stub_generator, le calcul est inverse :
+On test_stub_generator, the calculation is reversed:
 
-| Condition | Coût  | Résolu ? |
-| --------- | ----- | -------- |
-| B         | $1.07 | Oui      |
-| C         | $1.30 | Oui      |
-| D         | $1.44 | Oui      |
+| Condition | Cost  | Resolved? |
+| --------- | ----- | --------- |
+| B         | $1.07 | Yes       |
+| C         | $1.30 | Yes       |
+| D         | $1.44 | Yes       |
 
-B résout pour moins cher. L'overhead RTFM (+21% à +35%) est pur gaspillage sur un petit repo. D'où l'importance du retrieval *sélectif* : l'agent devrait utiliser RTFM intensivement sur les grands repos et l'ignorer sur les petits. Et c'est précisément ce qu'il fait — 1-2 appels sur metaflow, 2-3 sur mlflow.
-
----
-
-## Au-delà du code : l'universalité comme force
-
-Les résultats de cette étude portent sur du code. Mais la philosophie de RTFM ([[R2_RTFM_Outil_Agnostique|R2]]) est plus large : c'est un outil de *connaissance*, pas un outil de *code*.
-
-Dans un test A/B séparé — une tâche de rédaction d'article académique, pas de code — nous avons mesuré l'impact de RTFM sur un corpus de musicologie (documents Markdown, articles publiés, notes de recherche). Après 3 itérations d'optimisation de l'outil :
-
-| Métrique | Sans RTFM              | RTFM v3                  |
-| -------- | ---------------------- | ------------------------ |
-| Durée    | 8m16s                  | **6m58s** (-16%)         |
-| Coût     | $22.61                 | **$11.14** (-51%)        |
-| Qualité  | 10 sections, 31K chars | 14 sections, 38.5K chars |
-
-**-51% de coût, -16% de durée, et un article plus complet.** Sur une tâche de documentation, pas de code.
-
-L'outil remplace la navigation aveugle là où c'est nécessaire — que ce soit dans un repo de code ou dans un corpus de recherche — et ne touche pas au reste. Un `grep` dans un repo de 8 000 fichiers est aussi aveugle qu'un `grep` dans un corpus de 900 documents Markdown. Le problème est le même. La solution aussi.
+B resolves for less. RTFM overhead (+21% to +35%) is pure waste on a small repo. Hence the importance of *selective* retrieval: the agent should use RTFM intensively on large repos and ignore it on small ones. And that's precisely what it does — 1-2 calls on metaflow, 2-3 on mlflow.
 
 ---
 
-## La leçon : guider légèrement, laisser calibrer
+## Beyond code: universality as strength
 
-Résumons ce que cette série d'observations nous enseigne.
+The results of this study concern code. But the RTFM philosophy ([[R2_RTFM_Outil_Agnostique_en|R2]]) is broader: it's a *knowledge* tool, not a *code* tool.
 
-**Self-RAG, Repoformer, FLARE** nous disent que le retrieval systématique est sous-optimal. Le retrieval adaptatif est meilleur. Mais leurs mécanismes de décision (fine-tuning, classificateurs, routeurs) sont coûteux à construire et spécifiques à un modèle.
+In a separate A/B test — an academic article writing task, not code — we measured RTFM's impact on a musicology corpus (Markdown documents, published articles, research notes). After 3 iterations of tool optimization:
 
-**Notre approche** tient en deux éléments : trois lignes d'instructions dans CLAUDE.md qui orientent l'agent vers l'outil pour l'exploration, et un outil bon marché qui coûte ~300 tokens par appel. Pas de mécanique de calibration. Pas de règle "si le repo dépasse N fichiers, cherche davantage". L'agent calibre seul.
+| Metric   | Without RTFM             | RTFM v3                    |
+| -------- | ------------------------ | -------------------------- |
+| Duration | 8m16s                    | **6m58s** (-16%)           |
+| Cost     | $22.61                   | **$11.14** (-51%)          |
+| Quality  | 10 sections, 31K chars   | 14 sections, 38.5K chars   |
 
-Et ça marche. Pas parce que l'agent a une métacognition sophistiquée. Mais parce que :
-- L'outil est **orienté** (les instructions disent "utilise-le pour l'exploration").
-- L'outil est **bon marché** (~300 tokens par requête).
-- L'outil est **non-invasif** (pas de contexte forcé, pas de retrieval automatique).
-- L'agent a une capacité suffisante de **détection d'absence** ("il me manque quelque chose").
-- **Rien ne prescrit l'intensité** — l'agent calibre seul entre 1 et 15 appels.
+**-51% cost, -16% duration, and a more complete article.** On a documentation task, not code.
 
-C'est peut-être le résultat le plus actionnable de cette étude : **il n'est pas nécessaire de construire des mécanismes sophistiqués de retrieval adaptatif. Il suffit d'orienter l'agent vers un outil bon marché et de le laisser calibrer l'intensité.**
-
-Les agents actuels sont assez intelligents pour faire du retrieval sélectif — à condition qu'on leur montre l'outil, qu'on ne les force pas à un usage systématique, et qu'on les laisse ajuster.
+The tool replaces blind navigation where necessary — whether in a code repo or a research corpus — and leaves the rest alone. A `grep` in an 8,000-file repo is as blind as a `grep` in a 900-document Markdown corpus. The problem is the same. So is the solution.
 
 ---
 
-## Références
+## The lesson: guide lightly, let it calibrate
+
+Let's recap what this series of observations teaches us.
+
+**Self-RAG, Repoformer, FLARE** tell us that systematic retrieval is suboptimal. Adaptive retrieval is better. But their decision mechanisms (fine-tuning, classifiers, routers) are expensive to build and model-specific.
+
+**Our approach** boils down to two elements: three lines of instructions in CLAUDE.md that point the agent toward the tool for exploration, and a cheap tool that costs ~300 tokens per call. No calibration machinery. No "if repo exceeds N files, search more" rule. The agent calibrates itself.
+
+And it works. Not because the agent has sophisticated metacognition. But because:
+- The tool is **oriented** (instructions say "use it for exploration").
+- The tool is **cheap** (~300 tokens per query).
+- The tool is **non-invasive** (no forced context, no automatic retrieval).
+- The agent has sufficient **absence detection** capability ("I'm missing something").
+- **Nothing prescribes intensity** — the agent calibrates itself between 1 and 15 calls.
+
+This is perhaps the most actionable result of this study: **you don't need to build sophisticated adaptive retrieval mechanisms. It's enough to orient the agent toward a cheap tool and let it calibrate intensity.**
+
+Current agents are smart enough to do selective retrieval — provided you show them the tool, don't force systematic use, and let them adjust.
+
+---
+
+## References
 
 - **Asai, A. et al. (2023)** — Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection. ICLR 2024. arXiv:2310.11511.
 - **Wu, Y. et al. (2024)** — Repoformer: Selective Retrieval for Repository-Level Code Completion. ICML 2024. arXiv:2403.10059.
@@ -215,33 +215,33 @@ Les agents actuels sont assez intelligents pour faire du retrieval sélectif —
 
 ---
 
-## Glossaire
+## Glossary
 
-- **Fine-tuning** : entraînement supplémentaire d'un modèle de langage sur des données spécialisées pour modifier son comportement.
-- **Reflection token** : dans Self-RAG, token spécial appris pendant le fine-tuning qui encode la décision de retriever ou non.
-- **Retrieval adaptatif/sélectif** : stratégie où le système décide au cas par cas s'il faut chercher dans un index, au lieu de toujours ou jamais chercher.
-- **Routeur** : dans Adaptive-RAG, petit modèle qui classifie la complexité d'une requête pour choisir le pipeline approprié.
-- **Tool use** : capacité d'un LLM à appeler des outils externes (fichiers, API, bases de données) en cours de génération.
-
----
-
-## Liens dans la série
-
-- [[R1_Le_Goulot_de_Localisation|R1]] — Le goulot de localisation — le problème fondamental
-- [[R2_RTFM_Outil_Agnostique|R2]] — RTFM : un outil de connaissance qui ne touche qu'à ce qu'il doit
-- [[R3_Protocole_Experimental|R3]] — Le protocole : 4 conditions, 11 tâches, même modèle
-- [[R4_Resultats|R4]] — Les résultats : quand la taille du repo change tout
-- **R5** (cet article) — L'agent calibre seul : retrieval sélectif sans entraînement
-- [[R6_Perspectives|R6]] — Ce que ça change — et ce qu'il reste à prouver
+- **Fine-tuning**: additional training of a language model on specialized data to modify its behavior.
+- **Reflection token**: in Self-RAG, a special token learned during fine-tuning that encodes the decision to retrieve or not.
+- **Adaptive/selective retrieval**: strategy where the system decides case-by-case whether to search an index, instead of always or never searching.
+- **Router**: in Adaptive-RAG, a small model that classifies query complexity to pick the appropriate pipeline.
+- **Tool use**: an LLM's ability to call external tools (files, API, databases) during generation.
 
 ---
 
-**Prérequis** : [[R1_Le_Goulot_de_Localisation|R1]] à [[R4_Resultats|R4]]
-**Temps de lecture** : 13 min
-**Tags** : #retrieval-selectif #self-rag #metacognition #agent-autonome #tool-use #adaptive-rag
+## Links in the series
+
+- [[R1_Le_Goulot_de_Localisation_en|R1]] — The localization bottleneck — the fundamental problem
+- [[R2_RTFM_Outil_Agnostique_en|R2]] — RTFM: a knowledge tool that only touches what it must
+- [[R3_Protocole_Experimental_en|R3]] — The protocol: 4 conditions, 11 tasks, same model
+- [[R4_Resultats_en|R4]] — The results: when repo size changes everything
+- **R5** (this article) — The agent calibrates itself: selective retrieval without training
+- [[R6_Perspectives_en|R6]] — What it changes — and what remains to be proven
 
 ---
 
-*Prochain article : [[R6_Perspectives|R6]] — Ce que ça change — et ce qu'il reste à prouver*
+**Prerequisites**: [[R1_Le_Goulot_de_Localisation_en|R1]] through [[R4_Resultats_en|R4]]
+**Reading time**: 13 min
+**Tags**: #selective-retrieval #self-rag #metacognition #autonomous-agent #tool-use #adaptive-rag
+
+---
+
+*Next article: [[R6_Perspectives_en|R6]] — What it changes — and what remains to be proven*
 
 ---

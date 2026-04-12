@@ -1,107 +1,107 @@
-# SOTA 5 — Context-Aware Retrieval vs Exploration à l'Aveugle
+# SOTA 5 — Context-Aware Retrieval vs. Blind Exploration
 
-*Angle : un agent avec outils de recherche vs un agent qui navigue à l'aveugle. Preuves empiriques.*
+*Angle: an agent with search tools vs. an agent navigating blindly. Empirical evidence.*
 
 ---
 
-## 1. L'outil de recherche EST le différenciateur de performance
+## 1. The search tool IS the performance differentiator
 
 ### 1.1 SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering
 - **Authors:** Yang, Jimenez et al. (Princeton)
 - **Year/Venue:** 2024, NeurIPS 2024
 - **Ref:** arXiv:2405.15793
-- **Ablation clé:** Retirer les outils de recherche = **-10.7 points de pourcentage**. Shell-only ~2%, avec ACI de recherche 12.5%.
+- **Key ablation:** Removing the search tools = **-10.7 percentage points**. Shell-only ~2%, with search ACI 12.5%.
 - **URL:** https://arxiv.org/abs/2405.15793
 
 ### 1.2 SWE-Search: Enhancing Software Agents with MCTS
 - **Year/Venue:** 2025, ICLR 2025
-- **Contribution:** Exploration structurée via Monte Carlo Tree Search = **+23% relatif** vs agents greedy standard.
+- **Contribution:** Structured exploration via Monte Carlo Tree Search = **+23% relative** over standard greedy agents.
 - **URL:** https://openreview.net/forum?id=G7sIFXugTX
 
 ---
 
-## 2. Le fossé oracle : combien reste-t-il à gagner ?
+## 2. The oracle gap: how much is left to gain?
 
 ### 2.1 CodeRAG-Bench: Can Retrieval Augment Code Generation?
 - **Authors:** Wang, Asai et al. (CMU)
 - **Year/Venue:** 2024, NAACL 2025 Findings
 - **Ref:** arXiv:2406.14497
-- **Résultat frappant:**
-  - HumanEval, StarCoder2-7B : sans retrieval 31.7% → BM25 43.9% → **contexte oracle 94.5%**
-  - SWE-bench Lite, GPT-4o : sans retrieval 2.3% → meilleur retrieval 21.7% → **oracle 30.7%**
-  - L'écart oracle-retrieval actuel = **9-50 pp selon le modèle**
-- **Pertinence:** Chaque point de qualité de retrieval se traduit directement en performance. Le retrieval parfait triple les résultats.
+- **Striking result:**
+  - HumanEval, StarCoder2-7B: no retrieval 31.7% → BM25 43.9% → **oracle context 94.5%**
+  - SWE-bench Lite, GPT-4o: no retrieval 2.3% → best retrieval 21.7% → **oracle 30.7%**
+  - The current oracle-retrieval gap = **9-50 pp depending on the model**
+- **Relevance:** Every point of retrieval quality translates directly into performance. Perfect retrieval triples results.
 - **URL:** https://arxiv.org/abs/2406.14497
 
 ---
 
-## 3. ~40-60% des tokens d'exploration sont du gaspillage
+## 3. ~40-60% of exploration tokens are waste
 
 ### 3.1 AgentDiet: Trajectory Optimization for Coding Agents
 - **Year/Venue:** 2025, arXiv
-- **Contribution:** Réduction automatique des trajectoires = **-39.9% à -59.7% tokens d'input**, -21.1% à -35.9% de coût, **sans perte de performance**.
-- **Pertinence:** Si 40-60% des tokens d'exploration sont inutiles, un outil qui front-load le contexte élimine ce gaspillage.
+- **Contribution:** Automatic trajectory reduction = **-39.9% to -59.7% input tokens**, -21.1% to -35.9% cost, **with no loss of performance**.
+- **Relevance:** If 40-60% of exploration tokens are useless, a tool that front-loads context eliminates that waste.
 
 ### 3.2 AGENTS.md Study
 - **Year/Venue:** 2025, arXiv
-- **Contribution:** Fournir un fichier de contexte structuré = **-28.64% runtime, -16.58% tokens de sortie**.
-- **Pertinence:** Le simple fait de donner du contexte structuré à l'agent réduit significativement le temps et le coût.
+- **Contribution:** Providing a structured context file = **-28.64% runtime, -16.58% output tokens**.
+- **Relevance:** Simply giving the agent structured context significantly reduces both time and cost.
 
 ---
 
-## 4. Savoir QUAND chercher > toujours chercher
+## 4. Knowing WHEN to search > always searching
 
-### 4.1 Self-RAG (voir SOTA 4 §1.1 pour détails complets)
-- **Résultat clé pour cet angle:** Retrieval adaptatif vs toujours-retrieval = **+40% relatif** sur PopQA.
-- **Le retrieval indiscriminé DÉGRADE la performance.**
+### 4.1 Self-RAG (see SOTA 4 §1.1 for full details)
+- **Key result for this angle:** Adaptive retrieval vs. always-retrieve = **+40% relative** on PopQA.
+- **Indiscriminate retrieval DEGRADES performance.**
 
 ### 4.2 UoT: Uncertainty of Thoughts
 - **Year/Venue:** 2024, NeurIPS 2024
-- **Contribution:** Modélisation explicite de l'incertitude = **+38.1% taux de complétion** vs prompting direct.
-- **Pertinence:** Quand l'agent modélise son incertitude, il sait mieux quand chercher.
+- **Contribution:** Explicit uncertainty modeling = **+38.1% completion rate** vs. direct prompting.
+- **Relevance:** When the agent models its uncertainty, it better knows when to search.
 
-### 4.3 FLARE (voir SOTA 4 §2.1 pour détails complets)
-- **Résultat clé:** θ=0 (jamais retriever) et θ=1 (toujours retriever) sont tous deux sous-optimaux. Le sweet spot est adaptatif.
+### 4.3 FLARE (see SOTA 4 §2.1 for full details)
+- **Key result:** θ=0 (never retrieve) and θ=1 (always retrieve) are both suboptimal. The sweet spot is adaptive.
 
 ---
 
-## 5. Les LLMs ne savent PAS ce qu'ils ne savent pas
+## 5. LLMs do NOT know what they don't know
 
 ### 5.1 Ackerman et al. — Metacognition in LLMs
 - **Year/Venue:** 2025, arXiv
-- **Contribution:** Les LLMs montrent des capacités métacognitives croissantes mais **limitées en résolution, dépendantes du contexte, et qualitativement différentes de l'humain**. Ils échouent à l'auto-évaluation fine.
-- **Implication RTFM:** L'agent n'a pas besoin de *savoir* ce qu'il ne sait pas s'il peut *vérifier* à faible coût via un outil de retrieval. L'outil externe = prothèse métacognitive.
+- **Contribution:** LLMs show growing metacognitive abilities but **limited in resolution, context-dependent, and qualitatively different from humans**. They fail at fine-grained self-assessment.
+- **RTFM implication:** The agent does not need to *know* what it does not know if it can *verify* cheaply via a retrieval tool. The external tool = metacognitive prosthesis.
 
 ---
 
-## 6. Le gap de consolidation : voir ≠ utiliser
+## 6. The consolidation gap: seeing ≠ using
 
 ### 6.1 ContextBench: A Benchmark for Context Retrieval in Coding Agents
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2602.05892
-- **Résultat frappant:** Même quand les agents trouvent le bon contexte (AUC-Cov > 0.70), seuls **50-70%** de l'evidence est retenue dans le contexte final.
-  - Claude Sonnet 4.5 : **20% de perte**
-  - Gemini 2.5 Pro : **43% de perte**
-- **Implication:** Les agents "voient" le code critique mais ne l'*utilisent* pas. Un outil qui sert du contexte **minimal et ciblé** (metadata-first) pourrait outperformer un dump massif.
+- **Striking result:** Even when agents find the right context (AUC-Cov > 0.70), only **50-70%** of the evidence is retained in the final context.
+  - Claude Sonnet 4.5: **20% loss**
+  - Gemini 2.5 Pro: **43% loss**
+- **Implication:** Agents "see" critical code but do not *use* it. A tool that serves **minimal and targeted context** (metadata-first) could outperform a massive dump.
 - **URL:** https://arxiv.org/abs/2602.05892
 
 ---
 
-## 7. Connexion directe à la thèse du paper
+## 7. Direct connection to the paper's thesis
 
-| Trouvaille empirique | Source | Implication |
+| Empirical finding | Source | Implication |
 |---|---|---|
-| Outil de recherche = +10.7 pp | SWE-agent (NeurIPS 2024) | Le retrieval en tant qu'outil MCP est le bon pattern |
-| Gap oracle = 50+ pp (petits modèles) | CodeRAG-Bench (NAACL 2025) | Mieux retriever = impact direct sur la qualité |
-| Localisation hiérarchique bat la navigation | Agentless (2024) | search → expand = exactement le bon pattern |
-| 40-60% tokens gaspillés en exploration | AgentDiet (2025) | Metadata-first évite de charger du contexte inutile |
-| Retrieval adaptatif > toujours-retrieval | Self-RAG (ICLR 2024) | Donner le choix > forcer l'usage |
-| LLMs ne se connaissent pas (métacognition limitée) | Ackerman (2025) | Outil externe comme prothèse métacognitive |
-| Gap de consolidation (voir ≠ utiliser) | ContextBench (2025) | Contexte minimal et précis > dump massif |
+| Search tool = +10.7 pp | SWE-agent (NeurIPS 2024) | Retrieval as an MCP tool is the right pattern |
+| Oracle gap = 50+ pp (small models) | CodeRAG-Bench (NAACL 2025) | Better retrieval = direct impact on quality |
+| Hierarchical localization beats navigation | Agentless (2024) | search → expand = exactly the right pattern |
+| 40-60% of tokens wasted on exploration | AgentDiet (2025) | Metadata-first avoids loading useless context |
+| Adaptive retrieval > always-retrieve | Self-RAG (ICLR 2024) | Giving the choice > forcing use |
+| LLMs do not know themselves (limited metacognition) | Ackerman (2025) | External tool as metacognitive prosthesis |
+| Consolidation gap (seeing ≠ using) | ContextBench (2025) | Minimal, precise context > massive dump |
 
 ---
 
-## Références bibliographiques
+## Bibliographic references
 
 1. Yang, J. et al. (2024). SWE-agent. NeurIPS 2024. arXiv:2405.15793.
 2. (2025). SWE-Search. ICLR 2025. https://openreview.net/forum?id=G7sIFXugTX

@@ -1,177 +1,177 @@
 ---
 type: article
-title: "R6) Ce que ça change — et ce qu'il reste à prouver"
-subtitle: "La règle des 1 000 fichiers, les limites de notre étude, et pourquoi la barre est si basse dans ce domaine."
-excerpt: "Déployez un outil de retrieval sur tout projet de plus de 1 000 fichiers. Mais ne nous croyez pas sur parole — voici exactement ce que nous avons prouvé et ce que nous n'avons pas prouvé."
-slug: perspectives-retrieval-agents-codeurs
-focus_keyword: perspectives retrieval agents
+title: "R6) What It Changes — and What Remains to Be Proven"
+subtitle: "The 1,000-file rule, the limits of our study, and why the bar is so low in this field."
+excerpt: "Deploy a retrieval tool on any project with more than 1,000 files. But don't take our word for it — here's exactly what we proved and what we didn't."
+slug: perspectives-retrieval-coding-agents
+focus_keyword: retrieval agents perspectives
 tags:
   - perspectives
-  - limites
-  - recommandations
-  - rigueur
-  - reproductibilité
+  - limits
+  - recommendations
+  - rigor
+  - reproducibility
   - emse
   - conclusion
 ---
 
 > [!abstract]- SPEC
-> ## Brief — R6 : Perspectives
-> ### Position dans la série
-> - **Série** : R (Retrieval) — Does Retrieval Help? | **Prérequis** : [[R1_Le_Goulot_de_Localisation|R1]] à [[R5_Agent_Decide_Seul|R5]]
-> - Dernier article de la série : synthèse, limites, recommandations
-> ### Sujets couverts
-> - Recommandations pratiques (la règle des 1 000 fichiers)
-> - Limites méthodologiques (un modèle, un outil, 11 tâches)
-> - L'état de la rigueur dans le domaine
-> - Travaux futurs
-> - Appel à la reproductibilité
+> ## Brief — R6: Perspectives
+> ### Position in the series
+> - **Series**: R (Retrieval) — Does Retrieval Help? | **Prerequisites**: [[R1_Le_Goulot_de_Localisation_en|R1]] through [[R5_Agent_Decide_Seul_en|R5]]
+> - Last article of the series: synthesis, limits, recommendations
+> ### Topics covered
+> - Practical recommendations (the 1,000-file rule)
+> - Methodological limits (one model, one tool, 11 tasks)
+> - The state of rigor in the field
+> - Future work
+> - Call for reproducibility
 
-# R6) Ce que ça change — et ce qu'il reste à prouver
+# R6) What it changes — and what remains to be proven
 
-## La règle des 1 000 fichiers, les limites, et pourquoi la barre est si basse
+## The 1,000-file rule, the limits, and why the bar is so low
 
-> La meilleure contribution de cette étude n'est peut-être pas ses résultats — c'est son protocole.
+> This study's best contribution may not be its results — it's its protocol.
 
-## Où se situe cet article ?
+## Where does this article fit?
 
-Cette série a traversé un arc complet : le problème ([[R1_Le_Goulot_de_Localisation|R1]]), l'outil ([[R2_RTFM_Outil_Agnostique|R2]]), le protocole ([[R3_Protocole_Experimental|R3]]), les résultats ([[R4_Resultats|R4]]), et l'analyse comportementale ([[R5_Agent_Decide_Seul|R5]]).
+This series has traversed a complete arc: the problem ([[R1_Le_Goulot_de_Localisation_en|R1]]), the tool ([[R2_RTFM_Outil_Agnostique_en|R2]]), the protocol ([[R3_Protocole_Experimental_en|R3]]), the results ([[R4_Resultats_en|R4]]), and the behavioral analysis ([[R5_Agent_Decide_Seul_en|R5]]).
 
-Il est temps de prendre du recul. Qu'est-ce qui est établi ? Qu'est-ce qui ne l'est pas ? Et surtout : qu'est-ce que ça change en pratique ?
-
----
-
-## Ce qui est établi
-
-### 1. Le retrieval transforme les résultats sur les grands repos
-
-Sur test_validation (mlflow, 8 260 fichiers), le resolve rate passe de 55-64% sans retrieval à 100% avec retrieval. C'est un résultat fort : la même tâche, le même agent, le même modèle — la seule différence est l'accès à un outil de recherche pré-indexé.
-
-Le mécanisme causal est identifié : l'agent sans retrieval ne trouve pas les dépendances cross-module (`validation.py` ↔ `scorers.py` ↔ `data.py`). L'agent avec retrieval les localise en 2-3 requêtes et implémente un module compatible.
-
-### 2. Le retrieval ne sert à rien sur les petits repos
-
-Sur test_stub_generator (metaflow, 624 fichiers), les 4 configs résolvent la tâche. Le retrieval est un overhead sans bénéfice : +23% de temps, +22% de coût. L'agent le sait intuitivement — il n'utilise quasiment pas l'outil.
-
-### 3. FTS suffit, les embeddings ajoutent de l'efficience
-
-Config C (FTS seul) et Config D (FTS+embeddings) résolvent les mêmes tâches. Les embeddings réduisent les tours (-38%), le coût (-45%) et les lectures de fichiers (-48%) — mais ne changent pas le résultat binaire. Le FTS, via BM25, est une baseline remarquablement forte pour la recherche de code.
-
-### 4. Le retrieval ne compense pas la complexité intrinsèque
-
-test_responses_agent (78K chars, 15 interfaces) n'est résolu par aucune config. Le retrieval aide à couvrir plus d'interfaces (12/15 avec embeddings vs 8/15 avec FTS seul), mais Sonnet 4.0 ne peut pas gérer la complexité de la tâche même avec un contexte parfait. Le retrieval est nécessaire mais pas suffisant.
-
-### 5. L'agent fait du retrieval sélectif naturellement
-
-Sans instruction spéciale, l'agent ajuste l'intensité du retrieval à la tâche : 1-2 appels sur un petit repo, 2-3 sur un grand repo simple, 10-15 sur une tâche complexe. Le retrieval adaptatif émerge de la disponibilité de l'outil, sans fine-tuning ni classificateur.
+It's time to step back. What's established? What isn't? And above all: what does it change in practice?
 
 ---
 
-## Ce qui n'est PAS établi
+## What is established
 
-### Le seuil de taille
+### 1. Retrieval transforms results on large repos
 
-Nous avons un point à 624 fichiers (pas de gain) et un point à 8 260 fichiers (gain fort). La zone entre 700 et 5 000 fichiers est terra incognita. Les runs sur pydantic (771) et astropy (1 123) sont en cours et nous diront si le seuil est autour de 1 000, 2 000 ou 5 000 fichiers.
+On test_validation (mlflow, 8,260 files), the resolve rate goes from 55-64% without retrieval to 100% with retrieval. It's a strong result: same task, same agent, same model — the only difference is access to a pre-indexed search tool.
 
-### La significativité statistique
+The causal mechanism is identified: the agent without retrieval doesn't find cross-module dependencies (`validation.py` ↔ `scorers.py` ↔ `data.py`). The agent with retrieval locates them in 2-3 queries and implements a compatible module.
 
-Les résultats présentés sont des runs uniques. Nous n'avons pas encore N ≥ 3 répétitions par condition pour calculer des intervalles de confiance et des p-values. La variabilité d'un agent codeur est substantielle — le même agent peut réussir ou échouer sur la même tâche selon les choix stochastiques du modèle.
+### 2. Retrieval is useless on small repos
 
-### La généralisation à d'autres modèles
+On test_stub_generator (metaflow, 624 files), all 4 configs resolve the task. Retrieval is overhead without benefit: +23% time, +22% cost. The agent knows it intuitively — it barely uses the tool.
 
-Nous avons testé un seul modèle : Claude Sonnet 4.0. GPT-4, Gemini 2.5 Pro, Llama, ou même Claude Opus pourraient montrer des résultats différents. La capacité métacognitive qui permet le retrieval sélectif pourrait varier d'un modèle à l'autre.
+### 3. FTS is enough, embeddings add efficiency
 
-### La généralisation à d'autres outils
+Config C (FTS alone) and Config D (FTS+embeddings) resolve the same tasks. Embeddings reduce turns (-38%), cost (-45%), and file reads (-48%) — but don't change the binary outcome. FTS, via BM25, is a remarkably strong baseline for code search.
 
-Nous avons testé un seul outil : RTFM. Augment Context Engine, Sourcegraph Cody, ou un autre outil de retrieval pourrait donner des résultats différents. Le pattern metadata-first est-il crucial, ou est-ce que n'importe quel outil de recherche ferait l'affaire ?
+### 4. Retrieval doesn't compensate for intrinsic complexity
 
-### La généralisation à d'autres langages
+test_responses_agent (78K chars, 15 interfaces) isn't resolved by any config. Retrieval helps cover more interfaces (12/15 with embeddings vs 8/15 with FTS alone), but Sonnet 4.0 can't handle the task's complexity even with perfect context. Retrieval is necessary but not sufficient.
 
-FeatureBench lite est Python-only. Le goulot de localisation existe-t-il de la même manière dans un projet Java, TypeScript, ou Rust ? La structure du langage (modules, imports, types) pourrait changer la dynamique.
+### 5. The agent does selective retrieval naturally
+
+Without special instructions, the agent adjusts retrieval intensity to the task: 1-2 calls on a small repo, 2-3 on a simple large repo, 10-15 on a complex task. Adaptive retrieval emerges from tool availability, without fine-tuning or classifier.
 
 ---
 
-## Recommandations pratiques
+## What is NOT established
 
-Malgré les limites, les résultats sont suffisamment clairs pour des recommandations provisoires.
+### The size threshold
 
-### La règle des 1 000 fichiers
+We have one point at 624 files (no gain) and one at 8,260 files (strong gain). The zone between 700 and 5,000 files is terra incognita. Runs on pydantic (771) and astropy (1,123) are in progress and will tell us if the threshold sits around 1,000, 2,000 or 5,000 files.
 
-**Déployez un outil de retrieval pré-indexé sur tout projet de plus de 1 000 fichiers.** Le coût d'initialisation est négligeable (10-78 secondes de parsing pour le FTS) et le bénéfice potentiel est considérable.
+### Statistical significance
 
-Sur les projets de moins de 600 fichiers, l'overhead du retrieval n'est pas justifié. La navigation directe suffit.
+The results presented are single runs. We don't yet have N ≥ 3 repetitions per condition to compute confidence intervals and p-values. Coding agent variability is substantial — the same agent can succeed or fail on the same task depending on model stochastic choices.
 
-Entre 600 et 1 000 : au cas par cas, selon la complexité du projet.
+### Generalization to other models
 
-### FTS d'abord, embeddings ensuite
+We tested a single model: Claude Sonnet 4.0. GPT-4, Gemini 2.5 Pro, Llama, or even Claude Opus might show different results. The metacognitive capability enabling selective retrieval could vary across models.
 
-Le FTS (BM25 via SQLite FTS5) est la baseline forte. Il résout les mêmes tâches que FTS+embeddings, sans le coût d'indexation des embeddings (qui peut aller jusqu'à 90 minutes sur un grand repo). Commencez par FTS. Ajoutez les embeddings si vous avez besoin d'efficience (moins de tours, moins de coût par run).
+### Generalization to other tools
 
-### Ne forcez pas le retrieval
+We tested a single tool: RTFM. Augment Context Engine, Sourcegraph Cody, or another retrieval tool might give different results. Is the metadata-first pattern crucial, or would any search tool do?
 
-Ne mettez pas d'instruction "utilise TOUJOURS RTFM" dans le prompt de l'agent. L'agent fait du retrieval sélectif naturellement. Forcer le retrieval systématique est contre-productif — c'est exactement ce que Self-RAG et Repoformer ont démontré.
+### Generalization to other languages
+
+FeatureBench lite is Python-only. Does the localization bottleneck exist the same way in a Java, TypeScript, or Rust project? Language structure (modules, imports, types) could change the dynamics.
+
+---
+
+## Practical recommendations
+
+Despite the limits, the results are clear enough for provisional recommendations.
+
+### The 1,000-file rule
+
+**Deploy a pre-indexed retrieval tool on any project with more than 1,000 files.** The initialization cost is negligible (10-78 seconds of parsing for FTS) and the potential benefit is substantial.
+
+On projects with fewer than 600 files, retrieval overhead isn't justified. Direct navigation is enough.
+
+Between 600 and 1,000: case by case, depending on project complexity.
+
+### FTS first, embeddings later
+
+FTS (BM25 via SQLite FTS5) is the strong baseline. It resolves the same tasks as FTS+embeddings, without the embeddings indexing cost (which can reach 90 minutes on a large repo). Start with FTS. Add embeddings if you need efficiency (fewer turns, lower cost per run).
+
+### Don't force retrieval
+
+Don't put an "ALWAYS use RTFM" instruction in the agent's prompt. The agent does selective retrieval naturally. Forcing systematic retrieval is counterproductive — that's exactly what Self-RAG and Repoformer demonstrated.
 
 ### Metadata-first
 
-Si vous construisez ou choisissez un outil de retrieval, privilégiez un pattern qui renvoie des métadonnées (titre, chemin, score) plutôt que du contenu complet. Le context rot est réel. Moins de tokens dans les résultats de recherche = plus d'espace pour le code qui compte.
+If you build or pick a retrieval tool, favor a pattern that returns metadata (title, path, score) rather than full content. Context rot is real. Fewer tokens in search results = more room for the code that matters.
 
 ---
 
-## L'éléphant dans la pièce : la barre de la rigueur
+## The elephant in the room: the rigor bar
 
-Un aspect de cette étude qui nous frappe : **la barre de la rigueur est incroyablement basse dans ce domaine.**
+One aspect of this study strikes us: **the rigor bar is incredibly low in this field.**
 
-Augment Code revendique "+80% de performance" sans publier de protocole. Des centaines d'entreprises affirment que leurs outils "améliorent la productivité des développeurs" sans données contrôlées. Des papiers académiques évaluent leurs outils sur des micro-tâches créées par les auteurs eux-mêmes.
+Augment Code claims "+80% performance" without publishing a protocol. Hundreds of companies claim their tools "improve developer productivity" without controlled data. Academic papers evaluate their tools on micro-tasks created by the authors themselves.
 
-Notre étude n'est pas parfaite. Un seul modèle, un seul outil, 11 tâches, des runs uniques. Mais nous avons :
-- Un benchmark **tiers** (FeatureBench, ICLR 2026) — pas des tâches que nous avons créées.
-- Un protocole à **4 conditions** avec une variable isolée.
-- Des **métriques reproductibles** (resolve rate, F2P, coût, durée).
-- Une transparence sur les **limites** et les données manquantes.
+Our study isn't perfect. A single model, a single tool, 11 tasks, single runs. But we have:
+- A **third-party** benchmark (FeatureBench, ICLR 2026) — not tasks we created.
+- A **4-condition** protocol with an isolated variable.
+- **Reproducible metrics** (resolve rate, F2P, cost, duration).
+- Transparency about **limits** and missing data.
 
-Le fait que ce niveau minimal de rigueur soit *exceptionnel* dans le domaine des outils pour agents codeurs en dit long sur l'état du champ.
+The fact that this minimal level of rigor is *exceptional* in the field of coding agent tools speaks volumes about the state of the field.
 
-Nous ne prétendons pas avoir prouvé définitivement que le retrieval aide. Nous prétendons avoir posé la bonne question, avec le bon protocole. Les résultats complets, avec répétitions et significativité statistique, seront soumis à *Empirical Software Engineering* (EMSE).
-
----
-
-## Travaux futurs
-
-### Court terme (cette étude)
-
-- Compléter la matrice 11 tâches × 4 conditions × N ≥ 3 répétitions.
-- Évaluer les repos intermédiaires (pydantic 771, astropy 1 123) pour localiser le seuil.
-- Tests statistiques (Wilcoxon signed-rank, intervalles de confiance).
-- Analyse qualitative : sur chaque tâche où C/D > B, quels fichiers le retrieval a-t-il trouvé que B n'a pas trouvés ?
-
-### Moyen terme
-
-- Tester avec d'autres modèles (GPT-4, Gemini, Opus, modèles open-source).
-- Tester avec d'autres outils de retrieval (Augment, Cody) — si les APIs le permettent.
-- Étendre à SWE-bench pour la comparabilité.
-- Mesurer l'impact sur des tâches non-Python (FeatureBench full).
-
-### Long terme
-
-- Étudier l'interaction retrieval × modèle : est-ce que les modèles plus puissants bénéficient plus ou moins du retrieval ?
-- Explorer le retrieval *proactif* : l'outil pourrait-il pré-charger du contexte pertinent avant même que l'agent ne cherche ?
-- Mesurer l'impact en conditions réelles (pas benchmark) sur des tâches de développement quotidiennes.
+We don't claim to have definitively proven retrieval helps. We claim to have posed the right question, with the right protocol. Full results, with repetitions and statistical significance, will be submitted to *Empirical Software Engineering* (EMSE).
 
 ---
 
-## Ce que cette série raconte, au fond
+## Future work
 
-Nous sommes partis d'une intuition simple : les agents codeurs sont limités par leur capacité à trouver le bon contexte, pas par leur capacité à écrire du code. Nous avons construit un outil pour tester cette intuition. Et les résultats confirment : **donner à un agent un outil de recherche pré-indexé transforme ses performances sur les grands projets.**
+### Short term (this study)
 
-Mais la leçon la plus profonde n'est pas technique. C'est une leçon sur le *design* des outils pour agents IA.
+- Complete the 11 tasks × 4 conditions × N ≥ 3 repetitions matrix.
+- Evaluate the intermediate repos (pydantic 771, astropy 1,123) to locate the threshold.
+- Statistical tests (Wilcoxon signed-rank, confidence intervals).
+- Qualitative analysis: on each task where C/D > B, which files did retrieval find that B didn't?
 
-On n'a pas besoin de forcer l'agent. On n'a pas besoin de modifier son comportement. On n'a pas besoin de construire des mécanismes complexes de décision. Il suffit de lui **donner le choix** — un outil disponible, peu coûteux, non-invasif — et il choisit bien.
+### Medium term
 
-Ce n'est pas un GPS qui dicte le chemin. C'est une carte que l'agent peut consulter quand il le souhaite. Et cette distinction — entre l'outil qui commande et l'outil qui permet — fait toute la différence.
+- Test with other models (GPT-4, Gemini, Opus, open-source models).
+- Test with other retrieval tools (Augment, Cody) — if APIs allow.
+- Extend to SWE-bench for comparability.
+- Measure impact on non-Python tasks (FeatureBench full).
+
+### Long term
+
+- Study the retrieval × model interaction: do more powerful models benefit more or less from retrieval?
+- Explore *proactive* retrieval: could the tool pre-load relevant context before the agent even searches?
+- Measure impact in real conditions (not benchmark) on daily development tasks.
 
 ---
 
-## Références
+## What this series is really about
+
+We started from a simple intuition: coding agents are limited by their ability to find the right context, not by their ability to write code. We built a tool to test that intuition. And the results confirm: **giving an agent a pre-indexed search tool transforms its performance on large projects.**
+
+But the deepest lesson isn't technical. It's a lesson about *designing* tools for AI agents.
+
+You don't need to force the agent. You don't need to modify its behavior. You don't need to build complex decision mechanisms. It's enough to **give it the choice** — an available, cheap, non-invasive tool — and it chooses well.
+
+It's not a GPS dictating the route. It's a map the agent can consult when it wants. And this distinction — between the tool that commands and the tool that enables — makes all the difference.
+
+---
+
+## References
 
 - **FeatureBench (2026)** — ICLR 2026. arXiv:2602.10975.
 - **Jimenez, C.E. et al. (2024)** — SWE-bench. ICLR 2024. arXiv:2310.06770.
@@ -183,34 +183,34 @@ Ce n'est pas un GPS qui dicte le chemin. C'est une carte que l'agent peut consul
 
 ---
 
-## Glossaire
+## Glossary
 
-- **EMSE** : *Empirical Software Engineering* — revue Springer spécialisée dans les études empiriques en génie logiciel. La cible de soumission pour la version académique complète de cette étude.
-- **Matrice complète** : l'ensemble des 11 tâches × 4 conditions × N répétitions qui constitue le dataset complet de l'étude.
-- **P-value** : probabilité d'observer les résultats (ou plus extrêmes) sous l'hypothèse nulle — mesure de significativité statistique.
-- **Reproductibilité** : la capacité pour un tiers de reproduire les résultats de l'étude avec le même protocole.
-
----
-
-## Liens dans la série
-
-- [[R1_Le_Goulot_de_Localisation|R1]] — Le goulot de localisation — le problème fondamental
-- [[R2_RTFM_Outil_Agnostique|R2]] — RTFM : un outil de connaissance qui ne touche qu'à ce qu'il doit
-- [[R3_Protocole_Experimental|R3]] — Le protocole : 4 conditions, 11 tâches, même modèle
-- [[R4_Resultats|R4]] — Les résultats : quand la taille du repo change tout
-- [[R5_Agent_Decide_Seul|R5]] — L'agent décide seul : retrieval sélectif sans entraînement
-- **R6** (cet article) — Ce que ça change — et ce qu'il reste à prouver
+- **EMSE**: *Empirical Software Engineering* — Springer journal specialized in empirical software engineering studies. The submission target for the full academic version of this study.
+- **Complete matrix**: the full set of 11 tasks × 4 conditions × N repetitions constituting the study's complete dataset.
+- **P-value**: probability of observing the results (or more extreme) under the null hypothesis — a measure of statistical significance.
+- **Reproducibility**: a third party's ability to reproduce the study's results with the same protocol.
 
 ---
 
-**Prérequis** : [[R1_Le_Goulot_de_Localisation|R1]] à [[R5_Agent_Decide_Seul|R5]]
-**Temps de lecture** : 11 min
-**Tags** : #perspectives #limites #recommandations #rigueur #reproductibilité #emse
+## Links in the series
+
+- [[R1_Le_Goulot_de_Localisation_en|R1]] — The localization bottleneck — the fundamental problem
+- [[R2_RTFM_Outil_Agnostique_en|R2]] — RTFM: a knowledge tool that only touches what it must
+- [[R3_Protocole_Experimental_en|R3]] — The protocol: 4 conditions, 11 tasks, same model
+- [[R4_Resultats_en|R4]] — The results: when repo size changes everything
+- [[R5_Agent_Decide_Seul_en|R5]] — The agent calibrates itself: selective retrieval without training
+- **R6** (this article) — What it changes — and what remains to be proven
 
 ---
 
-*Fin de la série R — Does Retrieval Help?*
+**Prerequisites**: [[R1_Le_Goulot_de_Localisation_en|R1]] through [[R5_Agent_Decide_Seul_en|R5]]
+**Reading time**: 11 min
+**Tags**: #perspectives #limits #recommendations #rigor #reproducibility #emse
 
-*RTFM est open source : [github.com/roomi-fields/rtfm](https://github.com/roomi-fields/rtfm)*
+---
+
+*End of series R — Does Retrieval Help?*
+
+*RTFM is open source: [github.com/roomi-fields/rtfm](https://github.com/roomi-fields/rtfm)*
 
 ---

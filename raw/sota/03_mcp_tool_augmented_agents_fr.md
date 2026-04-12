@@ -1,4 +1,4 @@
-# SOTA 3 — Tool-Augmented LLM Agents, MCP & Context Management
+# SOTA 3 — Agents LLM Augmentés par Outils, MCP & Gestion de Contexte
 
 ## 1. Model Context Protocol (MCP)
 
@@ -6,7 +6,7 @@
 - **Authors:** Xinyi Hou et al.
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2503.23278
-- **Contribution:** First systematic study of MCP. A four-phase lifecycle (creation, deployment, operation, maintenance) spanning 16 activities. Threat taxonomy. Adoption by OpenAI, Google, Microsoft.
+- **Contribution:** Première étude systématique de MCP. Cycle de vie en 4 phases (création, déploiement, opération, maintenance), 16 activités. Taxonomie des menaces. Adoption par OpenAI, Google, Microsoft.
 - **URL:** https://arxiv.org/abs/2503.23278
 
 ### 1.2 A Survey of the Model Context Protocol
@@ -18,20 +18,20 @@
 - **Authors:** Accenture
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2508.20453
-- **Contribution:** 28 MCP servers, 250 tools, 20 LLMs. Evaluates multi-step planning and cross-tool coordination.
+- **Contribution:** 28 serveurs MCP, 250 outils, 20 LLMs. Évalue planification multi-étapes, coordination inter-outils.
 - **URL:** https://arxiv.org/abs/2508.20453
 
 ### 1.4 RAG-MCP: Mitigating Prompt Bloat in LLM Tool Selection via RAG
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2505.03275
-- **Contribution:** The number of MCP servers degrades tool selection. A RAG framework loads only the relevant MCPs.
-- **Relevance:** Validates the principle of not loading everything — serve the minimum that is relevant.
+- **Contribution:** Le nombre de serveurs MCP dégrade la sélection d'outils. Framework RAG pour ne charger que les MCP pertinents.
+- **Pertinence:** Valide le principe de ne pas tout charger — servir le minimum pertinent.
 - **URL:** https://arxiv.org/abs/2505.03275
 
 ### 1.5 MCP-Zero: Active Tool Discovery for Autonomous LLM Agents
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2506.01056
-- **Contribution:** Query-based retrieval caps at 65-72%. Near-optimal precision via active discovery, with context reduced by two orders of magnitude.
+- **Contribution:** Retrieval query-based plafonne à 65-72%. Précision quasi-optimale via active discovery, contexte réduit de 2 ordres de grandeur.
 - **URL:** https://arxiv.org/abs/2506.01056
 
 ### 1.6 Dynamic ReAct: Scalable Tool Selection for Large-Scale MCP Environments
@@ -42,183 +42,183 @@
 ### 1.7 ScaleMCP: Dynamic and Auto-Synchronizing MCP Tools for LLM Agents
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2505.06416
-- **Contribution:** Automatic synchronization, 10 LLMs, 5 embedding models, 5 retrievers tested.
+- **Contribution:** Synchronisation automatique, 10 LLMs, 5 modèles d'embedding, 5 retrievers testés.
 - **URL:** https://arxiv.org/abs/2505.06416
 
 ---
 
-## 2. Tool-Augmented LLM Agents
+## 2. Agents LLM Augmentés par Outils
 
 ### 2.1 Large Language Model-Based Agents for Software Engineering: A Survey
 - **Authors:** FudanSELab
 - **Year/Venue:** 2024, arXiv
 - **Ref:** arXiv:2409.02977
-- **Contribution:** 124 papers analyzed. Code generation, testing, maintenance, autonomous decision making. Categorization from both SE and agent perspectives.
+- **Contribution:** 124 papers analysés. Génération de code, test, maintenance, décision autonome. Catégorisation depuis les perspectives SE et agent.
 - **URL:** https://arxiv.org/abs/2409.02977
 
 ### 2.2 SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering
 - **Authors:** Yang et al. (Princeton)
 - **Year/Venue:** 2024, NeurIPS 2024
 - **Ref:** arXiv:2405.15793
-- **Contribution:** Custom ACI for repo navigation, editing, tests. 12.5% pass@1 on SWE-bench. RAG alone = 3.8%.
-- **Relevance:** SWE-agent uses grep/find — structured retrieval replaces that step.
+- **Contribution:** ACI custom pour navigation de repo, édition, tests. 12.5% pass@1 sur SWE-bench. RAG seul = 3.8%.
+- **Pertinence:** SWE-agent utilise grep/find — le retrieval structuré remplace cette étape.
 - **URL:** https://arxiv.org/abs/2405.15793
 
 ### 2.3 LLM-Based Agents for Tool Learning: A Survey
 - **Year/Venue:** 2025, Springer Data Science and Engineering
-- **Contribution:** 100+ papers (2020-2024). Three stages: invoke, retrieve the tool, use it effectively.
+- **Contribution:** 100+ papers (2020-2024). 3 étapes : invoquer, retrouver l'outil, utiliser efficacement.
 - **URL:** https://link.springer.com/article/10.1007/s41019-025-00296-9
 
 ### 2.4 LLM Agents Improve Semantic Code Search (RepoRift)
 - **Authors:** Sarthak Jain et al. (UIUC/Cisco)
 - **Year/Venue:** 2024, arXiv
 - **Ref:** arXiv:2408.11058
-- **Contribution:** LLM agents inject contextual information into queries via RAG. 78.2% Success@10.
+- **Contribution:** Agents LLM injectent des infos contextuelles dans les requêtes via RAG. 78.2% Success@10.
 - **URL:** https://arxiv.org/abs/2408.11058
 
 ---
 
-## 3. RAG for Software Engineering
+## 3. RAG pour le Génie Logiciel
 
 ### 3.1 RACG Survey (Repository-Level)
 - **Authors:** Yicheng Tao, Yao Qin, Yepang Liu
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2510.04905
-- **Contribution:** Comprehensive RACG survey. Distinguishes file-level from repository-level. The real challenges are long-range dependencies and semantic coherence.
-- **Relevance:** Covers only code. Gap for multi-format.
+- **Contribution:** Survey exhaustif RACG. Distinction file-level vs repository-level. Les vrais défis = dépendances longue portée + cohérence sémantique.
+- **Pertinence:** Ne couvre que le code. Gap pour le multi-format.
 - **URL:** https://arxiv.org/abs/2510.04905
 
 ### 3.2 CodeRAG-Bench: Can Retrieval Augment Code Generation?
 - **Authors:** Wang, Asai, Yu, Xu, Xie, Neubig, Fried (CMU)
 - **Year/Venue:** 2024, NAACL 2025 Findings
 - **Ref:** arXiv:2406.14497
-- **Contribution:** 5 sources, 10 retrievers, 10 LLMs. Retrievers fail when lexical overlap is low.
-- **Relevance:** Validates the need for hybrid search (FTS + semantic).
+- **Contribution:** 5 sources, 10 retrievers, 10 LLMs. Les retrievers échouent avec faible overlap lexical.
+- **Pertinence:** Valide le besoin de recherche hybride (FTS + sémantique).
 - **URL:** https://arxiv.org/abs/2406.14497
 
 ### 3.3 cAST: Enhancing Code RAG with Structural Chunking via AST
 - **Authors:** Zhang, Zhao, Wang, Yang, Wei, Wu (CMU)
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2506.15655
-- **Contribution:** AST-based chunking outperforms line-based chunking. Respects semantic boundaries.
+- **Contribution:** Chunking par AST > chunking par lignes. Respecte les frontières sémantiques.
 - **URL:** https://arxiv.org/abs/2506.15655
 
 ### 3.4 Agentic RAG: A Survey
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2501.09136
-- **Contribution:** Taxonomy of Agentic RAG. The agent decides when to search and what to expand.
+- **Contribution:** Taxonomie Agentic RAG. L'agent décide quand chercher et quoi expand.
 - **URL:** https://arxiv.org/abs/2501.09136
 
 ### 3.5 A-RAG: Scaling Agentic RAG via Hierarchical Retrieval Interfaces
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2602.03442
-- **Contribution:** **Three hierarchical tools:** keyword search, semantic search, chunk read. The agent chooses the granularity. Outperforms baselines with fewer tokens.
-- **Relevance:** **Architecture nearly identical to RTFM** (search → expand). Validated on QA, not SE.
+- **Contribution:** **3 outils hiérarchiques** : keyword search, semantic search, chunk read. L'agent choisit la granularité. Outperforms baselines avec moins de tokens.
+- **Pertinence:** **Architecture quasi-identique à RTFM** (search → expand). Validé sur QA, pas sur SE.
 - **URL:** https://arxiv.org/abs/2602.03442
 
 ---
 
-## 4. Industrial Systems
+## 4. Systèmes Industriels
 
 ### 4.1 Sourcegraph Cody
 - **Authors:** Hartman, Mehrotra, Sagtani et al. (Sourcegraph)
 - **Year/Venue:** 2024, RecSys 2024
 - **Ref:** arXiv:2408.05344
-- **Contribution:** Multi-layer retrieval (local, repo, remote). RSG. "Expand and Refine". 90% of context comes from the logical codebase.
-- **Relevance:** Code-only, closed-source, enterprise.
+- **Contribution:** Retrieval multi-couche (local, repo, distant). RSG. "Expand and Refine". 90% contexte = logical codebase.
+- **Pertinence:** Code-only, closed-source, enterprise.
 - **URL:** https://arxiv.org/abs/2408.05344
 
 ### 4.2 Augment Code Context Engine
 - **Year:** 2024-2025
-- **Contribution:** 400K+ files, semantic graph, MCP exposed Feb 2026. Claims 30-80% improvement.
-- **Relevance:** Closed-source, code-only.
+- **Contribution:** 400K+ fichiers, graphe sémantique, MCP exposé fév 2026. 30-80% amélioration revendiquée.
+- **Pertinence:** Closed-source, code-only.
 - **URL:** https://www.augmentcode.com/context-engine
 
 ---
 
-## 5. Context Benchmarks
+## 5. Benchmarks de Contexte
 
 ### 5.1 ContextBench: A Benchmark for Context Retrieval in Coding Agents
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2602.05892
-- **Contribution:** 1,136 tasks, 66 repos, 8 languages. Annotated gold contexts. Recall, precision, efficiency.
-- **Relevance:** **Ideal benchmark** for evaluating retrieval quality.
+- **Contribution:** 1,136 tâches, 66 repos, 8 langages. Gold contexts annotés. Recall, precision, efficience.
+- **Pertinence:** **Benchmark idéal** pour évaluer la qualité du retrieval.
 - **URL:** https://arxiv.org/abs/2602.05892
 
 ### 5.2 SWE Context Bench
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2602.08316
-- **Contribution:** Experience reuse. 300 tasks + 99 derived.
+- **Contribution:** Réutilisation d'expérience. 300 tâches + 99 dérivées.
 - **URL:** https://arxiv.org/abs/2602.08316
 
 ### 5.3 RepoGraph: Enhancing AI SE with Repository-level Code Graph
 - **Year/Venue:** 2024, arXiv
 - **Ref:** arXiv:2410.14684
-- **Contribution:** Repo structure graph. SOTA open-source on SWE-bench.
+- **Contribution:** Graphe de structure du repo. SOTA open-source sur SWE-bench.
 - **URL:** https://arxiv.org/abs/2410.14684
 
 ---
 
-## 6. Context Management & Progressive Disclosure
+## 6. Gestion de Contexte & Progressive Disclosure
 
 ### 6.1 Codified Context: Infrastructure for AI Agents in a Complex Codebase
 - **Authors:** Aristidis Vasilopoulos
 - **Year/Venue:** 2026, arXiv
 - **Ref:** arXiv:2602.20478
-- **Contribution:** Three levels: hot memory (constitution), 19 specialized agents, cold memory (34 on-demand docs). 283 sessions. Open source. **Knowledge ABOUT the code, not the code itself.**
-- **Relevance:** **The most directly comparable work.** Same hot/warm/cold philosophy. But manual vs. automatic (RTFM).
+- **Contribution:** 3 niveaux : hot memory (constitution), 19 agents spécialisés, cold memory (34 docs on-demand). 283 sessions. Open source. **Le savoir SUR le code, pas le code lui-même.**
+- **Pertinence:** **Le plus comparable.** Même philosophie hot/warm/cold. Mais manuel vs automatique (RTFM).
 - **URL:** https://arxiv.org/abs/2602.20478
 
 ### 6.2 PAACE: Plan-Aware Automated Agent Context Engineering
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2512.16970
-- **Contribution:** Plan-guided context compression. 91.5% latency reduction, 83.6% token cost reduction.
+- **Contribution:** Compression du contexte guidée par le plan. 91.5% réduction latence, 83.6% réduction coût tokens.
 - **URL:** https://arxiv.org/abs/2512.16970
 
 ### 6.3 Acon: Optimizing Context Compression for Long-horizon LLM Agents
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2510.00615
-- **Contribution:** -26-54% peak memory. +20-46% performance for small LMs.
+- **Contribution:** -26-54% mémoire peak. +20-46% performance petits LMs.
 - **URL:** https://arxiv.org/abs/2510.00615
 
 ### 6.4 JetBrains Research: Cutting Through the Noise
 - **Year:** 2025
-- **Contribution:** Observation masking vs. LLM summarization. A hybrid approach reduces costs.
+- **Contribution:** Observation masking vs LLM summarization. Approche hybride réduit les coûts.
 - **URL:** https://blog.jetbrains.com/research/2025/12/efficient-context-management/
 
 ### 6.5 LoCoBench-Agent: Interactive Benchmark for LLM Agents in Long-Context SE
 - **Year/Venue:** 2025, arXiv
 - **Ref:** arXiv:2511.13998
-- **Contribution:** Hierarchical memory: working, compressed, architectural.
+- **Contribution:** Mémoire hiérarchique : working, compressed, architectural.
 - **URL:** https://arxiv.org/abs/2511.13998
 
 ### 6.6 Anthropic Engineering: Effective Context Engineering for AI Agents
 - **Year:** 2025
-- **Contribution:** Practical guide: progressive disclosure, on-demand retrieval, avoiding context rot.
-- **Relevance:** **Primary source** for the design principles.
+- **Contribution:** Guide pratique : progressive disclosure, retrieval on-demand, éviter le context rot.
+- **Pertinence:** **Source primaire** des principes de design.
 - **URL:** https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
 
 ---
 
-## 7. Multi-Format Parsing
+## 7. Parsing Multi-Format
 
 ### 7.1 Docling: An Efficient Open-Source Toolkit for AI-driven Document Conversion
 - **Authors:** IBM Research Zurich
 - **Year/Venue:** 2024-2025, arXiv
 - **Ref:** arXiv:2408.09869 (tech report), arXiv:2501.17887 (paper)
-- **Contribution:** Open-source multi-format parser (PDF, DOCX, PPTX, XLSX, HTML, images). MIT.
-- **Relevance:** Document conversion, not indexing/retrieval. Complementary.
+- **Contribution:** Parser multi-format open source (PDF, DOCX, PPTX, XLSX, HTML, images). MIT.
+- **Pertinence:** Conversion de documents, pas indexation/retrieval. Complémentaire.
 - **URL:** https://arxiv.org/abs/2408.09869
 
 ### 7.2 Document Parsing Unveiled: Techniques, Challenges, and Prospects
 - **Year/Venue:** 2024, arXiv
 - **Ref:** arXiv:2410.21169
-- **Contribution:** Survey of structured extraction from unstructured documents.
+- **Contribution:** Survey extraction structurée depuis documents non-structurés.
 - **URL:** https://arxiv.org/abs/2410.21169
 
 ---
 
-## Bibliographic references
+## Références bibliographiques
 
 1. Hou, X. et al. (2025). MCP: Landscape, Security Threats, and Future Research Directions. arXiv:2503.23278.
 2. (2025). A Survey of the Model Context Protocol. Preprints.org 202504.0245.

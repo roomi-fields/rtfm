@@ -59,3 +59,13 @@ scripts/
 
 # RTFM
 _rtfm/
+
+# Private
+raw/outreach-plan*.md
+
+# Communication / publishing docs (private)
+docs/PUBLISH_MCP_DIRECTORIES*.md
+docs/COMMUNICATION_STATUS*.md
+.mcpregistry_github_token
+.mcpregistry_registry_token
+mcp-publisher

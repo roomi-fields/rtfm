@@ -1,196 +1,196 @@
 ---
 type: article
-title: "R4) Les résultats : quand la taille du repo change tout"
-subtitle: "Sur mlflow (8 260 fichiers), le retrieval fait passer le resolve rate de 55% à 100%. Sur metaflow (624 fichiers), rien ne change. Le seuil de taille existe."
-excerpt: "Les résultats de notre étude contrôlée. Le retrieval transforme les performances sur les grands repos — et ne sert à rien sur les petits. Données, tableaux, analyse des échecs."
-slug: resultats-retrieval-agents-codeurs
-focus_keyword: résultats retrieval agents codeurs
+title: "R4) The Results: When Repo Size Changes Everything"
+subtitle: "On mlflow (8,260 files), retrieval lifts the resolve rate from 55% to 100%. On metaflow (624 files), nothing changes. The size threshold exists."
+excerpt: "The results of our controlled study. Retrieval transforms performance on large repos — and is useless on small ones. Data, tables, failure analysis."
+slug: retrieval-results-coding-agents
+focus_keyword: retrieval results coding agents
 tags:
-  - résultats
+  - results
   - benchmark
-  - retrieve-rate
+  - resolve-rate
   - mlflow
   - metaflow
   - fts
   - embeddings
-  - seuil-taille
+  - size-threshold
 ---
 
 > [!abstract]- SPEC
-> ## Brief — R4 : Les résultats
-> ### Position dans la série
-> - **Série** : R (Retrieval) — Does Retrieval Help? | **Prérequis** : [[R1_Le_Goulot_de_Localisation|R1]], [[R2_RTFM_Outil_Agnostique|R2]], [[R3_Protocole_Experimental|R3]]
-> - Coeur de la série : les données expérimentales
-> - Résultats préliminaires (matrice complète en cours)
-> ### Sujets couverts
-> - Résultat principal : test_validation (mlflow, 8260 fichiers)
-> - Contre-exemple : test_stub_generator (metaflow, 624 fichiers)
-> - FTS vs FTS+Embeddings : la surprise
-> - Analyse d'échec : test_responses_agent
-> - Coût et durée par condition
-> - Utilisation des outils par l'agent
-> ### SOTAs sources
+> ## Brief — R4: The results
+> ### Position in the series
+> - **Series**: R (Retrieval) — Does Retrieval Help? | **Prerequisites**: [[R1_Le_Goulot_de_Localisation_en|R1]], [[R2_RTFM_Outil_Agnostique_en|R2]], [[R3_Protocole_Experimental_en|R3]]
+> - Heart of the series: the experimental data
+> - Preliminary results (complete matrix in progress)
+> ### Topics covered
+> - Main result: test_validation (mlflow, 8260 files)
+> - Counter-example: test_stub_generator (metaflow, 624 files)
+> - FTS vs FTS+Embeddings: the surprise
+> - Failure analysis: test_responses_agent
+> - Cost and duration per condition
+> - Tool usage by the agent
+> ### SOTA sources
 > - `paper/benchmark_paper.md`
 
-# R4) Les résultats : quand la taille du repo change tout
+# R4) The results: when repo size changes everything
 
-## Sur mlflow, le retrieval fait passer la résolution de 55% à 100%. Sur metaflow, rien ne change.
+## On mlflow, retrieval lifts resolution from 55% to 100%. On metaflow, nothing changes.
 
-> La réponse n'est pas "oui" ou "non". C'est "ça dépend de la taille".
+> The answer isn't "yes" or "no". It's "it depends on size."
 
-## Où se situe cet article ?
+## Where does this article fit?
 
-[[R1_Le_Goulot_de_Localisation|R1]] a posé le problème. [[R2_RTFM_Outil_Agnostique|R2]] a présenté l'outil. [[R3_Protocole_Experimental|R3]] a décrit le protocole. Voici les résultats.
+[[R1_Le_Goulot_de_Localisation_en|R1]] framed the problem. [[R2_RTFM_Outil_Agnostique_en|R2]] introduced the tool. [[R3_Protocole_Experimental_en|R3]] described the protocol. Here are the results.
 
-**Avertissement important :** les résultats présentés ici sont préliminaires. Ils proviennent de runs uniques (pas encore de répétitions N ≥ 3). La matrice complète (11 tâches × 4 conditions × N répétitions) est en cours. Les conclusions sont des *tendances*, pas encore des preuves statistiques. La transparence sur cette limite est une exigence que nous nous imposons — contrairement aux "+80%" sans protocole que l'industrie publie sans sourciller.
-
----
-
-## Le résultat principal : test_validation sur mlflow
-
-### Le contexte
-
-`test_validation` demande d'implémenter un module de validation de données dans mlflow — un projet de **8 260 fichiers**. La difficulté : le module doit interagir avec trois composants existants dispersés dans le projet : `validation.py`, `scorers.py` et `data.py`. Ces fichiers sont dans des sous-répertoires différents. Pour réussir, l'agent doit trouver ces dépendances cross-module.
-
-11 tests doivent passer. Si un seul échoue, la tâche n'est pas "résolue".
-
-### Les résultats
-
-| Condition                        | F2P (fail-to-pass) | Résolu ? | Durée | Coût  |
-| -------------------------------- | ------------------ | -------- | ----- | ----- |
-| A — Standard (chemins donnés)    | 6/11 (55%)         | Non      | 479s  | $1.12 |
-| B — Discovery (pas de retrieval) | 7/11 (64%)         | Non      | 459s  | $1.50 |
-| C — Discovery + FTS              | **11/11 (100%)**   | **Oui**  | 732s  | $2.42 |
-| D — Discovery + FTS+Embed        | **11/11 (100%)**   | **Oui**  | 605s  | $1.33 |
-
-Le résultat est net. **Avec retrieval (C et D), 100% des tests passent. Sans retrieval (A et B), entre 55% et 64%.**
-
-Et notez le détail qui change la perspective : **Config A, celle où les chemins sont *donnés dans le prompt*, ne résout pas la tâche**. L'agent a les chemins. Il sait *où* coder. Et il échoue quand même sur 5 tests. Savoir *où* coder ne suffit pas — il faut aussi comprendre *comment* les modules interagissent. C'est précisément ce que le retrieval apporte : une recherche sur "validation scorers" renvoie les fichiers pertinents *et leur contexte architectural*.
-
-### Pourquoi A et B échouent
-
-Les 4-5 tests qui échouent en A et B sont toujours les mêmes : `test_validate_scorers_invalid_all_scorers`, `test_validate_data_with_correctness`, `test_validate_data_missing_columns`. Tous impliquent des interactions entre le module de validation et des modules distants — les scorers, les structures de données.
-
-L'agent sans retrieval implémente le module de validation de manière *isolée*. Le code est syntaxiquement correct, les types sont bons, la logique locale est cohérente. Mais l'implémentation est *incompatible* avec le reste du projet parce que l'agent n'a pas vu le code des modules voisins.
-
-L'agent avec retrieval fait une recherche `rtfm_search("validation scorers")` en début de session. Il obtient les coordonnées de `scorers.py` et `data.py`. Il les lit. Il comprend les interfaces existantes. Et il implémente un module de validation *compatible*.
+**Important caveat:** the results presented here are preliminary. They come from single runs (no repetitions yet, N ≥ 3). The complete matrix (11 tasks × 4 conditions × N repetitions) is in progress. Conclusions are *trends*, not yet statistical proof. Transparency about this limit is a requirement we impose on ourselves — unlike the "+80%" without protocol that the industry publishes without blushing.
 
 ---
 
-## Le contre-exemple : test_stub_generator sur metaflow
+## The main result: test_validation on mlflow
 
-### Le contexte
+### The context
 
-`test_stub_generator` demande d'implémenter un générateur de stubs de type dans metaflow — un repo de **624 fichiers**. C'est une tâche bien délimitée : un seul fichier à créer, des interfaces claires.
+`test_validation` asks you to implement a data validation module in mlflow — a **8,260-file project**. The difficulty: the module must interact with three existing components scattered across the project: `validation.py`, `scorers.py`, and `data.py`. These files are in different subdirectories. To succeed, the agent must find these cross-module dependencies.
 
-31 tests doivent passer.
+11 tests must pass. If even one fails, the task isn't "resolved."
 
-### Les résultats
+### The results
 
-| Condition                 | F2P           | Résolu ?          | Durée | Coût  |
-| ------------------------- | ------------- | ----------------- | ----- | ----- |
-| A — Standard              | 31/31 (100%)  | **Oui**           | 370s  | $0.97 |
-| B — Discovery             | 31/31 (100%)  | **Oui**           | 395s  | $1.07 |
-| C — Discovery + FTS       | 31/31 (100%)  | **Oui**           | 454s  | $1.30 |
-| D — Discovery + FTS+Embed | 30/31 (96.8%) | Non (1 test raté) | 541s  | $1.44 |
+| Condition                         | F2P (fail-to-pass) | Resolved? | Duration | Cost  |
+| --------------------------------- | ------------------ | --------- | -------- | ----- |
+| A — Standard (paths given)        | 6/11 (55%)         | No        | 479s     | $1.12 |
+| B — Discovery (no retrieval)      | 7/11 (64%)         | No        | 459s     | $1.50 |
+| C — Discovery + FTS               | **11/11 (100%)**   | **Yes**   | 732s     | $2.42 |
+| D — Discovery + FTS+Embed         | **11/11 (100%)**   | **Yes**   | 605s     | $1.33 |
 
-**Tout le monde résout** (sauf D qui rate un test sur 31 — un artefact, pas un signal).
+The result is clear. **With retrieval (C and D), 100% of tests pass. Without retrieval (A and B), between 55% and 64%.**
 
-Mais RTFM est *contre-productif* en termes de coût et de durée :
-- Config C est **23% plus lente** et **22% plus chère** que A.
-- Config D est **46% plus lente** et **48% plus chère** que A.
+And note the detail that shifts perspective: **Config A, the one where paths are *given in the prompt*, does not resolve the task**. The agent has the paths. It knows *where* to code. And it still fails on 5 tests. Knowing *where* to code isn't enough — you also have to understand *how* the modules interact. That's exactly what retrieval provides: a search for "validation scorers" returns the relevant files *and their architectural context*.
 
-L'agent RTFM n'utilise quasiment pas l'outil : 1-2 appels seulement. Il navigue directement dans le repo avec `grep` et `Read` — parce que le repo est suffisamment petit pour que ça marche.
+### Why A and B fail
 
-### La conclusion
+The 4-5 tests that fail in A and B are always the same: `test_validate_scorers_invalid_all_scorers`, `test_validate_data_with_correctness`, `test_validate_data_missing_columns`. All involve interactions between the validation module and distant modules — the scorers, the data structures.
 
-**Sur un repo de 624 fichiers, `grep` suffit.** Le goulot de localisation n'existe pas. RTFM est un overhead sans bénéfice. L'agent le sait intuitivement — il fait 1-2 appels RTFM puis revient aux outils standard.
+The agent without retrieval implements the validation module *in isolation*. The code is syntactically correct, the types are good, the local logic is consistent. But the implementation is *incompatible* with the rest of the project because the agent hasn't seen the code of neighboring modules.
 
----
-
-## L'analyse croisée : le seuil de taille
-
-Juxtaposons les deux résultats :
-
-| Repo     | Fichiers | Gain retrieval (resolve rate) | Gain retrieval (coût)      |
-| -------- | -------- | ----------------------------- | -------------------------- |
-| metaflow | 624      | 0% (B=C=D=100%)               | **-23% à -48%** (overhead) |
-| mlflow   | 8 260    | **+36 à +45 pp** (B→C/D)      | N/A (B ne résout pas)      |
-
-Le pattern est clair : **le retrieval n'aide que quand le repo est assez grand pour que la navigation directe soit un goulot d'étranglement.**
-
-Les données pour pydantic (771 fichiers) et astropy (1 123 fichiers) — les repos intermédiaires — sont en cours. Elles nous diront où se situe le seuil. Notre hypothèse : quelque part autour de 1 000 à 2 000 fichiers.
+The agent with retrieval makes a `rtfm_search("validation scorers")` at the start of the session. It gets the coordinates of `scorers.py` and `data.py`. It reads them. It understands the existing interfaces. And it implements a *compatible* validation module.
 
 ---
 
-## FTS vs FTS+Embeddings : la surprise
+## The counter-example: test_stub_generator on metaflow
 
-La comparaison entre Config C (FTS seul) et Config D (FTS + embeddings) sur test_validation révèle un résultat qui confirme la littérature récente.
+### The context
 
-### Le resolve rate est identique
+`test_stub_generator` asks you to implement a type stub generator in metaflow — a **624-file repo**. It's a well-scoped task: a single file to create, clear interfaces.
 
-C et D résolvent tous les deux à 100%. Les embeddings ne changent pas le *résultat*. Sur cette tâche, BM25 suffit à trouver les fichiers pertinents.
+31 tests must pass.
 
-### Mais l'efficience diffère significativement
+### The results
 
-| Métrique   | Config C (FTS) | Config D (FTS+Embed) | Delta    |
+| Condition                  | F2P           | Resolved?         | Duration | Cost  |
+| -------------------------- | ------------- | ----------------- | -------- | ----- |
+| A — Standard               | 31/31 (100%)  | **Yes**           | 370s     | $0.97 |
+| B — Discovery              | 31/31 (100%)  | **Yes**           | 395s     | $1.07 |
+| C — Discovery + FTS        | 31/31 (100%)  | **Yes**           | 454s     | $1.30 |
+| D — Discovery + FTS+Embed  | 30/31 (96.8%) | No (1 test miss)  | 541s     | $1.44 |
+
+**Everyone resolves** (except D, which misses one test out of 31 — an artifact, not a signal).
+
+But RTFM is *counterproductive* in terms of cost and duration:
+- Config C is **23% slower** and **22% more expensive** than A.
+- Config D is **46% slower** and **48% more expensive** than A.
+
+The RTFM agent barely uses the tool: only 1-2 calls. It navigates directly in the repo with `grep` and `Read` — because the repo is small enough for that to work.
+
+### The conclusion
+
+**On a 624-file repo, `grep` is enough.** The localization bottleneck doesn't exist. RTFM is overhead without benefit. The agent knows it intuitively — it makes 1-2 RTFM calls then returns to standard tools.
+
+---
+
+## Cross-analysis: the size threshold
+
+Juxtaposing the two results:
+
+| Repo     | Files | Retrieval gain (resolve rate)  | Retrieval gain (cost)          |
+| -------- | ----- | ------------------------------ | ------------------------------ |
+| metaflow | 624   | 0% (B=C=D=100%)                | **-23% to -48%** (overhead)    |
+| mlflow   | 8,260 | **+36 to +45 pp** (B→C/D)      | N/A (B doesn't resolve)        |
+
+The pattern is clear: **retrieval only helps when the repo is big enough that direct navigation is a bottleneck.**
+
+The data for pydantic (771 files) and astropy (1,123 files) — the intermediate repos — are in progress. They'll tell us where the threshold lies. Our hypothesis: somewhere around 1,000 to 2,000 files.
+
+---
+
+## FTS vs FTS+Embeddings: the surprise
+
+Comparing Config C (FTS alone) and Config D (FTS + embeddings) on test_validation reveals a result that confirms recent literature.
+
+### The resolve rate is identical
+
+Both C and D resolve at 100%. Embeddings don't change the *result*. On this task, BM25 is enough to find the relevant files.
+
+### But efficiency differs significantly
+
+| Metric     | Config C (FTS) | Config D (FTS+Embed) | Delta    |
 | ---------- | -------------- | -------------------- | -------- |
 | Turns      | 81             | **50**               | **-38%** |
-| Coût       | $4.04          | **$2.23**            | **-45%** |
+| Cost       | $4.04          | **$2.23**            | **-45%** |
 | Read calls | 23             | **12**               | **-48%** |
 | Bash calls | 20             | **9**                | **-55%** |
 | Grep calls | 7              | 13                   | +86%     |
 
-L'agent avec embeddings va *plus directement* aux bons fichiers. Il lit moins de fichiers (12 vs 23), fait moins de Bash (9 vs 20 — moins de debug), et termine en moins de tours (50 vs 81). Il fait plus de Grep — mais des Grep ciblés dans les fichiers qu'il a déjà identifiés comme pertinents.
+The agent with embeddings goes *more directly* to the right files. It reads fewer files (12 vs 23), runs less Bash (9 vs 20 — less debug), and finishes in fewer turns (50 vs 81). It runs more Grep — but targeted Greps in files it has already identified as relevant.
 
-Le résultat est cohérent avec Galimzyanov (2025) et GrepRAG (ISSTA 2026) : BM25 est compétitif avec les embeddings denses pour la recherche de code. La recherche lexicale suffit pour trouver les fichiers. Les embeddings ajoutent une couche d'*efficience* — le bon fichier apparaît plus haut dans les résultats, l'agent tâtonne moins — mais pas de *capacité* supplémentaire.
+The result is consistent with Galimzyanov (2025) and GrepRAG (ISSTA 2026): BM25 is competitive with dense embeddings for code search. Lexical search is enough to find the files. Embeddings add a layer of *efficiency* — the right file appears higher in results, the agent fumbles less — but no additional *capability*.
 
-> **Encart : Implications pratiques**
+> **Sidebar: Practical implications**
 >
-> Config C (FTS seul) a un setup de ~20 secondes et un coût d'indexation de 10-78 secondes. Config D (FTS+Embed) a un setup de ~50 secondes et un coût d'indexation de 10-90 *minutes* pour les gros repos. Si le FTS suffit pour résoudre les mêmes tâches, le ratio coût/bénéfice favorise FTS pour un déploiement rapide. Les embeddings valent le coup pour l'efficience à long terme, pas pour le résultat brut.
+> Config C (FTS alone) has a ~20-second setup and a 10-78 second indexing cost. Config D (FTS+Embed) has a ~50-second setup and a 10-90 *minute* indexing cost for large repos. If FTS is enough to resolve the same tasks, cost/benefit favors FTS for a quick deployment. Embeddings are worth it for long-term efficiency, not for raw outcome.
 
 ---
 
-## L'analyse d'échec : test_responses_agent
+## Failure analysis: test_responses_agent
 
-### Le cas d'usage extrême
+### The extreme use case
 
-`test_responses_agent` est la tâche la plus complexe du benchmark : **78 000 caractères** de prompt, **15 interfaces** à implémenter, un ground truth de 226 000 caractères sur 60 fichiers.
+`test_responses_agent` is the most complex task in the benchmark: **78,000 characters** of prompt, **15 interfaces** to implement, a ground truth of 226,000 characters across 60 files.
 
-Résultat : **aucune configuration ne résout la tâche**. Ni A, ni B, ni C, ni D.
+Result: **no configuration resolves the task**. Neither A, nor B, nor C, nor D.
 
-| Métrique             | A (Standard)   | B (Discovery) | C (FTS)   | D (Embed+) |
+| Metric               | A (Standard)   | B (Discovery) | C (FTS)   | D (Embed+) |
 | -------------------- | -------------- | ------------- | --------- | ---------- |
-| Résolu               | Non (3.5% F2P) | Non (TIMEOUT) | Non (0%)  | Non (0%)   |
-| Interfaces couvertes | 15/15          | 0/15          | 8/15      | 12/15      |
+| Resolved             | No (3.5% F2P)  | No (TIMEOUT)  | No (0%)   | No (0%)    |
+| Interfaces covered   | 15/15          | 0/15          | 8/15      | 12/15      |
 | Patch size           | 92K chars      | 0 (timeout)   | 51K chars | 91K chars  |
 | Cache read           | 23.8M          | 18.9M         | 8.7M      | 9.0M       |
 
-### Ce que ça nous apprend
+### What this teaches us
 
-**Config B tombe en timeout.** Sans chemins ET sans retrieval, l'agent est perdu dans 8 260 fichiers. Il explore pendant 1 200 secondes sans produire de code. Le goulot de localisation, dans sa forme la plus pure.
+**Config B times out.** Without paths AND without retrieval, the agent is lost in 8,260 files. It explores for 1,200 seconds without producing code. The localization bottleneck in its purest form.
 
-**Config A couvre les 15 interfaces mais échoue quand même.** L'agent avait les chemins. Il a modifié les 15 fichiers. Mais les tests échouent (3.5% F2P). Ce n'est pas un problème de localisation — c'est un problème de *capacité du modèle*. 15 interfaces simultanées dépassent ce que Sonnet 4.0 peut gérer de manière cohérente.
+**Config A covers all 15 interfaces but still fails.** The agent had the paths. It modified all 15 files. But tests fail (3.5% F2P). It isn't a localization problem — it's a problem of *model capability*. 15 simultaneous interfaces exceed what Sonnet 4.0 can handle coherently.
 
-**Config D couvre 12/15 interfaces, Config C seulement 8/15.** Les embeddings guident mieux — l'agent identifie davantage de fichiers pertinents. Mais même 12/15 n'est pas suffisant.
+**Config D covers 12/15 interfaces, Config C only 8/15.** Embeddings guide better — the agent identifies more relevant files. But even 12/15 isn't enough.
 
-**Les configs C et D consomment 2-3x moins de cache read** (8-9M vs 19-24M tokens). Le pattern metadata-first fonctionne : l'agent charge moins de contexte. Mais le gain de contexte ne compense pas la complexité intrinsèque de la tâche.
+**Configs C and D consume 2-3x less cache read** (8-9M vs 19-24M tokens). The metadata-first pattern works: the agent loads less context. But the context gain doesn't compensate for the task's intrinsic complexity.
 
-### Le diagnostic
+### The diagnosis
 
-L'échec de Config C est révélateur. L'agent a dit : *"Due to space constraints, let me focus on the most critical interfaces"* — et a abandonné les 8 interfaces les plus complexes. Le modèle *sait* qu'il ne peut pas tout faire. Il fait un choix rationnel — mais incomplet.
+Config C's failure is revealing. The agent said: *"Due to space constraints, let me focus on the most critical interfaces"* — and abandoned the 8 most complex interfaces. The model *knows* it can't do everything. It makes a rational choice — but an incomplete one.
 
-L'échec de Config D est différent. L'agent a couvert 12 interfaces — les embeddings l'ont mieux guidé. Mais une série de 4 `Edit` successifs sur `responses.py` a corrompu le fichier : un `continue` transformé en `continue(chunks:...` → SyntaxError immédiat. Bug d'édition, pas bug de retrieval.
+Config D's failure is different. The agent covered 12 interfaces — embeddings guided it better. But a series of 4 successive `Edit`s on `responses.py` corrupted the file: a `continue` turned into `continue(chunks:...` → immediate SyntaxError. An edit bug, not a retrieval bug.
 
-**Le retrieval est nécessaire mais pas suffisant.** Il résout le goulot de localisation. Il ne résout pas le goulot de capacité du modèle.
+**Retrieval is necessary but not sufficient.** It resolves the localization bottleneck. It doesn't resolve the model-capability bottleneck.
 
 ---
 
-## Analyse de l'utilisation des outils
+## Tool usage analysis
 
-Comment l'agent utilise-t-il ses outils dans chaque condition ? Voici la décomposition pour test_validation (mlflow) :
+How does the agent use its tools in each condition? Here's the breakdown for test_validation (mlflow):
 
-| Outil       | B (Discovery) | C (FTS) | D (Embed+) |
+| Tool        | B (Discovery) | C (FTS) | D (Embed+) |
 | ----------- | ------------- | ------- | ---------- |
 | Grep        | 6             | 7       | 13         |
 | Read        | 13            | 23      | 12         |
@@ -201,37 +201,37 @@ Comment l'agent utilise-t-il ses outils dans chaque condition ? Voici la décomp
 | RTFM expand | 0             | 2       | 0          |
 | **Total**   | 53            | 81      | 50         |
 
-Trois observations :
+Three observations:
 
-**1. Config D fait moins de Bash.** 9 calls Bash contre 22 en B et 20 en C. Le Bash est principalement du debug — exécuter le code pour voir s'il marche, corriger, réexécuter. L'agent avec embeddings code plus juste du premier coup, parce qu'il a trouvé les bons fichiers dès le départ.
+**1. Config D runs less Bash.** 9 Bash calls vs 22 in B and 20 in C. Bash is mainly debug — executing code to see if it works, fixing, re-running. The agent with embeddings writes correct code on the first try more often, because it found the right files from the start.
 
-**2. Config C lit plus de fichiers.** 23 Read contre 12 en D et 13 en B. Sans embeddings, le FTS renvoie des résultats pertinents mais pas optimalement ordonnés — l'agent lit plus de fichiers pour trouver le bon. Les embeddings affinent le ranking.
+**2. Config C reads more files.** 23 Reads vs 12 in D and 13 in B. Without embeddings, FTS returns relevant but not optimally ordered results — the agent reads more files to find the right one. Embeddings refine ranking.
 
-**3. L'agent RTFM utilise peu RTFM.** 2-3 appels search, 0-2 expand. Ce n'est pas un outil qu'il martèle — c'est un outil qu'il utilise *chirurgicalement*, au bon moment. C'est le sujet de [[R5_Agent_Decide_Seul|R5]].
-
----
-
-## Synthèse : qu'est-ce qui est établi et qu'est-ce qui ne l'est pas
-
-### Établi (données actuelles)
-
-- Sur test_validation (mlflow, 8 260 fichiers) : le retrieval transforme le résultat (55-64% → 100%).
-- Sur test_stub_generator (metaflow, 624 fichiers) : le retrieval n'apporte rien.
-- FTS seul résout autant que FTS+embeddings. Les embeddings ajoutent de l'efficience (-38% turns, -45% coût).
-- Le retrieval ne compense pas la complexité intrinsèque (test_responses_agent).
-- Le pattern metadata-first réduit la consommation de contexte (2-3x moins de cache read).
-
-### En attente de confirmation
-
-- Le seuil de taille exact (données pydantic et astropy en cours).
-- La généralisabilité à d'autres tâches mlflow (7 tâches, pas encore toutes évaluées en 4 conditions).
-- La significativité statistique (N ≥ 3 répétitions pas encore atteint).
-- La corrélation taille repo × gain retrieval.
-- Le coût par tâche *résolue* (nécessite plus de données).
+**3. The RTFM agent barely uses RTFM.** 2-3 search calls, 0-2 expands. It's not a tool it hammers — it's a tool it uses *surgically*, at the right moment. That's the subject of [[R5_Agent_Decide_Seul_en|R5]].
 
 ---
 
-## Références
+## Synthesis: what's established and what isn't
+
+### Established (current data)
+
+- On test_validation (mlflow, 8,260 files): retrieval transforms the result (55-64% → 100%).
+- On test_stub_generator (metaflow, 624 files): retrieval adds nothing.
+- FTS alone resolves as much as FTS+embeddings. Embeddings add efficiency (-38% turns, -45% cost).
+- Retrieval doesn't compensate for intrinsic complexity (test_responses_agent).
+- The metadata-first pattern reduces context consumption (2-3x less cache read).
+
+### Pending confirmation
+
+- The exact size threshold (pydantic and astropy data in progress).
+- Generalizability to other mlflow tasks (7 tasks, not all evaluated in 4 conditions yet).
+- Statistical significance (N ≥ 3 repetitions not yet reached).
+- The repo-size × retrieval-gain correlation.
+- The cost per *resolved* task (requires more data).
+
+---
+
+## References
 
 - **FeatureBench (2026)** — ICLR 2026. arXiv:2602.10975.
 - **Galimzyanov, F. et al. (2025)** — Practical Code RAG at Scale. arXiv:2510.20609.
@@ -240,33 +240,33 @@ Trois observations :
 
 ---
 
-## Glossaire
+## Glossary
 
-- **Cache read** : tokens déjà présents dans le cache du modèle lors d'une conversation multi-tours — coûtent moins cher que les tokens frais.
-- **Cross-module** : interaction entre des composants situés dans des fichiers/répertoires différents du projet.
-- **F2P** : *fail-to-pass* — tests qui échouaient avant et passent après l'intervention de l'agent.
-- **Overhead** : coût supplémentaire (temps, argent, tokens) induit par l'utilisation d'un outil.
-- **Resolve rate** : proportion de tâches entièrement résolues (tous les tests passent).
-
----
-
-## Liens dans la série
-
-- [[R1_Le_Goulot_de_Localisation|R1]] — Le goulot de localisation — le problème fondamental
-- [[R2_RTFM_Outil_Agnostique|R2]] — RTFM : un outil de connaissance qui ne touche qu'à ce qu'il doit
-- [[R3_Protocole_Experimental|R3]] — Le protocole : 4 conditions, 11 tâches, même modèle
-- **R4** (cet article) — Les résultats : quand la taille du repo change tout
-- [[R5_Agent_Decide_Seul|R5]] — L'agent décide seul : retrieval sélectif sans entraînement
-- [[R6_Perspectives|R6]] — Ce que ça change — et ce qu'il reste à prouver
+- **Cache read**: tokens already present in the model's cache during a multi-turn conversation — cheaper than fresh tokens.
+- **Cross-module**: interaction between components located in different files/directories of the project.
+- **F2P**: *fail-to-pass* — tests that failed before and pass after the agent's intervention.
+- **Overhead**: extra cost (time, money, tokens) induced by using a tool.
+- **Resolve rate**: proportion of tasks fully resolved (all tests pass).
 
 ---
 
-**Prérequis** : [[R1_Le_Goulot_de_Localisation|R1]], [[R2_RTFM_Outil_Agnostique|R2]], [[R3_Protocole_Experimental|R3]]
-**Temps de lecture** : 15 min
-**Tags** : #résultats #benchmark #resolve-rate #mlflow #metaflow #fts #embeddings #seuil-taille
+## Links in the series
+
+- [[R1_Le_Goulot_de_Localisation_en|R1]] — The localization bottleneck — the fundamental problem
+- [[R2_RTFM_Outil_Agnostique_en|R2]] — RTFM: a knowledge tool that only touches what it must
+- [[R3_Protocole_Experimental_en|R3]] — The protocol: 4 conditions, 11 tasks, same model
+- **R4** (this article) — The results: when repo size changes everything
+- [[R5_Agent_Decide_Seul_en|R5]] — The agent calibrates itself: selective retrieval without training
+- [[R6_Perspectives_en|R6]] — What it changes — and what remains to be proven
 
 ---
 
-*Prochain article : [[R5_Agent_Decide_Seul|R5]] — L'agent décide seul : retrieval sélectif sans entraînement*
+**Prerequisites**: [[R1_Le_Goulot_de_Localisation_en|R1]], [[R2_RTFM_Outil_Agnostique_en|R2]], [[R3_Protocole_Experimental_en|R3]]
+**Reading time**: 15 min
+**Tags**: #results #benchmark #resolve-rate #mlflow #metaflow #fts #embeddings #size-threshold
+
+---
+
+*Next article: [[R5_Agent_Decide_Seul_en|R5]] — The agent calibrates itself: selective retrieval without training*
 
 ---

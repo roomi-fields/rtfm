@@ -1,10 +1,10 @@
 ---
 type: article
-title: "R2) RTFM : un outil de connaissance qui ne touche qu'à ce qu'il doit"
-subtitle: "Un outil de retrieval agnostique — pas un outil de code. Cinq principes de design, et pourquoi l'architecture metadata-first change tout."
-excerpt: "RTFM n'est pas un outil de code. C'est un outil de connaissance. Il indexe tout — code, docs, legal, research — et sert un contexte minimal à la demande. Voici ses principes de design et pourquoi ils importent."
-slug: rtfm-outil-agnostique-retrieval
-focus_keyword: RTFM retrieval agnostique
+title: "R2) RTFM: A Knowledge Tool That Only Touches What It Must"
+subtitle: "An agnostic retrieval tool — not a code tool. Five design principles, and why metadata-first architecture changes everything."
+excerpt: "RTFM isn't a code tool. It's a knowledge tool. It indexes everything — code, docs, legal, research — and serves minimal context on demand. Here are its design principles and why they matter."
+slug: rtfm-agnostic-retrieval-tool
+focus_keyword: RTFM agnostic retrieval
 tags:
   - rtfm
   - retrieval
@@ -13,147 +13,147 @@ tags:
   - progressive-disclosure
   - metadata-first
   - parsers
-  - agnostique
+  - agnostic
 ---
 
 > [!abstract]- SPEC
-> ## Brief — R2 : RTFM, l'outil agnostique
-> ### Position dans la série
-> - **Série** : R (Retrieval) — Does Retrieval Help? | **Prérequis** : [[R1_Le_Goulot_de_Localisation|R1]]
-> - Présente l'outil utilisé comme intervention expérimentale dans l'étude
-> - Non pour revendiquer sa novelty architecturale, mais parce que ses choix de design influencent les résultats
-> ### Sujets couverts
-> - Les 5 principes de design (domain/format/protocol/model-agnostic + non-invasif)
-> - Le pattern metadata-first → expand on demand
-> - Stack technique (SQLite + FTS5 + FastEmbed)
-> - Positionnement vs outils existants (Augment CE, Sourcegraph, Code-Index-MCP, CodeCompass)
-> - Pourquoi l'évaluation rigoureuse est le vrai différenciateur
-> ### SOTAs sources
+> ## Brief — R2: RTFM, the agnostic tool
+> ### Position in the series
+> - **Series**: R (Retrieval) — Does Retrieval Help? | **Prerequisites**: [[R1_Le_Goulot_de_Localisation_en|R1]]
+> - Presents the tool used as the experimental intervention in the study
+> - Not to claim architectural novelty, but because its design choices influence the results
+> ### Topics covered
+> - The 5 design principles (domain/format/protocol/model-agnostic + non-invasive)
+> - The metadata-first → expand on demand pattern
+> - Technical stack (SQLite + FTS5 + FastEmbed)
+> - Positioning vs. existing tools (Augment CE, Sourcegraph, Code-Index-MCP, CodeCompass)
+> - Why rigorous evaluation is the real differentiator
+> ### SOTA sources
 > - `paper/sota/08_competitive_landscape.md`
 
-# R2) RTFM : un outil de connaissance qui ne touche qu'à ce qu'il doit
+# R2) RTFM: a knowledge tool that only touches what it must
 
-## Cinq principes de design, et pourquoi l'architecture metadata-first change tout
+## Five design principles, and why metadata-first architecture changes everything
 
-> Il existe déjà des outils de retrieval pour agents codeurs. Ce qui manque, c'est une preuve que ça marche.
+> Retrieval tools for coding agents already exist. What's missing is proof that they work.
 
-## Où se situe cet article ?
+## Where does this article fit?
 
-Dans [[R1_Le_Goulot_de_Localisation|R1]], nous avons posé le diagnostic : les agents codeurs passent 38% de leur temps à explorer, le gap oracle est de 9 à 50 points de pourcentage, et le context rot montre que trop de contexte est pire que pas assez. La conclusion : il faut un outil de recherche qui serve du contexte *minimal* et *pertinent*, pas un dump de tout le projet.
+In [[R1_Le_Goulot_de_Localisation_en|R1]], we set the diagnosis: coding agents spend 38% of their time exploring, the oracle gap is 9 to 50 percentage points, and context rot shows too much context is worse than too little. The conclusion: we need a search tool that serves *minimal* and *relevant* context, not a dump of the whole project.
 
-Cet article présente l'outil que nous avons construit pour tester cette thèse : RTFM. Non pas pour en faire la promotion — c'est open source, chacun jugera — mais parce que les choix de design ont des conséquences directes sur les résultats expérimentaux. Quand on mesure l'impact du retrieval ([[R4_Resultats|R4]]), il faut comprendre *quel* retrieval on mesure.
-
----
-
-## Le problème des outils existants
-
-Avant de construire quoi que ce soit, faisons le tour de ce qui existe.
-
-### Les solutions commerciales
-
-**Augment Context Engine** (février 2026) est le plus sérieux des concurrents commerciaux. C'est un moteur de contexte sémantique propriétaire exposé via MCP. Il indexe le code, la documentation, les tickets, les wikis internes, l'historique de commits. Il fonctionne avec Claude Code. Il coûte entre 20 et 200 dollars par mois.
-
-Augment revendique "+80% de performance avec Claude Code + Opus 4.5". Le chiffre est impressionnant. Le problème : aucun protocole publié. Pas de benchmark standardisé. Pas d'intervalles de confiance. Pas de description de la méthodologie. "+80%" par rapport à quoi, sur quelles tâches, avec quel baseline ? On ne sait pas.
-
-**Sourcegraph Cody** expose ses capacités de recherche de code via MCP en version enterprise. C'est un outil puissant — recherche cross-organisation, multi-repo, sémantique et lexicale. Mais c'est enterprise-only (à partir de 49$/utilisateur/mois), code-only, et là encore : aucun benchmark public mesurant l'impact sur la performance d'un agent.
-
-**Greptile** offre une API d'analyse de codebase avec MCP. Valorisé à 180 millions de dollars. Code review focus. Cloud-only. Payant. Pas de benchmark non plus.
-
-### Les solutions open source
-
-**Code-Index-MCP** (johnhuang316, 793 stars) indexe du code dans 7 langages avec tree-sitter AST. C'est l'outil open source le plus populaire dans cette catégorie. Mais il est purement code — pas de documentation, pas de fichiers de configuration, pas de données structurées. Et surtout : zéro évaluation publiée.
-
-**Code-Index-MCP** (ViperJuice, 38 stars) est architecturalement le plus proche de ce que nous avons construit — même stack SQLite + FTS5, même principe de recherche hybride. Mais là encore : code-first (Markdown/YAML en secondaire), pas de parsers extensibles, pas de multi-corpus. Et aucune évaluation.
-
-**mcp-codebase-index** utilise Python AST pour l'indexation, avec un mécanisme incrémental via `git diff`. Élégant, zéro dépendances. Mais code-only.
-
-**CodeCompass** (du papier Navigation Paradox) est un cas intéressant : c'est un graphe AST Neo4j exposé via MCP. Il fait de la navigation *structurelle*, pas de la recherche *textuelle*. C'est un outil complémentaire, pas concurrent.
-
-### Le pattern commun
-
-Tous ces outils partagent deux caractéristiques :
-
-1. **Ils sont centrés sur le code.** Code, code, code. Le code est important, mais un projet réel contient aussi de la documentation, des fichiers de configuration, des spécifications, des données structurées, peut-être des documents légaux ou des notes de recherche.
-
-2. **Aucun n'a publié d'évaluation rigoureuse.** Revendications marketing, micro-benchmarks internes, ou rien du tout. Personne n'a pris un benchmark standardisé, défini un protocole contrôlé avec une variable isolée, et mesuré l'impact du retrieval sur les performances d'un agent.
+This article introduces the tool we built to test this thesis: RTFM. Not to promote it — it's open source, judge for yourself — but because its design choices have direct consequences on the experimental results. When we measure the impact of retrieval ([[R4_Resultats_en|R4]]), you have to understand *which* retrieval we're measuring.
 
 ---
 
-## Cinq principes pour un outil différent
+## The problem with existing tools
 
-RTFM est né d'un constat : si le facteur limitant est la capacité à trouver le bon contexte ([[R1_Le_Goulot_de_Localisation|R1]]), alors l'outil de recherche ne devrait pas présumer de la *nature* du contexte. Cinq principes guident sa conception.
+Before building anything, let's survey what exists.
 
-### 1. Domain-agnostic — pas un outil de code, un outil de connaissance
+### Commercial solutions
 
-RTFM indexe tout. Code Python (via l'AST), scripts shell (fonctions et commentaires), documentation Markdown (sections par en-têtes), articles LaTeX (structure `\section`/`\subsection`), configurations YAML et JSON (clés de premier niveau), documents PDF (texte extrait), textes juridiques XML (articles de loi Legifrance), pages HTML (BOFiP), et du texte brut en fallback.
+**Augment Context Engine** (February 2026) is the most serious commercial competitor. It's a proprietary semantic context engine exposed via MCP. It indexes code, documentation, tickets, internal wikis, commit history. It works with Claude Code. It costs between $20 and $200 per month.
 
-Le même outil sert un développeur qui cherche une fonction, un juriste qui cherche un article de loi, un chercheur qui cherche une référence dans ses notes, un musicologue qui cherche un passage dans son corpus.
+Augment claims "+80% performance with Claude Code + Opus 4.5." The figure is impressive. The problem: no published protocol. No standardized benchmark. No confidence intervals. No methodology description. "+80%" compared to what, on which tasks, with what baseline? We don't know.
 
-Ce n'est pas un caprice d'ingénierie. C'est une conséquence directe de la thèse. Un agent qui travaille sur un projet réel a besoin de trouver à la fois le code existant, la documentation des contraintes métier, les tests correspondants, et peut-être les spécifications — tout ça dans le même projet, avec le même outil, dans la même requête.
+**Sourcegraph Cody** exposes its code search capabilities via MCP in the enterprise version. It's a powerful tool — cross-organization search, multi-repo, semantic and lexical. But it's enterprise-only (starting at $49/user/month), code-only, and again: no public benchmark measuring the impact on agent performance.
 
-### 2. Format-agnostic — des parsers extensibles en 50 lignes
+**Greptile** offers a codebase analysis API with MCP. Valued at $180 million. Code review focus. Cloud-only. Paid. No benchmark either.
 
-Ajouter un nouveau format à RTFM demande environ 50 lignes de Python. On hérite de `BaseParser`, on implémente `parse()`, on déclare les extensions supportées. C'est tout.
+### Open-source solutions
+
+**Code-Index-MCP** (johnhuang316, 793 stars) indexes code in 7 languages with tree-sitter AST. It's the most popular open-source tool in this category. But it's purely code — no documentation, no config files, no structured data. And above all: zero published evaluation.
+
+**Code-Index-MCP** (ViperJuice, 38 stars) is architecturally closest to what we built — same SQLite + FTS5 stack, same hybrid search principle. But again: code-first (Markdown/YAML as secondary), no extensible parsers, no multi-corpus. And no evaluation.
+
+**mcp-codebase-index** uses Python AST for indexing, with incremental updates via `git diff`. Elegant, zero dependencies. But code-only.
+
+**CodeCompass** (from the Navigation Paradox paper) is an interesting case: it's a Neo4j AST graph exposed via MCP. It does *structural* navigation, not *textual* search. It's a complementary tool, not a competitor.
+
+### The common pattern
+
+All these tools share two characteristics:
+
+1. **They're code-centric.** Code, code, code. Code is important, but a real project also contains documentation, configuration files, specifications, structured data, maybe legal documents or research notes.
+
+2. **None has published rigorous evaluation.** Marketing claims, internal micro-benchmarks, or nothing at all. No one has taken a standardized benchmark, defined a controlled protocol with an isolated variable, and measured the impact of retrieval on agent performance.
+
+---
+
+## Five principles for a different tool
+
+RTFM was born from an observation: if the limiting factor is the ability to find the right context ([[R1_Le_Goulot_de_Localisation_en|R1]]), then the search tool shouldn't presume the *nature* of the context. Five principles guide its design.
+
+### 1. Domain-agnostic — not a code tool, a knowledge tool
+
+RTFM indexes everything. Python code (via AST), shell scripts (functions and comments), Markdown documentation (sections by headers), LaTeX articles (`\section`/`\subsection` structure), YAML and JSON configurations (top-level keys), PDF documents (extracted text), XML legal texts (Legifrance statutes), HTML pages (BOFiP), and plain text as fallback.
+
+The same tool serves a developer searching for a function, a lawyer searching for a statute, a researcher searching for a reference in their notes, a musicologist searching for a passage in their corpus.
+
+It's not an engineering whim. It's a direct consequence of the thesis. An agent working on a real project needs to find existing code, documentation of business constraints, corresponding tests, and maybe specifications — all in the same project, with the same tool, in the same query.
+
+### 2. Format-agnostic — extensible parsers in 50 lines
+
+Adding a new format to RTFM takes about 50 lines of Python. You inherit from `BaseParser`, implement `parse()`, declare supported extensions. That's it.
 
 ```python
-class MonParser(BaseParser):
-    extensions = {".monformat"}
+class MyParser(BaseParser):
+    extensions = {".myformat"}
 
     def parse(self, content: str, metadata: dict) -> list[Chunk]:
-        # découper le contenu en chunks pertinents
-        # retourner une liste de Chunk(title=..., content=..., metadata=...)
+        # split the content into relevant chunks
+        # return a list of Chunk(title=..., content=..., metadata=...)
         ...
 ```
 
-10 parsers sont embarqués. Mais la vraie valeur est dans l'extensibilité : n'importe qui peut ajouter le support de son format métier, de son format de données scientifiques, de son format de documentation interne — sans toucher au coeur du système.
+10 parsers ship with the tool. But the real value is in extensibility: anyone can add support for their business format, their scientific data format, their internal documentation format — without touching the core of the system.
 
-Le système ne présume pas du format. Il s'adapte. C'est la différence entre un outil de *code* indexing et un outil de *knowledge* indexing.
+The system doesn't presume the format. It adapts. That's the difference between a *code* indexing tool and a *knowledge* indexing tool.
 
-### 3. Protocol-agnostic — MCP comme lingua franca
+### 3. Protocol-agnostic — MCP as lingua franca
 
-RTFM est exposé via MCP (Model Context Protocol), le standard ouvert d'Anthropic pour la communication entre agents IA et outils. MCP est au monde des agents ce que HTTP est au web : un protocole standard qui permet l'interopérabilité.
+RTFM is exposed via MCP (Model Context Protocol), Anthropic's open standard for communication between AI agents and tools. MCP is to the agent world what HTTP is to the web: a standard protocol that enables interoperability.
 
-Concrètement : RTFM fonctionne avec tout agent MCP-compatible. Claude Code, Continue.dev, Cursor (via MCP), ou n'importe quel client MCP qu'on voudra écrire demain. Pas de lock-in à un IDE, pas de dépendance à un fournisseur de modèle.
+Concretely: RTFM works with any MCP-compatible agent. Claude Code, Continue.dev, Cursor (via MCP), or any MCP client someone writes tomorrow. No IDE lock-in, no dependency on a model provider.
 
-L'outil expose 11 endpoints MCP, dont les principaux :
-- `rtfm_search(query)` — recherche full-text et/ou sémantique
-- `rtfm_context(subject)` — recherche ciblée sur un sujet
-- `rtfm_expand(slug)` — récupération du contenu complet d'un chunk
-- `rtfm_discover()` — scan rapide de la structure du projet
+The tool exposes 11 MCP endpoints, the main ones being:
+- `rtfm_search(query)` — full-text and/or semantic search
+- `rtfm_context(subject)` — targeted search on a topic
+- `rtfm_expand(slug)` — retrieve the full content of a chunk
+- `rtfm_discover()` — fast scan of project structure
 
-### 4. Model-agnostic — pur retrieval, zéro génération
+### 4. Model-agnostic — pure retrieval, zero generation
 
-RTFM ne contient aucun modèle de langage. Zéro. Il ne génère rien, n'interprète rien, ne résume rien. Il indexe des documents et retourne des résultats de recherche. Point.
+RTFM contains no language model. Zero. It generates nothing, interprets nothing, summarizes nothing. It indexes documents and returns search results. Period.
 
-Les embeddings (optionnels) utilisent FastEmbed (ONNX), un modèle d'encodage léger qui tourne sur CPU. Mais même les embeddings ne sont là que pour le *ranking* des résultats — pas pour la génération.
+The (optional) embeddings use FastEmbed (ONNX), a lightweight encoder that runs on CPU. But even the embeddings are only there for *ranking* results — not for generation.
 
-La conséquence : RTFM est compatible avec tout LLM. Que l'agent tourne sur Claude, GPT, Gemini, Llama, Mistral, ou un modèle open-source fine-tuné ne change rien au fonctionnement de RTFM. L'outil produit des données ; le modèle de l'agent décide quoi en faire.
+The consequence: RTFM is compatible with any LLM. Whether the agent runs on Claude, GPT, Gemini, Llama, Mistral, or a fine-tuned open-source model changes nothing about how RTFM works. The tool produces data; the agent's model decides what to do with it.
 
-### 5. Non-invasif — remplacer ce qui doit l'être, ne rien toucher au reste
+### 5. Non-invasive — replace what must be replaced, touch nothing else
 
-C'est peut-être le principe le plus important, et celui qui demande le plus de discipline.
+This is perhaps the most important principle, and the one that takes the most discipline.
 
-RTFM ne modifie pas le workflow de l'agent. Il *ajoute* des outils de recherche. L'agent peut les utiliser — ou les ignorer complètement. Il n'y a pas de retrieval forcé, pas de contexte injecté silencieusement dans le prompt, pas de modification du comportement de l'agent en arrière-plan.
+RTFM doesn't modify the agent's workflow. It *adds* search tools. The agent can use them — or ignore them completely. There's no forced retrieval, no context silently injected into the prompt, no background modification of the agent's behavior.
 
-Quand l'agent a besoin de chercher une dépendance dans un projet de 8 000 fichiers, il utilise `rtfm_search`. Quand il sait déjà où coder, il utilise `Read` et `Edit` directement — exactement comme avant. L'outil remplace la navigation aveugle (`grep`, `glob`, `find`) là où c'est pertinent, et ne touche pas au reste : édition, exécution, debug, tests — tout ça reste inchangé.
+When the agent needs to find a dependency in an 8,000-file project, it uses `rtfm_search`. When it already knows where to code, it uses `Read` and `Edit` directly — exactly as before. The tool replaces blind navigation (`grep`, `glob`, `find`) where that's relevant, and doesn't touch the rest: editing, execution, debug, tests — all that stays unchanged.
 
-C'est un amplificateur, pas un remplacement. Et cette distinction va s'avérer cruciale dans les résultats ([[R4_Resultats|R4]]).
+It's an amplifier, not a replacement. And this distinction will turn out to be crucial in the results ([[R4_Resultats_en|R4]]).
 
 ---
 
-## Le pattern metadata-first
+## The metadata-first pattern
 
-L'architecture centrale de RTFM est ce que nous appelons le **progressive disclosure** — ou plus précisément, **metadata-first → expand on demand**.
+RTFM's central architecture is what we call **progressive disclosure** — or more precisely, **metadata-first → expand on demand**.
 
-### Le problème du contexte
+### The context problem
 
-[[R1_Le_Goulot_de_Localisation|R1]] a montré que le context rot est réel : au-delà d'un seuil, ajouter du contexte *dégrade* la performance. ContextBench montre que les agents voient le contexte pertinent mais n'en retiennent que 50-70%. AgentDiet montre que 40-60% des tokens d'exploration sont du gaspillage.
+[[R1_Le_Goulot_de_Localisation_en|R1]] showed that context rot is real: beyond a threshold, adding context *degrades* performance. ContextBench shows agents see the relevant context but only retain 50-70%. AgentDiet shows 40-60% of exploration tokens are waste.
 
-La conclusion architecturale est claire : il faut servir le *minimum* de contexte pertinent, pas le maximum.
+The architectural conclusion is clear: serve the *minimum* relevant context, not the maximum.
 
-### La solution en deux étapes
+### The two-step solution
 
-**Étape 1 : la recherche renvoie des métadonnées.**
+**Step 1: search returns metadata.**
 
 ```
 > rtfm_search("validation scorers mlflow")
@@ -166,87 +166,87 @@ La conclusion architecturale est claire : il faut servir le *minimum* de context
    Score: 0.71 | Chunks: 6 | 156 lines
 ```
 
-~300 tokens. Pas de contenu. Juste les coordonnées : quel fichier, quelle pertinence, quelle taille. Assez pour que l'agent décide *si* le résultat vaut la peine d'être lu.
+~300 tokens. No content. Just coordinates: which file, which relevance, which size. Enough for the agent to decide *whether* the result is worth reading.
 
-**Étape 2 : l'agent lit ce dont il a besoin.**
+**Step 2: the agent reads what it needs.**
 
-L'agent voit le chemin absolu dans les résultats. S'il décide que `validation.py` est pertinent, il fait un `Read("/testbed/mlflow/models/evaluation/validation.py")` — son outil standard, celui qu'il utilise de toute façon. Il charge le fichier *entier* dans son contexte, au moment précis où il en a besoin.
+The agent sees the absolute path in the results. If it decides `validation.py` is relevant, it does a `Read("/testbed/mlflow/models/evaluation/validation.py")` — its standard tool, the one it uses anyway. It loads the *entire* file into its context, at the exact moment it needs it.
 
-S'il décide que `data.py` n'est pas pertinent pour sa tâche, il ne le charge pas. Les 300 tokens de métadonnées n'ont pas pollué sa fenêtre de contexte avec du contenu inutile.
+If it decides `data.py` isn't relevant for its task, it doesn't load it. The 300 tokens of metadata haven't polluted its context window with useless content.
 
-### Pourquoi c'est important
+### Why this matters
 
-Sur 5 résultats de recherche, l'agent lit peut-être 2 fichiers. Avec une approche "dump tout le contenu dans les résultats", les 5 fichiers auraient été chargés — disons 3000 tokens de code × 5 = 15 000 tokens. Avec le pattern metadata-first, l'agent ne charge que ce qu'il utilise : 300 tokens de métadonnées + 2 fichiers lus à la demande. Le contexte effectif est 2 à 5 fois plus petit.
+Out of 5 search results, the agent might read 2 files. With a "dump all content in results" approach, all 5 files would have been loaded — say 3000 tokens of code × 5 = 15,000 tokens. With the metadata-first pattern, the agent only loads what it uses: 300 tokens of metadata + 2 files read on demand. Effective context is 2 to 5x smaller.
 
-C'est l'exact opposé des systèmes qui envoient des pages entières de code dans les résultats de recherche. Et c'est cohérent avec ce que la littérature nous dit : du contexte minimal ciblé est plus efficace qu'un dump massif.
-
----
-
-## Stack technique
-
-Sous le capot, RTFM est simple :
-
-**Stockage :** SQLite. Un seul fichier `.db`, portable, copié d'une machine à l'autre sans configuration.
-
-**Recherche full-text :** FTS5, le moteur de recherche intégré de SQLite. Utilise BM25 pour le ranking. Zéro dépendance externe, zéro cold start, performances suffisantes pour des index de 180 000 chunks.
-
-**Recherche sémantique (optionnelle) :** FastEmbed, un runtime ONNX léger. Le modèle `paraphrase-multilingual-MiniLM-L12-v2` encode les chunks et les requêtes en vecteurs de 384 dimensions. ~17 secondes de warm-up, puis recherche instantanée. L'hybride FTS + embeddings pondère les deux scores.
-
-**Synchronisation :** incrémentale via hash SHA-256. À chaque sync, seuls les fichiers modifiés sont ré-indexés. Sur un projet stable, la sync est quasi-instantanée.
-
-**Parsing :** chaque format a son parser dédié. Le parser Python utilise l'AST stdlib pour découper en classes et fonctions. Le parser Markdown découpe par en-têtes. Le parser LaTeX découpe par `\section`. Chaque parser produit des chunks — des unités de contenu indexables avec titre, contenu et métadonnées.
-
-| Composant            | Technologie      | Dépendance    |
-| -------------------- | ---------------- | ------------- |
-| Base de données      | SQLite           | stdlib Python |
-| Recherche lexicale   | FTS5 (BM25)      | stdlib Python |
-| Recherche sémantique | FastEmbed (ONNX) | optionnel     |
-| Parsing              | AST, regex, DOM  | stdlib Python |
-| Protocole            | MCP (FastMCP)    | `mcp` package |
-| Sync                 | SHA-256 hash     | stdlib Python |
-
-Le core n'a qu'une seule dépendance requise : `pyyaml`. Le reste est optionnel. C'est un choix délibéré : un outil qui s'installe en 2 secondes est un outil qui sera effectivement utilisé.
+It's the exact opposite of systems that send entire pages of code in search results. And it's consistent with what the literature tells us: targeted minimal context is more effective than a massive dump.
 
 ---
 
-## Positionnement : ce qui est novel et ce qui ne l'est pas
+## Technical stack
 
-Soyons honnêtes sur ce que RTFM apporte et ce qu'il n'apporte pas.
+Under the hood, RTFM is simple:
 
-### Ce qui N'EST PAS novel (ne le revendiquons pas)
+**Storage:** SQLite. A single `.db` file, portable, copied from one machine to another without configuration.
 
-- Pré-indexer un codebase et exposer l'index via MCP. Augment le fait. Code-Index-MCP le fait. D'autres aussi.
-- FTS5 + SQLite pour l'indexation. ViperJuice utilise la même stack.
-- Recherche sémantique via embeddings. Tout le monde en fait.
-- Sync incrémental. mcp-codebase-index utilise `git diff`, c'est encore plus malin.
+**Full-text search:** FTS5, SQLite's built-in search engine. Uses BM25 for ranking. Zero external dependencies, zero cold start, sufficient performance for 180,000-chunk indexes.
 
-### Ce qui est différent (mais pas le sujet du papier)
+**Semantic search (optional):** FastEmbed, a lightweight ONNX runtime. The `paraphrase-multilingual-MiniLM-L12-v2` model encodes chunks and queries into 384-dimensional vectors. ~17 seconds of warm-up, then instant search. Hybrid FTS + embeddings weights both scores.
 
-- **Multi-domaine** : le seul outil open source qui indexe code + docs + legal + research + données structurées.
-- **Parsers extensibles** : ~50 lignes pour un nouveau format. Aucun autre outil ne propose ça.
-- **Metadata-first** : les résultats de recherche ne contiennent pas de contenu, juste des coordonnées.
-- **Multi-corpus** : plusieurs sources dans la même base, avec recherche cross-source.
+**Synchronization:** incremental via SHA-256 hash. On each sync, only modified files are re-indexed. On a stable project, sync is near-instant.
 
-### Le vrai différenciateur
+**Parsing:** each format has its dedicated parser. The Python parser uses the stdlib AST to split into classes and functions. The Markdown parser splits by headers. The LaTeX parser splits by `\section`. Each parser produces chunks — indexable content units with title, content, and metadata.
 
-**L'évaluation.** Nous avons pris un benchmark standardisé (FeatureBench, ICLR 2026), défini un protocole à 4 conditions avec une variable isolée, et mesuré l'impact. C'est décrit en [[R3_Protocole_Experimental|R3]], les résultats sont en [[R4_Resultats|R4]].
+| Component          | Technology       | Dependency    |
+| ------------------ | ---------------- | ------------- |
+| Database           | SQLite           | Python stdlib |
+| Lexical search     | FTS5 (BM25)      | Python stdlib |
+| Semantic search    | FastEmbed (ONNX) | optional      |
+| Parsing            | AST, regex, DOM  | Python stdlib |
+| Protocol           | MCP (FastMCP)    | `mcp` package |
+| Sync               | SHA-256 hash     | Python stdlib |
 
-Aucun des outils listés ci-dessus n'a fait ça. Le "+80%" d'Augment est une affirmation marketing. Le "+23.2 pp" de Navigation Paradox utilise 30 micro-tâches créées par les auteurs, pas un benchmark tiers. Les outils open source n'ont aucune évaluation.
+The core has only one required dependency: `pyyaml`. The rest is optional. It's a deliberate choice: a tool that installs in 2 seconds is a tool that will actually be used.
 
-| Propriété              | RTFM                      | Augment CE            | Code-Index-MCP  | CodeCompass     |
+---
+
+## Positioning: what's novel and what isn't
+
+Let's be honest about what RTFM brings and what it doesn't.
+
+### What's NOT novel (and we don't claim it)
+
+- Pre-indexing a codebase and exposing the index via MCP. Augment does it. Code-Index-MCP does it. Others too.
+- FTS5 + SQLite for indexing. ViperJuice uses the same stack.
+- Semantic search via embeddings. Everyone does it.
+- Incremental sync. mcp-codebase-index uses `git diff`, which is even smarter.
+
+### What's different (but not the subject of the paper)
+
+- **Multi-domain**: the only open-source tool that indexes code + docs + legal + research + structured data.
+- **Extensible parsers**: ~50 lines for a new format. No other tool offers this.
+- **Metadata-first**: search results contain no content, just coordinates.
+- **Multi-corpus**: multiple sources in the same database, with cross-source search.
+
+### The real differentiator
+
+**Evaluation.** We took a standardized benchmark (FeatureBench, ICLR 2026), defined a 4-condition protocol with an isolated variable, and measured the impact. It's described in [[R3_Protocole_Experimental_en|R3]], the results are in [[R4_Resultats_en|R4]].
+
+None of the tools listed above did that. Augment's "+80%" is a marketing claim. Navigation Paradox's "+23.2 pp" uses 30 micro-tasks created by the authors, not a third-party benchmark. The open-source tools have no evaluation.
+
+| Property               | RTFM                      | Augment CE            | Code-Index-MCP  | CodeCompass     |
 | ---------------------- | ------------------------- | --------------------- | --------------- | --------------- |
-| Multi-domaine          | Code+docs+legal+research  | Code+docs+tickets     | Code uniquement | Code Python     |
-| Parsers extensibles    | ~50 LOC                   | Non                   | Non             | Non             |
-| Open source            | Oui                       | Non                   | Oui             | Oui             |
-| Progressive disclosure | metadata-first            | N/A (propriétaire)    | contenu direct  | graphe AST      |
-| **Évaluation publiée** | **Benchmark standardisé** | "+80%" sans protocole | Aucune          | 30 micro-tâches |
-| Pricing                | Gratuit                   | $20-200/mo            | Gratuit         | Gratuit         |
+| Multi-domain           | Code+docs+legal+research  | Code+docs+tickets     | Code only       | Python code     |
+| Extensible parsers     | ~50 LOC                   | No                    | No              | No              |
+| Open source            | Yes                       | No                    | Yes             | Yes             |
+| Progressive disclosure | metadata-first            | N/A (proprietary)     | direct content  | AST graph       |
+| **Published eval**     | **Standardized benchmark**| "+80%" no protocol    | None            | 30 micro-tasks  |
+| Pricing                | Free                      | $20-200/mo            | Free            | Free            |
 
-La contribution de ce travail n'est pas l'outil. C'est la preuve empirique que ce *type* d'outil fonctionne — et dans quelles conditions.
+The contribution of this work isn't the tool. It's the empirical proof that this *type* of tool works — and under what conditions.
 
 ---
 
-## Références
+## References
 
 - **Augment Code (2026)** — Context Engine MCP. https://www.augmentcode.com/blog/context-engine-mcp-now-live
 - **Sourcegraph (2025)** — Cody MCP Integration. https://sourcegraph.com/docs/api/mcp
@@ -260,38 +260,38 @@ La contribution de ce travail n'est pas l'outil. C'est la preuve empirique que c
 
 ---
 
-## Glossaire
+## Glossary
 
-- **BM25** : *Best Match 25* — algorithme de ranking pour la recherche full-text, standard de l'industrie depuis les années 1990.
-- **Chunk** : unité de contenu indexée par RTFM — une fonction Python, une section Markdown, un article de loi.
-- **FastEmbed** : bibliothèque Python pour les embeddings via ONNX, sans dépendance à PyTorch/TensorFlow.
-- **FTS5** : *Full-Text Search 5* — moteur de recherche intégré à SQLite, utilise BM25 pour le ranking.
-- **Metadata-first** : pattern architectural où les résultats de recherche ne contiennent que des métadonnées (titre, chemin, score), pas le contenu des documents.
-- **MCP** : *Model Context Protocol* — standard ouvert pour la communication entre agents IA et outils.
-- **ONNX** : *Open Neural Network Exchange* — format portable pour les modèles de machine learning.
-- **Parser** : composant qui découpe un document en chunks indexables selon les conventions du format.
-- **Progressive disclosure** : fournir l'information par niveaux de détail croissants, à la demande.
-- **SQLite** : base de données relationnelle embarquée, stockée dans un seul fichier.
-
----
-
-## Liens dans la série
-
-- [[R1_Le_Goulot_de_Localisation|R1]] — Le goulot de localisation — le problème fondamental
-- **R2** (cet article) — RTFM : un outil de connaissance qui ne touche qu'à ce qu'il doit
-- [[R3_Protocole_Experimental|R3]] — Le protocole : 4 conditions, 11 tâches, même modèle
-- [[R4_Resultats|R4]] — Les résultats : quand la taille du repo change tout
-- [[R5_Agent_Decide_Seul|R5]] — L'agent décide seul : retrieval sélectif sans entraînement
-- [[R6_Perspectives|R6]] — Ce que ça change — et ce qu'il reste à prouver
+- **BM25**: *Best Match 25* — ranking algorithm for full-text search, industry standard since the 1990s.
+- **Chunk**: content unit indexed by RTFM — a Python function, a Markdown section, a statute.
+- **FastEmbed**: Python library for embeddings via ONNX, without PyTorch/TensorFlow dependency.
+- **FTS5**: *Full-Text Search 5* — search engine built into SQLite, uses BM25 for ranking.
+- **Metadata-first**: architectural pattern where search results contain only metadata (title, path, score), not document content.
+- **MCP**: *Model Context Protocol* — open standard for communication between AI agents and tools.
+- **ONNX**: *Open Neural Network Exchange* — portable format for machine learning models.
+- **Parser**: component that splits a document into indexable chunks according to the format's conventions.
+- **Progressive disclosure**: providing information at increasing levels of detail, on demand.
+- **SQLite**: embedded relational database, stored in a single file.
 
 ---
 
-**Prérequis** : [[R1_Le_Goulot_de_Localisation|R1]]
-**Temps de lecture** : 14 min
-**Tags** : #rtfm #retrieval #mcp #architecture #progressive-disclosure #metadata-first #agnostique
+## Links in the series
+
+- [[R1_Le_Goulot_de_Localisation_en|R1]] — The localization bottleneck — the fundamental problem
+- **R2** (this article) — RTFM: a knowledge tool that only touches what it must
+- [[R3_Protocole_Experimental_en|R3]] — The protocol: 4 conditions, 11 tasks, same model
+- [[R4_Resultats_en|R4]] — The results: when repo size changes everything
+- [[R5_Agent_Decide_Seul_en|R5]] — The agent calibrates itself: selective retrieval without training
+- [[R6_Perspectives_en|R6]] — What it changes — and what remains to be proven
 
 ---
 
-*Prochain article : [[R3_Protocole_Experimental|R3]] — Le protocole : 4 conditions, 11 tâches, même modèle*
+**Prerequisites**: [[R1_Le_Goulot_de_Localisation_en|R1]]
+**Reading time**: 14 min
+**Tags**: #rtfm #retrieval #mcp #architecture #progressive-disclosure #metadata-first #agnostic
+
+---
+
+*Next article: [[R3_Protocole_Experimental_en|R3]] — The protocol: 4 conditions, 11 tasks, same model*
 
 ---

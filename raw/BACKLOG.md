@@ -1,164 +1,164 @@
 # RTFM — Backlog
 
-Tout ce qui a été identifié comme piste future, classé par priorité.
+Everything identified as a future direction, sorted by priority.
 
 ---
 
-## P0 — Benchmark en cours (papier EMSE)
+## P0 — Benchmark in progress (EMSE paper)
 
-### Runs manquants
-- [ ] Matrice complète 11 tâches × 4 conditions (A/B/C/D)
-- [ ] N ≥ 3 répétitions par condition (significativité statistique)
-- [ ] Tâches pydantic (771 fichiers) et astropy (1 123 fichiers) — repos intermédiaires pour localiser le seuil
-- [ ] `fb eval` systématique sur chaque run
-- [ ] Relancer Config B pour serialization et responses_agent (failed précédemment)
+### Missing runs
+- [ ] Complete matrix 11 tasks × 4 conditions (A/B/C/D)
+- [ ] N ≥ 3 repetitions per condition (statistical significance)
+- [ ] pydantic (771 files) and astropy (1,123 files) tasks — intermediate repos to locate the threshold
+- [ ] Systematic `fb eval` on every run
+- [ ] Re-run Config B for serialization and responses_agent (previously failed)
 
-### Analyses à produire
-- [ ] Tests statistiques (Wilcoxon signed-rank ou permutation test)
-- [ ] Intervalles de confiance sur resolve rate, coût, durée
-- [ ] Corrélation taille repo × gain retrieval (scatter plot)
-- [ ] Analyse qualitative : sur chaque tâche où C/D > B, quels fichiers le retrieval a trouvé que B n'a pas trouvé ?
-- [ ] Coût par tâche RÉSOLUE (pas par tentative)
+### Analyses to produce
+- [ ] Statistical tests (Wilcoxon signed-rank or permutation test)
+- [ ] Confidence intervals on resolve rate, cost, duration
+- [ ] Correlation repo size × retrieval gain (scatter plot)
+- [ ] Qualitative analysis: on every task where C/D > B, which files did retrieval find that B did not?
+- [ ] Cost per RESOLVED task (not per attempt)
 
-### Rédaction papier
-- [ ] Vérifier format/longueur EMSE (typiquement 25-40 pages)
-- [ ] Rédaction complète (plan v3 dans `paper/paper_plan.md`)
-- [ ] Figures et tables (10 prévues, voir paper_plan.md §Figures)
-- [ ] Artifact badge (RTFM déjà public sur PyPI/GitHub)
-
----
-
-## P1 — Fonctionnalités produit (prochaine version)
-
-### Navigation par graphe de dépendances
-- Table `edges(source_slug, target_slug, relation_type)` dans SQLite
-- Chaque parser extrait les relations au moment du `sync` :
-  - Python : `import`, `from ... import`
-  - LaTeX : `\cite{}`, `\ref{}`, `\input{}`
-  - XML Légifrance : `<LIEN>`
-  - Markdown : `[[wikilinks]]`, `[liens](relatifs.md)`
-  - YAML/JSON : `$ref`
-- Mode `rtfm_search` enrichi : "donne-moi aussi les fichiers liés à ce résultat"
-- Zéro Neo4j — tout dans le même SQLite
-- Inspiré par Navigation Paradox (arXiv:2602.20048) : graphe = +23.2pp sur dépendances cachées, FTS = zéro bénéfice sur ce type
-- Graphe et embeddings sont complémentaires : embeddings = similarité sémantique entre chunks, graphe = liens structurels entre fichiers
-
-### Filtrage intelligent à l'indexation
-- Exclure vendored, tests, generated code, node_modules, .git
-- Indexer sélectivement les grands repos (> 2000 fichiers) — seulement les répertoires clés
-- Réduirait le bruit sur les grands repos (problème identifié dans le benchmark 10 tâches)
-
-### Performance : `rtfm_expand` avec `count=0`
-- Quand `count=0` (tous les chunks), `_render_chunk` est appelé N fois, chacun relisant le fichier entier via `_read_raw_lines` puis le slicant
-- Optimisation : lire le fichier une seule fois et slicer pour chaque chunk
-- Pas critique pour les fichiers < 1 Mo, mais problème de perf sur les gros fichiers (> 1 Mo, > 50 chunks)
-- Identifié dans l'analyse de dette technique de `mcp.py`
-
-### Amélioration des résultats de recherche
-- Limiter les résultats par défaut (top 3 au lieu de top 5+)
-- Dedup par filename (déployé mais pas stress-testé)
-- Meilleur ranking : pondérer par fraîcheur, centralité dans le graphe
+### Paper writing
+- [ ] Check EMSE format/length (typically 25-40 pages)
+- [ ] Full writing (v3 plan in `paper/paper_plan.md`)
+- [ ] Figures and tables (10 planned, see paper_plan.md §Figures)
+- [ ] Artifact badge (RTFM already public on PyPI/GitHub)
 
 ---
 
-## P2 — Indexation cross-projet des mémoires Claude
+## P1 — Product features (next version)
 
-### Indexer le répertoire mémoire complet de chaque projet
-- `~/.claude/projects/*/memory/` (tout le répertoire, pas juste MEMORY.md)
-- Contient : MEMORY.md + fichiers thématiques (benchmark_paper.md, featurebench.md, worknotes, analyses...)
-- Aussi : les `CLAUDE.md` de chaque projet (conventions, architecture, décisions)
-- Recherche cross-projet : "comment j'ai géré l'OAuth ?" → cherche dans tous les projets
-- Auto-découverte des projets Claude via `~/.claude/projects/`
+### Dependency-graph navigation
+- `edges(source_slug, target_slug, relation_type)` table in SQLite
+- Each parser extracts relations at `sync` time:
+  - Python: `import`, `from ... import`
+  - LaTeX: `\cite{}`, `\ref{}`, `\input{}`
+  - Legifrance XML: `<LIEN>`
+  - Markdown: `[[wikilinks]]`, `[links](relative.md)`
+  - YAML/JSON: `$ref`
+- Enriched `rtfm_search` mode: "also give me the files linked to this result"
+- Zero Neo4j — everything in the same SQLite
+- Inspired by Navigation Paradox (arXiv:2602.20048): graph = +23.2pp on hidden dependencies, FTS = zero benefit on this type
+- Graph and embeddings are complementary: embeddings = semantic similarity between chunks, graph = structural links between files
 
-### Versioning de tous les fichiers mémoire
-- À chaque sync, si le contenu a changé, conserver la version précédente
-- Table `file_versions(slug, version_num, content_hash, timestamp, content)`
-- Permet : "qu'est-ce qu'on savait sur X il y a 3 semaines ?"
-- Permet aussi : "qu'est-ce qui a changé dans le benchmark_paper.md entre hier et aujourd'hui ?"
-- Aucun outil concurrent ne fait ça — feature différenciante
-- Le diff entre versions pourrait être exposé via MCP : `rtfm_history(slug)`
+### Smart filtering at indexing time
+- Exclude vendored, tests, generated code, node_modules, .git
+- Selectively index large repos (> 2000 files) — only key directories
+- Would reduce noise on large repos (issue identified in the 10-task benchmark)
 
-### Commande dédiée
-- `rtfm memory` : indexe + versionne tout `~/.claude/projects/*/memory/` cross-projet
-- `rtfm memory --history <slug>` : voir l'historique d'un fichier mémoire
+### Performance: `rtfm_expand` with `count=0`
+- When `count=0` (all chunks), `_render_chunk` is called N times, each re-reading the entire file via `_read_raw_lines` then slicing it
+- Optimization: read the file once and slice for each chunk
+- Not critical for files < 1 MB, but perf issue on large files (> 1 MB, > 50 chunks)
+- Identified in the technical debt analysis of `mcp.py`
 
----
-
-## P3 — Benchmark étendu (moyen terme)
-
-### Multi-modèle
-- [ ] Tester avec GPT-4, Gemini 2.5 Pro, Claude Opus, modèles open-source
-- [ ] Mesurer si la capacité de retrieval sélectif varie par modèle
-- [ ] Est-ce que les modèles plus puissants bénéficient plus ou moins du retrieval ?
-
-### Multi-outil
-- [ ] Tester avec Augment Context Engine, Sourcegraph Cody (si API disponible)
-- [ ] Le pattern metadata-first est-il crucial, ou n'importe quel outil ferait l'affaire ?
-
-### Multi-langage
-- [ ] FeatureBench full (tasks GPU) — pas seulement Python
-- [ ] Le goulot de localisation existe-t-il de la même manière en Java, TypeScript, Rust ?
-
-### Benchmark standardisé
-- [ ] Étendre à SWE-bench pour comparabilité avec la littérature
-- [ ] SWE-bench Verified (500 instances, ground truth validé par humains)
-
-### Conditions réelles
-- [ ] Mesurer l'impact en dehors d'un benchmark, sur des tâches de développement quotidiennes
-- [ ] Étude longitudinale : est-ce que l'agent s'améliore avec un index qui grossit ?
+### Search-results improvements
+- Limit default results (top 3 instead of top 5+)
+- Dedup by filename (deployed but not stress-tested)
+- Better ranking: weight by freshness, centrality in the graph
 
 ---
 
-## P4 — Recherche exploratoire (long terme)
+## P2 — Cross-project indexing of Claude memories
 
-### Retrieval proactif
-- L'outil pourrait pré-charger du contexte pertinent avant même que l'agent ne cherche
-- Injection automatique de contexte au début de session basée sur le prompt
-- Risque : context rot si mal calibré (Hong et al. 2025)
+### Index the full memory directory of each project
+- `~/.claude/projects/*/memory/` (the whole directory, not just MEMORY.md)
+- Contains: MEMORY.md + thematic files (benchmark_paper.md, featurebench.md, worknotes, analyses...)
+- Also: each project's `CLAUDE.md` (conventions, architecture, decisions)
+- Cross-project search: "how did I handle OAuth?" → searches across all projects
+- Auto-discovery of Claude projects via `~/.claude/projects/`
 
-### Interaction retrieval × taille de contexte
-- Est-ce que les fenêtres de contexte plus larges (1M+ tokens) rendent le retrieval obsolète ?
-- Navigation Paradox dit non : le problème est la saillance, pas la capacité
-- Mesurer empiriquement avec des modèles 200K vs 1M tokens
+### Versioning of all memory files
+- On every sync, if content has changed, keep the previous version
+- `file_versions(slug, version_num, content_hash, timestamp, content)` table
+- Enables: "what did we know about X three weeks ago?"
+- Also enables: "what changed in benchmark_paper.md between yesterday and today?"
+- No competing tool does this — differentiating feature
+- The diff between versions could be exposed via MCP: `rtfm_history(slug)`
 
-### Retrieval multi-source
-- Combiner le contenu du projet (code, docs) avec la doc externe (Context7, docs officielles)
-- RTFM pour le projet, Context7 pour les libs tierces — orchestration automatique
-
-### Parsers communautaires
-- Architecture extensible déjà en place (~50 lignes par parser)
-- Parsers manquants identifiés : TypeScript/JSX, Rust, Go, Java, C/C++, SQL, Jupyter notebooks, DOCX, CSV/Excel
-- Marketplace ou registry de parsers communautaires
-
-### Agent multi-outil
-- Combiner graphe (dépendances structurelles) + FTS (recherche textuelle) + embeddings (similarité sémantique) en un seul `rtfm_search` intelligent
-- L'agent n'a pas besoin de choisir le mode — le système route automatiquement
-- Cf. Adaptive-RAG (Jeong et al., NAACL 2024) mais sans classificateur entraîné
+### Dedicated command
+- `rtfm memory`: indexes + versions all `~/.claude/projects/*/memory/` cross-project
+- `rtfm memory --history <slug>`: view the history of a memory file
 
 ---
 
-## P5 — Corrections articles blog (série R)
+## P3 — Extended benchmark (mid term)
 
-### R5 — Fait (2026-03-01)
-- [x] Corrigé la fausse affirmation "rien dans le prompt ne dit d'utiliser RTFM"
-- [x] Reframé : guidage léger (3 lignes CLAUDE.md) + calibration émergente de l'intensité
+### Multi-model
+- [ ] Test with GPT-4, Gemini 2.5 Pro, Claude Opus, open-source models
+- [ ] Measure whether selective retrieval capability varies by model
+- [ ] Do more capable models benefit more or less from retrieval?
 
-### R6 — À mettre à jour
-- [ ] §5 "L'agent fait du retrieval sélectif naturellement" → aligner avec R5 corrigé (guidage léger, pas zéro instruction)
-- [ ] "Ne mettez pas d'instruction 'utilise TOUJOURS RTFM'" → nuancer (3 lignes d'orientation ≠ forcer le retrieval systématique)
-- [ ] "Ce n'est pas un GPS qui dicte le chemin" → garder la métaphore mais ajouter "on lui montre la carte"
+### Multi-tool
+- [ ] Test with Augment Context Engine, Sourcegraph Cody (if API available)
+- [ ] Is the metadata-first pattern crucial, or would any tool do?
 
-### Intégrer Navigation Paradox dans R2
-- [ ] Compléter la comparaison CodeCompass vs RTFM : graphe vs texte, mono-domaine vs multi
-- [ ] Mentionner que leur outil n'est pas distribué (0 stars, prototype recherche)
-- [ ] Ajouter le finding 58% zero-call → RTFM résout ça avec 3 lignes CLAUDE.md
+### Multi-language
+- [ ] Full FeatureBench (GPU tasks) — not just Python
+- [ ] Does the localization bottleneck exist the same way in Java, TypeScript, Rust?
+
+### Standardized benchmark
+- [ ] Extend to SWE-bench for comparability with the literature
+- [ ] SWE-bench Verified (500 instances, ground truth validated by humans)
+
+### Real-world conditions
+- [ ] Measure impact outside a benchmark, on daily development tasks
+- [ ] Longitudinal study: does the agent improve as the index grows?
 
 ---
 
-## Idées en vrac
+## P4 — Exploratory research (long term)
 
-- Template CLAUDE.md : ajouter "cherche une fois, puis code" au lieu de "cherche à chaque doute" (réduirait l'overhead sur grands repos)
-- Métriques d'usage : combien de `rtfm_search` par session en usage réel (pas benchmark)
-- Dashboard : visualiser l'index (fichiers, chunks, relations, couverture) via une page web locale
-- `rtfm why <file>` : expliquer pourquoi un fichier est dans les résultats (score breakdown)
-- `rtfm graph <file>` : afficher les dépendances d'un fichier (quand le graphe sera implémenté)
+### Proactive retrieval
+- The tool could pre-load relevant context before the agent even searches
+- Automatic context injection at session start based on the prompt
+- Risk: context rot if poorly calibrated (Hong et al. 2025)
+
+### Retrieval × context-size interaction
+- Do wider context windows (1M+ tokens) make retrieval obsolete?
+- Navigation Paradox says no: the problem is salience, not capacity
+- Measure empirically with 200K vs 1M token models
+
+### Multi-source retrieval
+- Combine project content (code, docs) with external docs (Context7, official docs)
+- RTFM for the project, Context7 for third-party libs — automatic orchestration
+
+### Community parsers
+- Extensible architecture already in place (~50 lines per parser)
+- Missing parsers identified: TypeScript/JSX, Rust, Go, Java, C/C++, SQL, Jupyter notebooks, DOCX, CSV/Excel
+- Marketplace or registry of community parsers
+
+### Multi-tool agent
+- Combine graph (structural dependencies) + FTS (text search) + embeddings (semantic similarity) in a single smart `rtfm_search`
+- The agent doesn't need to choose the mode — the system routes automatically
+- Cf. Adaptive-RAG (Jeong et al., NAACL 2024) but without a trained classifier
+
+---
+
+## P5 — Blog articles fixes (R series)
+
+### R5 — Done (2026-03-01)
+- [x] Fixed the false statement "nothing in the prompt tells it to use RTFM"
+- [x] Reframed: light guidance (3 lines of CLAUDE.md) + emergent calibration of intensity
+
+### R6 — To update
+- [ ] §5 "The agent naturally does selective retrieval" → align with corrected R5 (light guidance, not zero instruction)
+- [ ] "Do not add an 'ALWAYS use RTFM' instruction" → nuance (3 lines of orientation ≠ forcing systematic retrieval)
+- [ ] "It's not a GPS that dictates the route" → keep the metaphor but add "we show it the map"
+
+### Integrate Navigation Paradox into R2
+- [ ] Complete the CodeCompass vs RTFM comparison: graph vs text, mono-domain vs multi
+- [ ] Mention that their tool is not distributed (0 stars, research prototype)
+- [ ] Add the 58% zero-call finding → RTFM solves it with 3 lines of CLAUDE.md
+
+---
+
+## Loose ideas
+
+- CLAUDE.md template: add "search once, then code" instead of "search on every doubt" (would reduce overhead on large repos)
+- Usage metrics: how many `rtfm_search` calls per session in real use (not benchmark)
+- Dashboard: visualize the index (files, chunks, relations, coverage) via a local web page
+- `rtfm why <file>`: explain why a file is in the results (score breakdown)
+- `rtfm graph <file>`: show a file's dependencies (once the graph is implemented)
