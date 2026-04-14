@@ -11,7 +11,7 @@ When the wiki is small (~100 notes), the LLM reads `index.md` and finds what it 
 ## Quick Start
 
 ```bash
-pip install rtfm-ai[mcp]
+pip install rtfm-ai
 cd /path/to/your-obsidian-vault
 rtfm vault
 ```
