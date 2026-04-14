@@ -244,5 +244,51 @@ def init_project(
     else:
         summary["sync"] = {"added": 0, "files": []}
 
+    # 9. Detect optional-extras opportunities and add hints to the summary
+    summary["hints"] = _collect_extras_hints(project_root)
+
     lib.close()
     return summary
+
+
+def _collect_extras_hints(project_root: Path) -> list[str]:
+    """Look for signals that a user would benefit from an optional extra.
+
+    Returns a list of human-readable hints (may be empty). Hints appear in
+    the CLI output after `rtfm init` so the user learns about relevant extras
+    at the moment they would actually use them.
+    """
+    hints: list[str] = []
+
+    try:
+        import fastembed  # noqa: F401
+        has_embeddings = True
+    except ImportError:
+        has_embeddings = False
+
+    try:
+        import pdftext  # noqa: F401
+        has_pdf = True
+    except ImportError:
+        has_pdf = False
+
+    # PDF files → suggest [pdf] extra
+    if not has_pdf:
+        pdf_count = sum(1 for _ in project_root.rglob("*.pdf"))
+        if pdf_count > 0:
+            hints.append(
+                f"💡 Found {pdf_count} PDF file{'s' if pdf_count > 1 else ''} — "
+                f"install `pip install rtfm-ai[pdf]` to index them."
+            )
+
+    # Large corpus → suggest [embeddings] extra for semantic search
+    if not has_embeddings:
+        total = sum(1 for _ in project_root.rglob("*")
+                    if _.is_file() and _.suffix in {".md", ".py", ".txt", ".rst"})
+        if total > 200:
+            hints.append(
+                f"💡 Your project has {total}+ text files — `pip install rtfm-ai[embeddings]` "
+                f"adds semantic search for paraphrase queries (FTS handles exact matches)."
+            )
+
+    return hints

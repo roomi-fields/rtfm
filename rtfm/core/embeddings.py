@@ -24,8 +24,9 @@ def get_model(model_name: str = DEFAULT_MODEL):
             _model_name = model_name
         except ImportError:
             raise ImportError(
-                "fastembed is required for embeddings. "
-                "Install with: pip install fastembed"
+                "\n\n  ❌ Semantic search requires the embeddings extra.\n"
+                "     Install with:  pip install rtfm-ai[embeddings]\n"
+                "     (~85 MB ONNX model, no GPU needed)\n"
             )
 
     return _model

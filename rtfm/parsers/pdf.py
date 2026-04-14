@@ -140,7 +140,8 @@ def extract_with_pdftext(path: Path) -> list[dict]:
         from pdftext.extraction import plain_text_output
     except ImportError:
         raise PDFExtractionError(
-            "pdftext not installed. Install with: pip install pdftext"
+            "\n\n  ❌ PDF parsing requires the pdf extra.\n"
+            "     Install with:  pip install rtfm-ai[pdf]\n"
         )
 
     try:
@@ -179,7 +180,8 @@ def extract_with_marker(path: Path) -> list[dict]:
         from marker.models import create_model_dict
     except ImportError:
         raise PDFExtractionError(
-            "marker-pdf not installed. Install with: pip install marker-pdf"
+            "\n\n  ❌ PDF marker backend requires the pdf extra.\n"
+            "     Install with:  pip install rtfm-ai[pdf]\n"
         )
 
     try:

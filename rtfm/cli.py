@@ -496,6 +496,26 @@ def cmd_status(args):
     print(f"\nParsers:       {len(set(ParserRegistry.list_parsers().values()))} registered")
     print(f"Extensions:    {', '.join(sorted(exts))}")
 
+    # Optional extras — visible install state + actionable next step
+    def _check(mod: str) -> bool:
+        try:
+            __import__(mod)
+            return True
+        except ImportError:
+            return False
+
+    extras = [
+        ("embeddings", _check("fastembed"), "semantic search",       "rtfm-ai[embeddings]"),
+        ("pdf",        _check("pdftext"),   "PDF parsing",          "rtfm-ai[pdf]"),
+    ]
+    print("\nOptional extras:")
+    for name, installed, purpose, pkg in extras:
+        mark = "✓" if installed else "✗"
+        if installed:
+            print(f"  {mark} {name:<12}installed ({purpose})")
+        else:
+            print(f"  {mark} {name:<12}missing — pip install {pkg}   ({purpose})")
+
     lib.close()
 
 
@@ -677,6 +697,13 @@ def cmd_init(args):
     print(f"Hook: {summary['hook']}")
     sync_info = summary["sync"]
     print(f"Synced: {sync_info['added']} entry-point files")
+
+    hints = summary.get("hints", [])
+    if hints:
+        print()
+        for hint in hints:
+            print(hint)
+
     print("Done.")
 
 

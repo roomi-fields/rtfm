@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rtfm-ai"
-version = "0.4.0"
+version = "0.4.1"
 description = "RTFM — The open retrieval layer for AI agents. Indexes code, docs, legal, research, data. Extensible parser system. Serves surgical context via MCP."
 readme = "README.md"
 license = "MIT"
@@ -32,6 +32,7 @@ classifiers = [
 
 dependencies = [
     "pyyaml>=6.0",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -39,12 +40,11 @@ pdf = [
     "pdftext>=0.3.0",
     "marker-pdf>=0.2.0",
 ]
-mcp = [
-    "mcp>=1.0.0",
-]
 embeddings = [
     "fastembed>=0.3.0",
 ]
+# kept for backward-compatibility — users still doing `pip install rtfm-ai[mcp]` won't break
+mcp = []
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
