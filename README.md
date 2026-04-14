@@ -17,6 +17,8 @@ Index everything in your project — code, docs, PDFs, legal texts, research, da
 
 ---
 
+<!-- ─────────── TIER 1 — Pain & promise ─────────── -->
+
 ## The problem
 
 Your AI agent is flying blind.
@@ -41,40 +43,19 @@ pip install rtfm-ai[mcp] && cd your-project && rtfm init
 
 > **Free. Runs locally. No API keys. No cloud. Your data stays yours.**
 
----
+### What it looks like
 
-## What it does
+```text
+$ rtfm search "authentication flow" --limit 3
+[1] src/auth/handlers.py > authenticate_user (p.2)    score 9.12
+    src/auth/handlers.py:147  42 lines
+[2] docs/architecture/auth.md > SSO flow (p.1)        score 7.84
+    docs/architecture/auth.md:1   23 lines
+[3] docs/ADR/0007-oauth.md > Decision (p.1)           score 6.90
+    docs/ADR/0007-oauth.md:12  18 lines
+```
 
-### Search & retrieval
-- **FTS5 full-text search** — instant, zero-config, works out of the box
-- **Semantic search** — optional embeddings (FastEmbed/ONNX, no GPU needed)
-- **Hybrid mode** — combine both, rank by relevance score
-- **Metadata-first** — results return file paths + scores (~300 tokens), not content dumps
-- **Progressive disclosure** — agent expands only the chunks it actually needs
-- **Knowledge graph** — wikilinks + Python imports resolved as graph edges, hub detection, centrality ranking
-
-### Multi-format indexing
-- **10 parsers built-in** — Markdown, Python (AST), LaTeX, YAML, JSON, Shell, PDF, XML, HTML, plain text
-- **Extensible** — add any format in ~50 lines of Python
-- **Auto-sync hooks** — index stays fresh every prompt, zero manual work
-- **Incremental** — only re-indexes what changed
-
-### Memory that survives sessions
-- **Cross-project Claude memory** — `rtfm memory` discovers every `~/.claude/projects/*/memory/` directory on your machine and indexes them into a single searchable DB at `~/.rtfm/memory.db`
-- **Unlimited version history** — every change to a memory file is snapshotted (no prune), so you can ask `rtfm_history` for the full evolution
-- **Auto-snapshot on session end** — `rtfm memory --install-hook` registers a global `SessionEnd` hook; every Claude session you close captures a new snapshot automatically
-- **Curated content, not raw transcripts** — MemPalace indexes verbatim conversation dumps (noisy). RTFM indexes the memory notes the agent already curated itself during the session (small, structured, signal-dense)
-
-### Obsidian / LLM Wiki
-- **`rtfm vault`** — one command, index the whole vault with auto corpus mapping
-- **Karpathy-compatible** — augments the [LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) with real retrieval when `index.md` outgrows the context window
-- **`_rtfm/` generation** — Obsidian-native navigation with Mermaid diagrams, Dataview frontmatter, backlink counts
-
-### Integration
-- **MCP server** — works with Claude Code, Cursor, Codex, any MCP client
-- **13 MCP tools** — search, context, expand, graph, history, sync, tags, ...
-- **CLI + Python API** — scriptable for pipelines
-- **Non-invasive** — doesn't touch your code, doesn't replace your editor
+Three results, ~300 tokens. The agent decides what to read next with `rtfm_expand(source, target_section)` — not a context dump, a conversation.
 
 ---
 
@@ -100,6 +81,8 @@ pip install rtfm-ai[mcp,embeddings,pdf]  # Everything
 
 ---
 
+<!-- ─────────── TIER 2 — Positioning & buzz ─────────── -->
+
 ## How it compares
 
 |                       | **RTFM**              | Augment CE    | Sourcegraph       | Code-Index-MCP | MemPalace                |
@@ -119,6 +102,130 @@ pip install rtfm-ai[mcp,embeddings,pdf]  # Everything
 **RTFM is the only open-source option that indexes multi-domain content with structural parsing, a code-level knowledge graph, and unlimited per-file history.** That's the niche.
 
 Different from MemPalace specifically: MemPalace is an entity-level memory for conversations (who/project/decision triples in SQLite, plus verbatim chunks in ChromaDB). RTFM is a retrieval layer for *artefacts* — parsed by format, linked at the file level, versioned over time. The two are stackable, not competing.
+
+---
+
+## Memory that survives sessions
+
+Between sessions, most agents forget. RTFM indexes Claude Code's own memory files across every project on your machine, with full version history.
+
+```bash
+rtfm memory                    # Manual snapshot
+rtfm memory --install-hook     # Auto-snapshot on every SessionEnd
+```
+
+- **Cross-project index** — one DB at `~/.rtfm/memory.db` sees every `~/.claude/projects/*/memory/` directory on your machine. Ask `rtfm_search("OAuth auth decisions")` and get hits from all 18 of your projects.
+- **Unlimited version history** — every change to a memory file is snapshotted (no prune). `rtfm_history <slug>` returns the full evolution.
+- **Auto-snapshot on `SessionEnd`** — one command installs a global Claude Code hook. Every session you close captures a new snapshot.
+- **Curated, not verbatim** — RTFM indexes the notes the agent already curated itself during the session (small, structured, signal-dense). Different philosophy from MemPalace, which indexes the full conversation transcripts in ChromaDB (large, noisy, needs aggressive semantic filtering).
+
+---
+
+## Obsidian vault mode
+
+RTFM is the retrieval layer for the [Karpathy LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern. Karpathy himself wrote: *"at small scale the index file is enough, but as the wiki grows you want proper search."* This is proper search.
+
+```bash
+cd /path/to/your-obsidian-vault
+rtfm vault
+```
+
+- Detects `.obsidian/`, proposes a folder → corpus mapping
+- Resolves `[[wikilinks]]` following Obsidian rules → stored as graph edges
+- Generates `_rtfm/` with Obsidian-native navigation (index, graph with Mermaid, hubs, orphans, Dataview frontmatter)
+- Tested on a 1,700-note research vault
+
+```
+_rtfm/
+├── index.md      # Hub: corpus list, top connected documents
+├── graph.md      # Hub documents, orphans, broken links, Mermaid
+├── recent.md     # Recently modified files
+└── corpus/       # Per-corpus indexes
+```
+
+The LLM still writes your wiki. RTFM handles the retrieval that `index.md` can't scale to.
+
+**[Full Obsidian guide →](docs/obsidian-vault-guide.md)**
+
+---
+
+## What I measured
+
+I ran two kinds of benchmarks. The honest picture is nuanced — retrieval helps most on tasks that are actually solvable and where the agent is spending time *looking for things*.
+
+### Document-heavy task: French tax article generation (B10)
+
+Writing a ~50-page regulated article from a corpus of legal code, case law, and administrative doctrine. Same agent (Claude Code + Sonnet 4), same prompt, eight configurations tested.
+
+| Configuration               | Duration  | Cost    | Tokens |
+| --------------------------- | --------- | ------- | ------ |
+| Baseline (no RTFM)          | 8m 16s    | $22.61  | 8.21 M |
+| **With RTFM (FTS default)** | **6m 58s**| **$11.14** | **3.22 M** |
+
+**Δ : −51 % cost, −61 % tokens, −16 % duration — with better factual accuracy.**
+This is the use case RTFM was built for: navigating a large multi-domain corpus where grep misses the right paragraph.
+
+### Code task: [FeatureBench](https://huggingface.co/datasets/LiberCoders/FeatureBench) (LiberCoders dataset)
+
+11 tasks, 3 repos of varying size, 4 conditions (A = standard prompt with file paths; B = discovery, no paths; C = RTFM FTS; D = RTFM hybrid), 3 runs each.
+
+| Repo     | Size        | Where RTFM helps                                     |
+| -------- | ----------- | ---------------------------------------------------- |
+| metaflow | 620 files   | Everyone resolves — RTFM adds no measurable gain     |
+| astropy  | 1,119 files | All conditions 25–30 % F2P pass; none fully resolve  |
+| mlflow   | 8,255 files | All conditions 0–5 % F2P pass; none fully resolve    |
+
+On a single smaller-scope run (`test_stub_generator` on metaflow), RTFM cut agent time by **−37 %** vs the no-paths baseline. On the larger repos, the tasks themselves were too hard for Sonnet 4 to resolve inside a 20-minute timeout regardless of retrieval.
+
+### The honest caveats
+
+- Single model (Sonnet 4), single agent (Claude Code). Not statistically bullet-proof.
+- On small repos (< 1k files), `grep` is enough and RTFM adds overhead.
+- FeatureBench measures *code modification*, not *information retrieval*. It's the wrong benchmark for a retrieval tool — I'm running against it because it's what exists. Better-suited benchmarks (RepoQA, SWE-QA, LocAgent) are on the roadmap.
+
+### What this says
+
+RTFM measurably wins when the bottleneck is **"find the right paragraph in a 2,000-file corpus"**. It doesn't magically make unsolvable tasks solvable. The model still has to do the work — RTFM just makes sure it has the right context to do it with.
+
+---
+
+## Who it's for
+
+RTFM works anywhere your project isn't just code:
+
+- **LegalTech** — Code + tax law + regulatory specs. Ships with Legifrance XML and BOFiP parsers.
+- **Research** — Code + LaTeX papers + datasets. Ships with LaTeX and PDF parsers.
+- **FinTech** — Code + financial regulations + XBRL reports. Write an XBRL parser in 50 lines.
+- **HealthTech** — Code + medical records (HL7/FHIR) + clinical guidelines.
+- **Solo devs with big projects** — Stop watching your agent grep the same 8,000 files every session.
+- **Obsidian / PKM users** — Make your vault actually searchable by your AI.
+- **Any regulated industry** — If your project mixes code with domain documents, RTFM is for you.
+
+---
+
+<!-- ─────────── TIER 3 — Technical depth ─────────── -->
+
+## Full feature list
+
+### Search & retrieval
+- **FTS5 full-text search** — instant, zero-config, works out of the box
+- **Semantic search** — optional embeddings (FastEmbed/ONNX, no GPU needed)
+- **Hybrid mode** — combine both, rank by relevance score
+- **Metadata-first** — results return file paths + scores (~300 tokens), not content dumps
+- **Progressive disclosure** — agent expands only the chunks it actually needs
+- **Knowledge graph** — wikilinks + Python imports resolved as graph edges, hub detection, centrality ranking
+
+### Multi-format indexing
+- **10 parsers built-in** — Markdown, Python (AST), LaTeX, YAML, JSON, Shell, PDF, XML, HTML, plain text
+- **Extensible** — add any format in ~50 lines of Python
+- **Auto-sync hooks** — index stays fresh every prompt, zero manual work
+- **Incremental** — only re-indexes what changed
+
+### Integration
+- **MCP server** — works with Claude Code, Cursor, Codex, any MCP client
+- **13 MCP tools** — search, context, expand, graph, history, sync, tags, ...
+- **CLI + Python API** — scriptable for pipelines
+- **Non-invasive** — doesn't touch your code, doesn't replace your editor
 
 ---
 
@@ -171,76 +278,6 @@ Drop it in your project, restart Claude Code, your medical AI agent now understa
 
 ---
 
-## Who it's for
-
-RTFM works anywhere your project isn't just code:
-
-- **LegalTech** — Code + tax law + regulatory specs. Ships with Legifrance XML and BOFiP parsers.
-- **Research** — Code + LaTeX papers + datasets. Ships with LaTeX and PDF parsers.
-- **FinTech** — Code + financial regulations + XBRL reports. Write an XBRL parser in 50 lines.
-- **HealthTech** — Code + medical records (HL7/FHIR) + clinical guidelines.
-- **Solo devs with big projects** — Stop watching your agent grep the same 8,000 files every session.
-- **Obsidian / PKM users** — Make your vault actually searchable by your AI.
-- **Any regulated industry** — If your project mixes code with domain documents, RTFM is for you.
-
----
-
-## What it looks like
-
-```text
-$ rtfm search "authentication flow" --limit 3
-[1] src/auth/handlers.py > authenticate_user (p.2)    score 9.12
-    src/auth/handlers.py:147  42 lines
-[2] docs/architecture/auth.md > SSO flow (p.1)        score 7.84
-    docs/architecture/auth.md:1   23 lines
-[3] docs/ADR/0007-oauth.md > Decision (p.1)           score 6.90
-    docs/ADR/0007-oauth.md:12  18 lines
-```
-
-Three results, ~300 tokens. The agent decides what to read next with `rtfm_expand(source, target_section)` — not a context dump, a conversation.
-
----
-
-## What I measured
-
-I ran two kinds of benchmarks. The honest picture is nuanced — retrieval helps most on tasks that are actually solvable and where the agent is spending time *looking for things*.
-
-### Document-heavy task: French tax article generation (B10)
-
-Writing a ~50-page regulated article from a corpus of legal code, case law, and administrative doctrine. Same agent (Claude Code + Sonnet 4), same prompt, eight configurations tested.
-
-| Configuration               | Duration  | Cost    | Tokens |
-| --------------------------- | --------- | ------- | ------ |
-| Baseline (no RTFM)          | 8m 16s    | $22.61  | 8.21 M |
-| **With RTFM (FTS default)** | **6m 58s**| **$11.14** | **3.22 M** |
-
-**Δ : −51 % cost, −61 % tokens, −16 % duration — with better factual accuracy.**
-This is the use case RTFM was built for: navigating a large multi-domain corpus where grep misses the right paragraph.
-
-### Code task: [FeatureBench](https://huggingface.co/datasets/LiberCoders/FeatureBench) (LiberCoders dataset)
-
-11 tasks, 3 repos of varying size, 4 conditions (A = standard prompt with file paths; B = discovery, no paths; C = RTFM FTS; D = RTFM hybrid), 3 runs each.
-
-| Repo     | Size        | Where RTFM helps                                     |
-| -------- | ----------- | ---------------------------------------------------- |
-| metaflow | 620 files   | Everyone resolves — RTFM adds no measurable gain     |
-| astropy  | 1,119 files | All conditions 25–30 % F2P pass; none fully resolve  |
-| mlflow   | 8,255 files | All conditions 0–5 % F2P pass; none fully resolve    |
-
-On a single smaller-scope run (`test_stub_generator` on metaflow), RTFM cut agent time by **−37 %** vs the no-paths baseline. On the larger repos, the tasks themselves were too hard for Sonnet 4 to resolve inside a 20-minute timeout regardless of retrieval.
-
-### The honest caveats
-
-- Single model (Sonnet 4), single agent (Claude Code). Not statistically bullet-proof.
-- On small repos (< 1k files), `grep` is enough and RTFM adds overhead.
-- FeatureBench measures *code modification*, not *information retrieval*. It's the wrong benchmark for a retrieval tool — I'm running against it because it's what exists. Better-suited benchmarks (RepoQA, SWE-QA, LocAgent) are on the roadmap.
-
-### What this says
-
-RTFM measurably wins when the bottleneck is **"find the right paragraph in a 2,000-file corpus"**. It doesn't magically make unsolvable tasks solvable. The model still has to do the work — RTFM just makes sure it has the right context to do it with.
-
----
-
 ## MCP tools
 
 | Tool              | What it does                                          |
@@ -258,31 +295,6 @@ RTFM measurably wins when the bottleneck is **"find the right paragraph in a 2,0
 | `rtfm_remove`     | Remove a file from the index                          |
 | `rtfm_graph`      | Show dependency graph for a source (imports, links)   |
 | `rtfm_history`    | File version history and memory snapshots             |
-
----
-
-## Obsidian vault mode
-
-RTFM is the retrieval layer for the [Karpathy LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern. When your vault outgrows `index.md` (100+ articles), RTFM takes over — real search, wikilink resolution, auto-generated navigation.
-
-```bash
-cd /path/to/your-obsidian-vault
-rtfm vault
-```
-
-Generates:
-
-```
-_rtfm/
-├── index.md      # Hub: corpus list, top connected documents
-├── graph.md      # Hub documents, orphans, broken links, Mermaid
-├── recent.md     # Recently modified files
-└── corpus/       # Per-corpus indexes
-```
-
-The LLM still writes your wiki. RTFM handles the retrieval that `index.md` can't scale to.
-
-**[Full Obsidian guide →](docs/obsidian-vault-guide.md)**
 
 ---
 
@@ -306,6 +318,10 @@ rtfm sources
 rtfm vault                             # Initialize for cwd vault
 rtfm vault /path/to/vault              # Specific vault
 rtfm vault --regenerate                # Regenerate _rtfm/ files
+
+# Cross-project Claude memory
+rtfm memory                            # Manual snapshot
+rtfm memory --install-hook             # Auto-snapshot on SessionEnd
 
 # Status & info
 rtfm status
