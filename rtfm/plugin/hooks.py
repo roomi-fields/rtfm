@@ -15,19 +15,24 @@ The UserPromptSubmit hook syncs every 30s, but the last Write/Edit may
 happen right before the agent stops. This hook runs a final sync to
 ensure everything is indexed.
 """
-import json, sys, time
+import json, os, sys, time
 from pathlib import Path
+
+# Resolve project root from $CLAUDE_PROJECT_DIR so the hook works regardless
+# of the agent's current working directory.
+PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parents[2])
 
 def _log(msg):
     try:
         ts = time.strftime("%H:%M:%S")
-        with open(".rtfm/rtfm.log", "a") as f:
+        log_path = PROJECT_ROOT / ".rtfm" / "rtfm.log"
+        with open(log_path, "a") as f:
             f.write(f"[{ts}]       hook | {msg}\n")
     except Exception:
         pass
 
 def main():
-    rtfm_dir = Path(".rtfm")
+    rtfm_dir = PROJECT_ROOT / ".rtfm"
     if not rtfm_dir.exists():
         return
 
@@ -48,7 +53,7 @@ def main():
             pass
 
     if not sources:
-        sources = [{"path": str(Path(".").resolve()), "corpus": default_corpus}]
+        sources = [{"path": str(PROJECT_ROOT), "corpus": default_corpus}]
 
     _log(f"stop-sync starting {len(sources)} source(s)")
     t0 = time.time()
@@ -101,17 +106,22 @@ from pathlib import Path
 
 STALE_SECONDS = 30  # Re-sync at most every 30 seconds
 
+# Resolve project root from $CLAUDE_PROJECT_DIR so the hook works regardless
+# of the agent's current working directory.
+PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parents[2])
+
 def _log(msg):
     """Append to .rtfm/rtfm.log (inline, no imports)."""
     try:
         ts = time.strftime("%H:%M:%S")
-        with open(".rtfm/rtfm.log", "a") as f:
+        log_path = PROJECT_ROOT / ".rtfm" / "rtfm.log"
+        with open(log_path, "a") as f:
             f.write(f"[{ts}]       hook | {msg}\n")
     except Exception:
         pass
 
 def main():
-    rtfm_dir = Path(".rtfm")
+    rtfm_dir = PROJECT_ROOT / ".rtfm"
     if not rtfm_dir.exists():
         return
 
@@ -143,9 +153,9 @@ def main():
         except Exception:
             pass
 
-    # Fallback: no sources configured, sync cwd with default corpus
+    # Fallback: no sources configured, sync project root with default corpus
     if not sources:
-        sources = [{"path": str(Path(".").resolve()), "corpus": default_corpus}]
+        sources = [{"path": str(PROJECT_ROOT), "corpus": default_corpus}]
 
     # Quick incremental sync for each source (no embeddings — fast)
     _log(f"sync starting {len(sources)} source(s)")
@@ -366,12 +376,18 @@ def install_hook(project_root: str | Path, corpus: str = "default") -> str:
             cleaned.append(existing)
         return cleaned
 
+    # Hook paths must be resolvable regardless of the agent's current working
+    # directory. Relative paths break when Claude Code runs from a subdirectory.
+    # $CLAUDE_PROJECT_DIR always resolves to the project root at runtime.
+    sync_rel = sync_path.relative_to(project_root).as_posix()
+    stop_sync_rel = stop_sync_path.relative_to(project_root).as_posix()
+
     # 1. UserPromptSubmit → incremental sync (throttled every 30s)
     ups = _clean_hooks(hooks.get("UserPromptSubmit", []))
     ups.append({
         "hooks": [{
             "type": "command",
-            "command": f"{python} {sync_path.relative_to(project_root)}",
+            "command": f'{python} "$CLAUDE_PROJECT_DIR"/{sync_rel}',
             "timeout": 10,
         }],
     })
@@ -382,7 +398,7 @@ def install_hook(project_root: str | Path, corpus: str = "default") -> str:
     stop.append({
         "hooks": [{
             "type": "command",
-            "command": f"{python} {stop_sync_path.relative_to(project_root)}",
+            "command": f'{python} "$CLAUDE_PROJECT_DIR"/{stop_sync_rel}',
             "timeout": 15,
         }],
     })
