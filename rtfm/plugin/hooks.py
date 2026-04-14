@@ -186,6 +186,106 @@ if __name__ == "__main__":
 '''
 
 
+MEMORY_HOOK_SCRIPT = r'''#!/usr/bin/env python3
+"""RTFM global memory hook — versioned snapshot of Claude memory files on session stop.
+
+Runs after every Claude Code session. Discovers ~/.claude/projects/*/memory/
+and re-syncs into ~/.rtfm/memory.db with unlimited version history (no prune).
+
+Fast: only the project whose memory just changed actually re-indexes.
+"""
+import sys, time
+from pathlib import Path
+
+def main():
+    db_path = Path.home() / ".rtfm" / "memory.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    projects_root = Path.home() / ".claude" / "projects"
+    if not projects_root.exists():
+        return
+
+    memory_dirs = sorted(p for p in projects_root.glob("*/memory") if p.is_dir())
+    if not memory_dirs:
+        return
+
+    try:
+        from rtfm.core.library import Library
+        from rtfm.core.sync import sync
+
+        lib = Library(str(db_path))
+        for mem_dir in memory_dirs:
+            project_slug = mem_dir.parent.name.strip("-") or "root"
+            corpus = f"claude-memory/{project_slug}"
+            sync(
+                library=lib,
+                root=mem_dir,
+                corpus=corpus,
+                extensions={".md", ".txt"},
+                generate_embeddings=False,
+                retain_history=None,
+            )
+        lib.close()
+    except Exception:
+        pass  # silent — hook is best-effort
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def install_memory_hook() -> str:
+    """Install a global SessionStop hook that snapshots Claude memory files.
+
+    Writes the hook script to ~/.claude/hooks/rtfm_memory_sync.py and
+    registers it under ~/.claude/settings.json Stop event.
+
+    Returns:
+        "installed" on success.
+    """
+    import sys
+
+    home = Path.home()
+    claude_dir = home / ".claude"
+    hooks_dir = claude_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    hook_path = hooks_dir / "rtfm_memory_sync.py"
+    hook_path.write_text(MEMORY_HOOK_SCRIPT, encoding="utf-8")
+
+    settings_path = claude_dir / "settings.json"
+    settings = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            settings = {}
+
+    hooks = settings.get("hooks", {})
+    stop = hooks.get("Stop", [])
+
+    # Drop any previous RTFM memory hook to avoid duplicates.
+    stop = [
+        h for h in stop
+        if not any("rtfm_memory_sync" in sub.get("command", "")
+                   for sub in h.get("hooks", []))
+    ]
+
+    stop.append({
+        "hooks": [{
+            "type": "command",
+            "command": f"{sys.executable} {hook_path}",
+            "timeout": 30,
+        }],
+    })
+    hooks["Stop"] = stop
+    settings["hooks"] = hooks
+
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return "installed"
+
+
 def install_hook(project_root: str | Path, corpus: str = "default") -> str:
     """Install Claude Code hooks for RTFM.
 

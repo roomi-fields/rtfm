@@ -753,10 +753,26 @@ def cmd_memory(args):
     """Index Claude Code memory files across projects, with unlimited history.
 
     Discovers ~/.claude/projects/*/memory/*.md files and syncs them into the
-    library with corpus="claude-memory" and retain_history=None (no prune).
+    library with corpus="claude-memory/<project>" and retain_history=None.
+
+    Defaults to a global DB at ~/.rtfm/memory.db so every project's memory
+    ends up in the same searchable cross-project index.
     """
     from rtfm.core.sync import sync
 
+    if args.install_hook:
+        from rtfm.plugin.hooks import install_memory_hook
+        result = install_memory_hook()
+        print(f"Memory hook {result} at ~/.claude/hooks/rtfm_memory_sync.py")
+        print("Registered as Stop hook in ~/.claude/settings.json")
+        print("Every Claude Code session will now snapshot memory files on exit.")
+        return
+
+    # Default to global memory DB unless user passes --db explicitly.
+    if not getattr(args, "db", None):
+        default_db = Path.home() / ".rtfm" / "memory.db"
+        default_db.parent.mkdir(parents=True, exist_ok=True)
+        args.db = str(default_db)
     lib = _get_lib(args)
 
     projects_root = Path.home() / ".claude" / "projects"
@@ -1110,6 +1126,8 @@ def main():
     )
     p_memory.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
     p_memory.add_argument("--verbose", "-v", action="store_true", help="Show per-file progress")
+    p_memory.add_argument("--install-hook", action="store_true",
+                          help="Install a global Claude Code Stop hook that auto-snapshots memory files")
     p_memory.set_defaults(func=cmd_memory)
 
     # monitor
