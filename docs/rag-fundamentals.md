@@ -2,7 +2,7 @@
 
 "RAG" (Retrieval-Augmented Generation) is a suitcase word. It hides six very different design decisions, each with clear trade-offs. Most "RAG tools" get some of them right and hand-wave the rest — which is why one agent outperforms another on the same corpus.
 
-This document lays out the grid. For each axis it names the common options, explains the trade-offs, and states RTFM's position alongside a reference point (usually MemPalace) so you can map any other tool the same way.
+This document lays out the grid. For each axis it names the common options, explains the trade-offs, and notes RTFM's choice as a concrete example. Use it to evaluate any retrieval tool — including this one.
 
 ---
 
@@ -33,7 +33,7 @@ Before any search happens, content must be split into retrievable units ("chunks
 
 Common strategies:
 
-- **Fixed char-based chunking** (e.g. 800 characters per chunk, 100 char overlap). Simple, fast, completely blind to structure. A function gets cut mid-body. A markdown section gets split across three chunks. This is what MemPalace does (`miner.py`, `CHUNK_SIZE = 800`).
+- **Fixed char-based chunking** (e.g. 800 characters per chunk, 100 char overlap). Simple, fast, completely blind to structure. A function gets cut mid-body. A markdown section gets split across three chunks. This is the default in many conversation-memory tools and "drop-in" RAG libraries because it requires zero format knowledge.
 
 - **Structural chunking** — use the format's own boundaries:
   - Markdown: one chunk per `#` header
@@ -47,15 +47,11 @@ Common strategies:
 
 - **Semantic chunking** — an LLM decides where to cut. Highest quality, slowest, most expensive. Rarely justified vs structural.
 
-### RTFM's position
+### RTFM's choice
 
 **Structural first.** Ten format-specific parsers ship built-in (Markdown, Python AST, LaTeX, YAML, JSON, Shell, PDF, XML, HTML, plaintext). New formats can be added in ~50 lines of Python via the parser registry.
 
 > **Why this matters:** a chunk that maps to one Python function or one legal article is 80% of the retrieval problem already solved. Even a mediocre downstream search will return something useful. With 800-char char-chunks, even a great search returns arbitrary slices of text.
-
-### MemPalace's position
-
-Char-based chunking only (`CHUNK_SIZE = 800`), same pipeline for code, docs, and conversation transcripts.
 
 ---
 
@@ -88,13 +84,9 @@ Follow structural edges between chunks: Python imports, `[[wikilinks]]`, LaTeX `
 - **Strong** on dependency navigation and "show me everything connected to X".
 - **Complementary** to the three above, not a competitor. Graph + FTS = find a concept's anchor, then expand its neighborhood.
 
-### RTFM's position
+### RTFM's choice
 
 FTS5 by default (no cold-start, no setup, works on day one). Optional embeddings via FastEmbed/ONNX (~85 MB, no GPU). Hybrid mode available. Graph layer for file-level edges (imports, wikilinks, references) stored as first-class rows in the same SQLite database.
-
-### MemPalace's position
-
-Vector search only (ChromaDB with sentence-transformers default). No FTS, no graph at the retrieval layer. Their `knowledge_graph.py` is a separate entity-relationship store for conversational entities, not a retrieval edge index.
 
 ---
 
@@ -108,13 +100,9 @@ Concatenate every retrieved chunk and paste them into the prompt. Simple. Blows 
 ### Progressive disclosure
 Return metadata first (file paths, section titles, scores, ~300 tokens total). The agent reads, chooses, and asks for the full content of only the chunks it wants. This is the pattern Claude Code's Skills formalized but it applies to any retriever.
 
-### RTFM's position
+### RTFM's choice
 
 Progressive disclosure by default. `rtfm_search` returns metadata only (no content). `rtfm_expand(source, target_section)` returns content for a specific chunk. The agent has a conversation with the retriever, not a dump.
-
-### MemPalace's position
-
-Context stuffing — retrieved chunks are returned as content directly. Works for small queries, degrades as the retrieved set grows.
 
 ---
 
@@ -130,13 +118,9 @@ Problem: technical discovery is not enough. [Navigation Paradox](https://arxiv.o
 ### Behavioural orientation
 Instructions that tell the agent *when* to prefer your retriever over native tools. Claude Code reads these from the project's `CLAUDE.md`. Three lines of clear direction ("for any exploratory search, use `rtfm_search` before Glob/find/ls") bridge the 58% gap.
 
-### RTFM's position
+### RTFM's choice
 
 Both. `.mcp.json` for technical discovery (auto-registered on `rtfm init`), `CLAUDE.md` injection for behavioural orientation (3-line template appended during init).
-
-### MemPalace's position
-
-MCP discovery only. No `CLAUDE.md` template. Users must write their own prompts explaining when to call each of the 19 tools.
 
 ---
 
@@ -156,7 +140,7 @@ A daemon watches for file changes in real time. Robust but adds a long-running p
 ### Event-driven (agent hooks)
 Latch onto the agent's natural events: user prompt submitted, agent stop, session end. No extra process, sync runs exactly when the user is about to ask something.
 
-### RTFM's position
+### RTFM's choice
 
 Event-driven via Claude Code hooks:
 - `UserPromptSubmit` → incremental FTS sync, throttled to once every 30 s, typically < 2 s.
@@ -164,10 +148,6 @@ Event-driven via Claude Code hooks:
 - `SessionEnd` (global) → versioned snapshot of `~/.claude/projects/*/memory/` for cross-session memory.
 
 No cron, no watcher, no daemon. The index is fresh because the session is.
-
-### MemPalace's position
-
-Manual: `mempalace mine <path>` ingests new content. On re-mine an `mtime` check triggers re-indexing, but nothing is hooked to the agent session.
 
 ---
 
@@ -184,13 +164,9 @@ SQLite, Postgres. Readable, queryable with ordinary tools. Can host FTS + vector
 ### Flat files
 `index.md`, `backlinks.json`, per-file manifests. Simplest possible store. No real search — degenerates to `grep` over the filesystem.
 
-### RTFM's position
+### RTFM's choice
 
 One SQLite file per project (`.rtfm/library.db`). Tables: `books`, `chunks`, `fts_chunks`, `edges`, `file_versions`, `embeddings` (BLOB column). Inspectable with `sqlite3`. Copy-able. Git-ignorable. A separate global DB at `~/.rtfm/memory.db` holds the cross-project agent memory index.
-
-### MemPalace's position
-
-Split: ChromaDB (multi-file vector store) for retrieval, separate SQLite for the entity-relationship graph. Two stores, two migration stories.
 
 ---
 
@@ -234,18 +210,18 @@ FeatureBench, RepoQA, SWE-QA, LocAgent, and BRIGHT are all reasonable starting p
 
 ---
 
-## Summary grid
+## Summary — RTFM's position on the grid
 
-|                     | RTFM                                | MemPalace                           |
-|---------------------|-------------------------------------|-------------------------------------|
-| Indexation          | Structural (10 parsers, AST-aware)  | Char-based (800 chars / chunk)      |
-| Retrieval           | FTS5 + optional embeddings + graph  | Vector only (ChromaDB)              |
-| Augmentation        | Progressive disclosure              | Context stuffing                    |
-| Integration         | MCP + `CLAUDE.md` injection         | MCP only                            |
-| Freshness           | Event-driven (Claude Code hooks)    | Manual (`mempalace mine`)           |
-| Storage             | Single SQLite file per project      | ChromaDB + separate SQLite          |
+| Axis            | RTFM's choice                                          |
+|-----------------|--------------------------------------------------------|
+| Indexation      | Structural (10 parsers, AST-aware)                     |
+| Retrieval       | FTS5 default, optional embeddings, hybrid, graph       |
+| Augmentation    | Progressive disclosure (metadata → expand on request)  |
+| Integration     | MCP + `CLAUDE.md` injection                            |
+| Freshness       | Event-driven via Claude Code hooks                     |
+| Storage         | Single SQLite file per project + global memory DB      |
 
-Neither choice is universally right. The correct tool depends on what you're indexing and how the agent calls it. Most of the disagreements you see online between "RAG A is better than RAG B" ignore which of the six axes the authors prioritize.
+None of these is universally right — the correct choice depends on what you index and how the agent calls it. Use this grid to evaluate any retrieval tool (including this one) and pick the combination that matches your workload.
 
 ---
 
