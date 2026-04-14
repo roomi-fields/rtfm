@@ -1428,11 +1428,21 @@ class Library:
     # File versioning (snapshots before re-ingest)
     # =========================================================================
 
-    def save_file_version(self, book_slug: str, content_hash: str) -> Optional[int]:
+    def save_file_version(
+        self,
+        book_slug: str,
+        content_hash: str,
+        prune_limit: Optional[int] = 50,
+    ) -> Optional[int]:
         """Save a snapshot of the current content before re-ingest.
 
         Reads content from chunks, stores as a single snapshot.
-        Prunes versions beyond 50 per book.
+
+        Args:
+            book_slug: book to version
+            content_hash: hash of the outgoing content
+            prune_limit: keep only the last N versions (default 50).
+                Pass None to keep unlimited history (used for memory corpora).
 
         Returns:
             Version ID, or None if book not found or no content.
@@ -1473,14 +1483,15 @@ class Library:
         )
         version_id = cursor.lastrowid
 
-        # Prune: keep only the last 50 versions
-        conn.execute(
-            """DELETE FROM file_versions WHERE book_id = ? AND id NOT IN (
-                SELECT id FROM file_versions WHERE book_id = ?
-                ORDER BY version_num DESC LIMIT 50
-            )""",
-            (book_id, book_id),
-        )
+        # Prune unless caller requests unlimited history.
+        if prune_limit is not None:
+            conn.execute(
+                """DELETE FROM file_versions WHERE book_id = ? AND id NOT IN (
+                    SELECT id FROM file_versions WHERE book_id = ?
+                    ORDER BY version_num DESC LIMIT ?
+                )""",
+                (book_id, book_id, prune_limit),
+            )
 
         conn.commit()
         return version_id

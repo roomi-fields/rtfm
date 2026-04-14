@@ -401,6 +401,7 @@ def sync(
     files: list[str] | None = None,
     on_progress: "Callable[[str, str, str], None] | None" = None,
     force: bool = False,
+    retain_history: int | None = 50,
 ) -> SyncResult:
     """Orchestrate a full incremental sync.
 
@@ -524,7 +525,7 @@ def sync(
                 snap_slug = old_info["book_slug"] if old_info and old_info.get("book_slug") else book_slug
                 old_hash = old_info["file_hash"] if old_info else ""
                 try:
-                    library.save_file_version(snap_slug, old_hash)
+                    library.save_file_version(snap_slug, old_hash, prune_limit=retain_history)
                 except Exception:
                     pass  # Non-critical — versioning is best-effort
 

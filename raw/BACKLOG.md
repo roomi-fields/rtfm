@@ -59,6 +59,12 @@ Everything identified as a future direction, sorted by priority.
 - Dedup by filename (deployed but not stress-tested)
 - Better ranking: weight by freshness, centrality in the graph
 
+### Retrieval quality improvements (identified during MemPalace analysis)
+- **Better default embedding model**: current `paraphrase-multilingual-MiniLM-L12-v2` is light but limited. Switching to `BAAI/bge-small-en` or `nomic-embed-text-v1.5` = measured +10-15pp on retrieval benchmarks
+- **Cross-encoder reranking**: after FTS+embeddings, rescore the top-20 with a more precise model = +5-10pp
+- **Query expansion**: reformulate the query into variants via LLM before search, then merge results
+- Benchmark on LongMemEval to measure honestly against MemPalace (96.6% recall@5 baseline)
+
 ---
 
 ## P2 — Cross-project indexing of Claude memories

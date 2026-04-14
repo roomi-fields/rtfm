@@ -749,6 +749,66 @@ def cmd_vault(args):
     print("\nDone. Open Obsidian and check _rtfm/index.md")
 
 
+def cmd_memory(args):
+    """Index Claude Code memory files across projects, with unlimited history.
+
+    Discovers ~/.claude/projects/*/memory/*.md files and syncs them into the
+    library with corpus="claude-memory" and retain_history=None (no prune).
+    """
+    from rtfm.core.sync import sync
+
+    lib = _get_lib(args)
+
+    projects_root = Path.home() / ".claude" / "projects"
+    if not projects_root.exists():
+        print(f"No Claude projects directory found at {projects_root}")
+        sys.exit(1)
+
+    memory_dirs = sorted(p for p in projects_root.glob("*/memory") if p.is_dir())
+    if not memory_dirs:
+        print(f"No memory/ directories under {projects_root}")
+        sys.exit(1)
+
+    symbols = {"add": "+", "update": "~", "remove": "-", "error": "!"}
+
+    def _progress(action: str, filepath: str, detail: str) -> None:
+        sym = symbols.get(action, "?")
+        if filepath:
+            print(f"  {sym} {filepath}  ({detail})")
+
+    total_added = total_modified = total_unchanged = 0
+    for mem_dir in memory_dirs:
+        # project slug = directory name of the parent (e.g. "-mnt-d-Claude-RTFM")
+        project_slug = mem_dir.parent.name.strip("-") or "root"
+        corpus = f"claude-memory/{project_slug}"
+        print(f"Syncing [{corpus}] {mem_dir} ...")
+
+        result = sync(
+            library=lib,
+            root=mem_dir,
+            corpus=corpus,
+            extensions={".md", ".txt"},
+            generate_embeddings=not args.no_embeddings,
+            on_progress=_progress if args.verbose else None,
+            retain_history=None,  # unlimited history for memory files
+        )
+
+        total_added += result.added
+        total_modified += result.modified
+        total_unchanged += result.unchanged
+        print(f"  +{result.added} ~{result.modified} ={result.unchanged}")
+        if result.errors:
+            for e in result.errors:
+                print(f"  ! {e}")
+
+    print(
+        f"\nDone. {len(memory_dirs)} projects indexed | "
+        f"+{total_added} added, ~{total_modified} modified, ={total_unchanged} unchanged"
+    )
+    print("History: unlimited (every change versioned)")
+    lib.close()
+
+
 def cmd_monitor(args):
     """Tail the RTFM log file — shows live MCP and hook activity."""
     import subprocess
@@ -1041,6 +1101,16 @@ def main():
     p_vault.add_argument("--no-output", action="store_true", help="Skip _rtfm/ output generation")
     p_vault.add_argument("--regenerate", action="store_true", help="Only regenerate _rtfm/ output")
     p_vault.set_defaults(func=cmd_vault)
+
+    # memory (index Claude Code memory files with unlimited history)
+    p_memory = subparsers.add_parser(
+        "memory",
+        help="Index ~/.claude/projects/*/memory/ files with unlimited version history",
+        parents=[db_parent],
+    )
+    p_memory.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
+    p_memory.add_argument("--verbose", "-v", action="store_true", help="Show per-file progress")
+    p_memory.set_defaults(func=cmd_memory)
 
     # monitor
     p_monitor = subparsers.add_parser("monitor", help="Tail the RTFM log (live MCP/hook activity)")

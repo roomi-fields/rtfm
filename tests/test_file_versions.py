@@ -207,6 +207,44 @@ class TestSyncVersioning:
         history = version_db.get_file_history("test--notes")
         assert len(history) <= 50
 
+    def test_unlimited_history_via_prune_none(self, version_db, version_project):
+        """prune_limit=None keeps every version (used for Claude memory corpus)."""
+        sync(version_db, version_project, corpus="test",
+             generate_embeddings=False)
+
+        for i in range(75):
+            version_db.save_file_version("test--notes", f"hash_{i}", prune_limit=None)
+
+        history = version_db.get_file_history("test--notes")
+        assert len(history) == 75
+
+    def test_custom_prune_limit(self, version_db, version_project):
+        """prune_limit accepts any int, not just the default 50."""
+        sync(version_db, version_project, corpus="test",
+             generate_embeddings=False)
+
+        for i in range(30):
+            version_db.save_file_version("test--notes", f"hash_{i}", prune_limit=10)
+
+        history = version_db.get_file_history("test--notes")
+        assert len(history) == 10
+
+    def test_sync_retain_history_none_is_unlimited(self, version_db, version_project):
+        """sync(retain_history=None) propagates no-prune to save_file_version."""
+        import time
+        sync(version_db, version_project, corpus="test",
+             generate_embeddings=False, retain_history=None)
+
+        note_path = version_project / "notes.md"
+        for i in range(60):
+            note_path.write_text(f"# Notes\n\nRevision {i}\n")
+            time.sleep(0.005)
+            sync(version_db, version_project, corpus="test",
+                 generate_embeddings=False, retain_history=None)
+
+        history = version_db.get_file_history("test--notes")
+        assert len(history) >= 55
+
 
 # ── Table/migration tests ────────────────────────────────────────────────
 
