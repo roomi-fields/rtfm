@@ -102,21 +102,23 @@ pip install rtfm-ai[mcp,embeddings,pdf]  # Everything
 
 ## How it compares
 
-|                       | **RTFM**              | Augment CE    | Sourcegraph       | Code-Index-MCP | MemPalace       |
-| --------------------- | --------------------- | ------------- | ----------------- | -------------- | --------------- |
-| Code indexing         | ✅                    | ✅            | ✅                | ✅             | ❌              |
-| Docs, specs, markdown | ✅                    | Partial       | ❌                | Limited        | Verbatim only   |
-| Legal / regulatory    | ✅                    | ❌            | ❌                | ❌             | ❌              |
-| Research (LaTeX, PDF) | ✅                    | ❌            | ❌                | ❌             | ❌              |
-| Custom parsers        | ✅ (~50 lines)        | ❌            | ❌                | ❌             | ❌              |
-| Knowledge graph       | ✅                    | ❌            | Partial           | ❌             | ❌              |
-| Memory versioning     | ✅ (per-file history) | ❌            | ❌                | ❌             | Verbatim store  |
-| MCP native            | ✅                    | ✅            | ✅                | ✅             | ✅              |
-| Runs locally          | ✅                    | Cloud         | Enterprise        | ✅             | ✅              |
-| Open source           | MIT                   | ❌            | Partial           | ✅             | MIT             |
-| Price                 | **Free**              | $20-200/mo    | $$$/mo            | Free           | Free            |
+|                       | **RTFM**              | Augment CE    | Sourcegraph       | Code-Index-MCP | MemPalace                |
+| --------------------- | --------------------- | ------------- | ----------------- | -------------- | ------------------------ |
+| Code indexing         | ✅ (AST-aware)        | ✅            | ✅                | ✅             | Shallow (char-chunk)     |
+| Docs, specs, markdown | ✅ (header-parsed)    | Partial       | ❌                | Limited        | Verbatim chunks          |
+| Legal / regulatory    | ✅ (XML, BOFiP)       | ❌            | ❌                | ❌             | ❌                       |
+| Research (LaTeX, PDF) | ✅                    | ❌            | ❌                | ❌             | ❌                       |
+| Custom parsers        | ✅ (~50 lines)        | ❌            | ❌                | ❌             | ❌                       |
+| Knowledge graph       | ✅ (file/code links)  | ❌            | Partial           | ❌             | Entity graph (people)    |
+| File version history  | ✅ (unlimited)        | ❌            | ❌                | ❌             | ❌ (purge-and-replace)   |
+| MCP native            | ✅                    | ✅            | ✅                | ✅             | ✅                       |
+| Runs locally          | ✅                    | Cloud         | Enterprise        | ✅             | ✅                       |
+| Open source           | MIT                   | ❌            | Partial           | ✅             | MIT                      |
+| Price                 | **Free**              | $20-200/mo    | $$$/mo            | Free           | Free                     |
 
-**RTFM is the only open-source option that indexes multi-domain content with a knowledge graph and versioned memory.** That's the niche.
+**RTFM is the only open-source option that indexes multi-domain content with structural parsing, a code-level knowledge graph, and unlimited per-file history.** That's the niche.
+
+Different from MemPalace specifically: MemPalace is an entity-level memory for conversations (who/project/decision triples in SQLite, plus verbatim chunks in ChromaDB). RTFM is a retrieval layer for *artefacts* — parsed by format, linked at the file level, versioned over time. The two are stackable, not competing.
 
 ---
 
