@@ -263,23 +263,27 @@ def install_memory_hook() -> str:
             settings = {}
 
     hooks = settings.get("hooks", {})
-    stop = hooks.get("Stop", [])
 
-    # Drop any previous RTFM memory hook to avoid duplicates.
-    stop = [
-        h for h in stop
-        if not any("rtfm_memory_sync" in sub.get("command", "")
-                   for sub in h.get("hooks", []))
-    ]
+    # Strip any previous RTFM memory hook from every event (we may have
+    # previously registered under "Stop"; we now use "SessionEnd").
+    for evt in list(hooks.keys()):
+        hooks[evt] = [
+            h for h in hooks[evt]
+            if not any("rtfm_memory_sync" in sub.get("command", "")
+                       for sub in h.get("hooks", []))
+        ]
+        if not hooks[evt]:
+            del hooks[evt]
 
-    stop.append({
+    session_end = hooks.get("SessionEnd", [])
+    session_end.append({
         "hooks": [{
             "type": "command",
             "command": f"{sys.executable} {hook_path}",
             "timeout": 30,
         }],
     })
-    hooks["Stop"] = stop
+    hooks["SessionEnd"] = session_end
     settings["hooks"] = hooks
 
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")

@@ -764,7 +764,7 @@ def cmd_memory(args):
         from rtfm.plugin.hooks import install_memory_hook
         result = install_memory_hook()
         print(f"Memory hook {result} at ~/.claude/hooks/rtfm_memory_sync.py")
-        print("Registered as Stop hook in ~/.claude/settings.json")
+        print("Registered as SessionEnd hook in ~/.claude/settings.json")
         print("Every Claude Code session will now snapshot memory files on exit.")
         return
 
