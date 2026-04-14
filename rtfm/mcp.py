@@ -350,7 +350,12 @@ def rtfm_search(
 
 @mcp.tool()
 def rtfm_stats() -> str:
-    """Get library statistics: total chunks, books, corpora, tag and embedding coverage."""
+    """Get library statistics: total chunks, books, corpora, tag and embedding coverage.
+
+    Also reports the install state of optional extras (embeddings, pdf) and
+    surfaces actionable recommendations when the current index would benefit
+    from an extra the user has not installed.
+    """
     log("stats", "called")
     lib = _get_library()
     stats = lib.get_stats()
@@ -368,6 +373,77 @@ def rtfm_stats() -> str:
         lines.append(f"Embeddings:    {emb['embedded']} ({emb['coverage']})")
     except Exception:
         pass
+
+    # Optional-extras state, visible to the agent so it can proactively
+    # suggest installs to the user when the signal justifies it.
+    def _has(mod: str) -> bool:
+        try:
+            __import__(mod)
+            return True
+        except ImportError:
+            return False
+
+    has_embeddings = _has("fastembed")
+    has_pdf = _has("pdftext")
+
+    lines.append("")
+    lines.append("Optional extras:")
+    lines.append(f"  embeddings: {'installed' if has_embeddings else 'missing'}"
+                 " (semantic search)")
+    lines.append(f"  pdf:        {'installed' if has_pdf else 'missing'}"
+                 " (PDF parsing)")
+
+    # Actionable instructions for the agent — factual triggers, explicit
+    # user-facing message, exact command to run. No hedging, no "might help".
+    actions = []
+    conn = lib._conn
+    total_chunks = stats['chunks']
+
+    if not has_embeddings and total_chunks > 500:
+        actions.append({
+            "trigger": f"Index has {total_chunks} chunks, embeddings not installed.",
+            "impact": "Paraphrase queries fail. FTS matches literal tokens only — "
+                      "'auth flow' will not retrieve 'authentication handler'.",
+            "tell_user": (
+                f"\"Your RTFM index has {total_chunks} chunks. Semantic search "
+                "would measurably improve retrieval on paraphrase queries. "
+                "Install the embeddings extra? One-time 85 MB ONNX download, "
+                "no GPU required.\""
+            ),
+            "command": "pip install rtfm-ai[embeddings] && rtfm embed",
+        })
+
+    if not has_pdf:
+        try:
+            n_pdf = conn.execute(
+                "SELECT COUNT(*) FROM indexed_files WHERE filepath LIKE '%.pdf'"
+            ).fetchone()[0]
+        except Exception:
+            n_pdf = 0
+        if n_pdf:
+            actions.append({
+                "trigger": f"{n_pdf} PDF file(s) present in indexed directories, "
+                           "pdf extra not installed.",
+                "impact": f"These {n_pdf} PDFs are invisible to search. "
+                          "Any content inside them cannot be retrieved.",
+                "tell_user": (
+                    f"\"I found {n_pdf} PDF file(s) in your project that RTFM "
+                    "cannot index without the pdf extra. Install it so your "
+                    "agent can search them?\""
+                ),
+                "command": "pip install rtfm-ai[pdf] && rtfm sync --force",
+            })
+
+    if actions:
+        lines.append("")
+        lines.append("=" * 60)
+        lines.append("ACTIONS REQUIRED — surface these to the user verbatim:")
+        lines.append("=" * 60)
+        for i, a in enumerate(actions, 1):
+            lines.append(f"\n[{i}] TRIGGER: {a['trigger']}")
+            lines.append(f"    IMPACT:  {a['impact']}")
+            lines.append(f"    SAY TO USER: {a['tell_user']}")
+            lines.append(f"    ON APPROVAL RUN: {a['command']}")
 
     return "\n".join(lines)
 
@@ -477,11 +553,37 @@ def rtfm_sync(
         _embed_in_background(corpus=corpus)
         log("embed", f"triggered background embeddings for corpus={corpus!r}")
 
-    return (
+    out = [
         f"Sync complete: +{result.added} added, ~{result.modified} modified, "
         f"-{result.removed} removed, ={result.unchanged} unchanged"
-        + (f"\nErrors: {result.errors}" if result.errors else "")
-    )
+    ]
+    if result.errors:
+        out.append(f"Errors: {result.errors}")
+
+    # Sync saw PDFs but no pdf parser is installed → emit an explicit
+    # action block (same format as rtfm_stats) so the agent knows exactly
+    # what to say to the user and which command to run on approval.
+    try:
+        import pdftext  # noqa: F401
+    except ImportError:
+        pdf_seen = [e for e in result.errors if ".pdf" in e.lower()]
+        if pdf_seen:
+            out.append("")
+            out.append("=" * 60)
+            out.append("ACTION REQUIRED — surface to the user verbatim:")
+            out.append("=" * 60)
+            out.append(f"TRIGGER: {len(pdf_seen)} PDF file(s) skipped during this sync, "
+                       "pdf extra not installed.")
+            out.append(f"IMPACT:  Those {len(pdf_seen)} PDFs are not indexed. "
+                       "Their content will not appear in any search result.")
+            out.append(
+                f"SAY TO USER: \"This sync skipped {len(pdf_seen)} PDF file(s) "
+                "because RTFM's PDF parser is not installed. "
+                "Install it so I can index them?\""
+            )
+            out.append("ON APPROVAL RUN: pip install rtfm-ai[pdf] && rtfm sync --force")
+
+    return "\n".join(out)
 
 
 @mcp.tool()
