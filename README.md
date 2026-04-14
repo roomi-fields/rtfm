@@ -36,7 +36,7 @@ I was writing a French tax article (~50 pages of regulatory text, cross-referenc
 **RTFM indexes everything.** One command, one SQLite file, one retrieval layer your agent queries before grepping.
 
 ```bash
-pip install rtfm-ai[mcp] && cd your-project && rtfm init
+pip install rtfm-ai && cd your-project && rtfm init
 ```
 
 30 seconds. Claude Code now searches your indexed knowledge base — code *and* docs *and* PDFs *and* whatever else you drop in — with full-text, semantic, or hybrid search. The agent sees 300 tokens of metadata first, then expands only what's relevant. Progressive disclosure instead of context dumps.
@@ -62,7 +62,7 @@ Three results, ~300 tokens. The agent decides what to read next with `rtfm_expan
 ## Quick start
 
 ```bash
-pip install rtfm-ai[mcp]
+pip install rtfm-ai
 cd /path/to/your-project
 rtfm init
 ```
@@ -76,7 +76,7 @@ Now say to Claude Code: *"Find the authentication flow"* — it uses `rtfm_searc
 ```bash
 pip install rtfm-ai[embeddings]  # Semantic search (FastEmbed ONNX, ~85MB)
 pip install rtfm-ai[pdf]         # PDF parsing (pdftext + marker)
-pip install rtfm-ai[mcp,embeddings,pdf]  # Everything
+pip install rtfm-ai[embeddings,pdf]      # Everything
 ```
 
 ---
@@ -102,6 +102,8 @@ pip install rtfm-ai[mcp,embeddings,pdf]  # Everything
 **RTFM is the only open-source option that indexes multi-domain content with structural parsing, a code-level knowledge graph, and unlimited per-file history.** That's the niche.
 
 Different from MemPalace specifically: MemPalace is an entity-level memory for conversations (who/project/decision triples in SQLite, plus verbatim chunks in ChromaDB). RTFM is a retrieval layer for *artefacts* — parsed by format, linked at the file level, versioned over time. The two are stackable, not competing.
+
+> For a deeper breakdown of the design choices behind any RAG (chunking, retrieval, augmentation, integration, freshness, storage), see **[RAG Fundamentals — the 6 axes →](docs/rag-fundamentals.md)**
 
 ---
 
