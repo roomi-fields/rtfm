@@ -14,14 +14,14 @@ The generation part is the LLM's job. Everything upstream of it — what you sto
 
 The six axes:
 
-| # | Axis               | The question it answers                                           |
-|---|--------------------|-------------------------------------------------------------------|
-| 1 | Indexation         | How do we cut the content into searchable units?                  |
-| 2 | Retrieval          | How do we find the right units for a query?                       |
-| 3 | Augmentation       | How do we feed the retrieved units to the LLM?                    |
-| 4 | Integration        | How does the agent even know the retriever exists?                |
-| 5 | Freshness          | How does the index stay aligned with the underlying content?      |
-| 6 | Storage            | Where does the data live, and can you inspect / backup / migrate? |
+| #   | Axis         | The question it answers                                           |
+| --- | ------------ | ----------------------------------------------------------------- |
+| 1   | Indexation   | How do we cut the content into searchable units?                  |
+| 2   | Retrieval    | How do we find the right units for a query?                       |
+| 3   | Augmentation | How do we feed the retrieved units to the LLM?                    |
+| 4   | Integration  | How does the agent even know the retriever exists?                |
+| 5   | Freshness    | How does the index stay aligned with the underlying content?      |
+| 6   | Storage      | Where does the data live, and can you inspect / backup / migrate? |
 
 Everything else (reranking, query rewriting, hybrid search) is a refinement inside one of these six axes.
 
@@ -92,17 +92,42 @@ FTS5 by default (no cold-start, no setup, works on day one). Optional embeddings
 
 ## 3. Augmentation — how you feed the LLM
 
-You have the top-K chunks. How do you hand them to the agent?
+You have the top-K chunks. How do you hand them to the agent? This is the axis where most RAG pipelines leak tokens, dilute signal, or hide their sources.
 
 ### Context stuffing
-Concatenate every retrieved chunk and paste them into the prompt. Simple. Blows the token budget on long answers. The agent cannot decide what it actually needs — it has to skim everything.
+Concatenate every retrieved chunk and paste the whole thing into the prompt.
+- **Pro**: trivial to implement, no extra round-trip.
+- **Con**: blows the token budget on long answers, forces the agent to skim irrelevant chunks, scales linearly with top-K.
+- **When it works**: top-K small (3–5) and chunks short (a few hundred tokens each).
+
+### Templated / structured context
+Same as stuffing but each chunk is wrapped in a structured block (path, score, section title, content). Let the agent see where information comes from so it can cite it or deprioritize low-score hits.
+- **Pro**: slightly better agent reasoning, enables natural citations.
+- **Con**: still stuffing — token cost is the same as raw concat plus template overhead.
+
+### Reranking before stuffing
+Retrieve a wider top-N (e.g. 20) with cheap search, rerank with a heavier cross-encoder or LLM to keep the top-K (e.g. 5), then stuff.
+- **Pro**: much higher relevance density per token, measurable accuracy gain on ambiguous queries.
+- **Con**: an extra model call at query time (latency + cost), requires picking a reranker (BGE-reranker, Cohere Rerank, cross-encoder MS MARCO…).
+
+### Summarization before stuffing
+Ask an LLM to compress each retrieved chunk into a 1–2 sentence summary, then stuff the summaries.
+- **Pro**: massive token savings, useful when content is verbose (legal text, meeting notes).
+- **Con**: summaries are lossy by definition — nuance, exact quotes, numerical details disappear. Bad fit for code or regulatory references.
 
 ### Progressive disclosure
-Return metadata first (file paths, section titles, scores, ~300 tokens total). The agent reads, chooses, and asks for the full content of only the chunks it wants. This is the pattern Claude Code's Skills formalized but it applies to any retriever.
+Return metadata only (file paths, section titles, scores — typically < 300 tokens for 5 results). The agent decides what to read next and calls a second tool (e.g. `expand`) to fetch the full content of a specific chunk.
+- **Pro**: token cost scales with what the agent actually uses, not what was retrieved. The agent self-directs.
+- **Con**: requires multiple tool calls per search; only pays off when the agent can pick intelligently (modern coding agents can, simpler RAG pipelines can't).
+
+### Agentic / multi-turn augmentation
+Expose search as a tool the agent can re-call with refined queries during generation, rather than a single upfront retrieval step. Sometimes called "agentic RAG".
+- **Pro**: the agent converges to the right answer by asking follow-up questions to its own retriever.
+- **Con**: latency and cost grow with the number of tool calls; requires an agent loop, not a static pipeline.
 
 ### RTFM's choice
 
-Progressive disclosure by default. `rtfm_search` returns metadata only (no content). `rtfm_expand(source, target_section)` returns content for a specific chunk. The agent has a conversation with the retriever, not a dump.
+Progressive disclosure by default, agentic by extension. `rtfm_search` returns metadata only (no content). `rtfm_expand(source, target_section)` returns content for a specific chunk. The agent typically combines both across several turns, searching with narrower queries as it homes in on the answer. No summarization step (the structural chunks are already the right granularity). Reranking is optional and left to the caller.
 
 ---
 
@@ -185,16 +210,16 @@ The vault remains your primary artefact. RTFM is both the agent's retrieval engi
 
 ## Decision helper — which choice for which situation
 
-| If your content is…                   | Best indexation | Best retrieval         |
-|---------------------------------------|-----------------|------------------------|
-| Code (Python, JS, Rust…)              | AST / structural| FTS + graph (imports)  |
-| Markdown docs, ADRs, specs            | Header-based    | FTS + hybrid on intros |
-| Legal / regulatory                    | Article-based   | FTS (exact article refs), graph on cross-refs |
-| Academic papers (LaTeX)               | Section-based   | Hybrid                 |
-| Conversations, transcripts            | Paragraph / sliding window | Semantic  |
-| Mixed corpus (code + docs + PDFs)     | Per-format parsers | Hybrid + graph      |
-| Small repo (< 500 files)              | Structural      | FTS alone              |
-| Large repo (> 5,000 files)            | Structural      | Hybrid with reranker   |
+| If your content is…               | Best indexation            | Best retrieval                                |
+| --------------------------------- | -------------------------- | --------------------------------------------- |
+| Code (Python, JS, Rust…)          | AST / structural           | FTS + graph (imports)                         |
+| Markdown docs, ADRs, specs        | Header-based               | FTS + hybrid on intros                        |
+| Legal / regulatory                | Article-based              | FTS (exact article refs), graph on cross-refs |
+| Academic papers (LaTeX)           | Section-based              | Hybrid                                        |
+| Conversations, transcripts        | Paragraph / sliding window | Semantic                                      |
+| Mixed corpus (code + docs + PDFs) | Per-format parsers         | Hybrid + graph                                |
+| Small repo (< 500 files)          | Structural                 | FTS alone                                     |
+| Large repo (> 5,000 files)        | Structural                 | Hybrid with reranker                          |
 
 ---
 
@@ -212,14 +237,14 @@ FeatureBench, RepoQA, SWE-QA, LocAgent, and BRIGHT are all reasonable starting p
 
 ## Summary — RTFM's position on the grid
 
-| Axis            | RTFM's choice                                          |
-|-----------------|--------------------------------------------------------|
-| Indexation      | Structural (10 parsers, AST-aware)                     |
-| Retrieval       | FTS5 default, optional embeddings, hybrid, graph       |
-| Augmentation    | Progressive disclosure (metadata → expand on request)  |
-| Integration     | MCP + `CLAUDE.md` injection                            |
-| Freshness       | Event-driven via Claude Code hooks                     |
-| Storage         | Single SQLite file per project + global memory DB      |
+| Axis         | RTFM's choice                                         |
+| ------------ | ----------------------------------------------------- |
+| Indexation   | Structural (10 parsers, AST-aware)                    |
+| Retrieval    | FTS5 default, optional embeddings, hybrid, graph      |
+| Augmentation | Progressive disclosure (metadata → expand on request) |
+| Integration  | MCP + `CLAUDE.md` injection                           |
+| Freshness    | Event-driven via Claude Code hooks                    |
+| Storage      | Single SQLite file per project + global memory DB     |
 
 None of these is universally right — the correct choice depends on what you index and how the agent calls it. Use this grid to evaluate any retrieval tool (including this one) and pick the combination that matches your workload.
 
