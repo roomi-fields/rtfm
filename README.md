@@ -61,23 +61,50 @@ Three results, ~300 tokens. The agent decides what to read next with `rtfm_expan
 
 ## Quick start
 
+### Recommended — Claude Code plugin
+
+In Claude Code (CLI or Desktop **Code** tab) :
+
+```
+/plugin marketplace add roomi-fields/rtfm
+/plugin install rtfm@rtfm
+```
+
+That's it. The plugin auto-initializes each project on first use:
+- Creates `.rtfm/library.db` (one SQLite file)
+- Injects search instructions into `CLAUDE.md`
+- Pre-grants permission for the MCP tools (no prompt every search)
+- Indexes the project on the first prompt, re-indexes incrementally on every prompt
+
+**No `pip install` required.** Pure Python, runs on Linux / macOS / Windows / WSL with Python 3.10+ already on PATH. The plugin bundles its own MCP server (no `mcp` SDK dep) and resolves `python3` / `python` / `py` automatically.
+
+Then say to Claude: *"Find the authentication flow"* — it uses `rtfm_search` instead of grepping.
+
+### Optional extras (semantic search, PDF parsing)
+
+The core plugin is dependency-free. Heavier optional extras (embedding model, PDF parsers) install on demand into an isolated venv inside the plugin's data directory — no pollution of your system Python, no PEP 668 conflicts:
+
+```
+/rtfm:install-embeddings    # FastEmbed ONNX (~85 MB), semantic + hybrid search
+/rtfm:install-pdf           # pdftext only (~50 MB), fast text extraction
+/rtfm:install-pdf-full      # + marker-pdf + CPU-only torch (~1.5 GB), complex layouts
+```
+
+The `pdf-full` install uses PyTorch's CPU-only index (no CUDA, no GPU needed) to stay around 1.5 GB instead of 5 GB.
+
+Restart Claude Code after install for the extras to be picked up.
+
+### Manual install (Cursor, Codex, Claude Desktop chat, other MCP clients)
+
+For clients without Claude Code's plugin system :
+
 ```bash
 pip install rtfm-ai
 cd /path/to/your-project
 rtfm init
 ```
 
-That's it. This creates `.rtfm/library.db` (one SQLite file), registers the MCP server in `.mcp.json`, injects search instructions into `CLAUDE.md`, and installs auto-sync hooks in `.claude/settings.json`.
-
-Now say to Claude Code: *"Find the authentication flow"* — it uses `rtfm_search` instead of grepping.
-
-### Optional extras
-
-```bash
-pip install rtfm-ai[embeddings]  # Semantic search (FastEmbed ONNX, ~85MB)
-pip install rtfm-ai[pdf]         # PDF parsing (pdftext + marker)
-pip install rtfm-ai[embeddings,pdf]      # Everything
-```
+Then point your MCP client at `rtfm-serve` (the entry exposed by the pip package). Optional extras via `pip install rtfm-ai[embeddings,pdf]`.
 
 ---
 
@@ -224,8 +251,11 @@ RTFM works anywhere your project isn't just code:
 - **Incremental** — only re-indexes what changed
 
 ### Integration
-- **MCP server** — works with Claude Code, Cursor, Codex, any MCP client
+- **Native Claude Code plugin** — `/plugin install rtfm@roomi-fields/rtfm`, auto-init per project
+- **Pure-Python MCP server** — 0 external deps, no `mcp` SDK / `pydantic` / native binaries
+- **Cross-platform** — Linux, macOS, Windows, WSL (only requires Python ≥ 3.10 on PATH)
 - **13 MCP tools** — search, context, expand, graph, history, sync, tags, ...
+- **Manual install fallback** — `pip install rtfm-ai` for Cursor, Codex, Claude Desktop chat, any other MCP client
 - **CLI + Python API** — scriptable for pipelines
 - **Non-invasive** — doesn't touch your code, doesn't replace your editor
 

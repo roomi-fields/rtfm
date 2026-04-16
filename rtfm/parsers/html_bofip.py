@@ -232,7 +232,7 @@ class HTMLBOFiPParser(BaseParser):
         for section_title, section_content in sections:
             section_content = self._clean_text(section_content)
 
-            if len(section_content) < self.MIN_CHARS:
+            if not section_content.strip():
                 continue
 
             # Split large sections into smaller chunks

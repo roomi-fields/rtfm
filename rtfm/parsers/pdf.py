@@ -58,6 +58,10 @@ def split_into_paragraphs(text: str) -> list[str]:
         p = ' '.join(p.split())
         if p and len(p) > 20:
             result.append(p)
+    if not result:
+        stripped = text.strip()
+        if stripped:
+            result.append(' '.join(stripped.split()))
     return result
 
 

@@ -1,0 +1,24 @@
+#!/usr/bin/env sh
+# POSIX launcher for RTFM plugin hooks.
+# Usage: rtfm-hook <hook-script-basename>
+#        e.g. rtfm-hook rtfm_sync
+# Resolves Python via python3 / python / py and runs
+# ${PLUGIN_ROOT}/hooks/<script>.py.
+
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT="$PLUGIN_ROOT/hooks/$1.py"
+shift
+
+if [ ! -f "$SCRIPT" ]; then
+    echo "rtfm-hook: script not found: $SCRIPT" >&2
+    exit 1
+fi
+
+for PY in python3 python py; do
+    if command -v "$PY" >/dev/null 2>&1; then
+        exec "$PY" "$SCRIPT" "$@"
+    fi
+done
+
+echo "rtfm-hook: Python 3.10+ not found on PATH" >&2
+exit 1

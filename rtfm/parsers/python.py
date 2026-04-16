@@ -134,7 +134,17 @@ def _extract_blocks(source: str) -> list[dict]:
                     "end_lineno": end_line,
                 })
 
-    return [b for b in final if b["content"].strip()]
+    result = [b for b in final if b["content"].strip()]
+    # Fallback: if the file has only module-level statements (no class/function),
+    # emit the whole source as a single "module" block so nothing is silently skipped.
+    if not result and source.strip():
+        result.append({
+            "label": "module",
+            "content": source.strip(),
+            "lineno": 1,
+            "end_lineno": source.count("\n") + 1,
+        })
+    return result
 
 
 @ParserRegistry.register

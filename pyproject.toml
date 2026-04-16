@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rtfm-ai"
-version = "0.4.3"
+version = "0.5.0"
 description = "RTFM — The open retrieval layer for AI agents. Indexes code, docs, legal, research, data. Extensible parser system. Serves surgical context via MCP."
 readme = "README.md"
 license = "MIT"
@@ -32,7 +32,6 @@ classifiers = [
 
 dependencies = [
     "pyyaml>=6.0",
-    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]

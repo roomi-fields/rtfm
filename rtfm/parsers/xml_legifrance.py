@@ -301,7 +301,7 @@ class XMLLegiFranceParser(BaseParser):
 
         content = clean_text(content)
 
-        if not content or len(content) < 20:
+        if not content or not content.strip():
             return None
 
         # Extract article metadata

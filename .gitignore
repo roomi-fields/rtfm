@@ -62,6 +62,12 @@ _rtfm/
 
 # Private
 raw/outreach-plan*.md
+raw/launch_plan*.md
+
+# Local user / session state (not to be shared)
+.claude/
+.obsidian/
+.cowork-test/
 
 # Communication / publishing docs (private)
 docs/PUBLISH_MCP_DIRECTORIES*.md

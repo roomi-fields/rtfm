@@ -1,0 +1,34 @@
+#!/usr/bin/env sh
+# POSIX launcher for the RTFM MCP server.
+# Tries python3, python, py in that order. If an extras venv exists at
+# ${CLAUDE_PLUGIN_DATA}/extras/venv, its site-packages is prepended to
+# sys.path so optional deps (fastembed, pdftext) become importable.
+
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ -n "$CLAUDE_PLUGIN_DATA" ]; then
+    EXTRAS_DIR="$CLAUDE_PLUGIN_DATA/extras/venv"
+else
+    EXTRAS_DIR="$HOME/.claude/plugins/data/rtfm/extras/venv"
+fi
+
+# Find the venv's site-packages (path differs by Python minor version)
+EXTRAS_SITE=""
+if [ -d "$EXTRAS_DIR/lib" ]; then
+    for d in "$EXTRAS_DIR/lib"/python*/site-packages; do
+        [ -d "$d" ] && EXTRAS_SITE="$d" && break
+    done
+fi
+
+for PY in python3 python py; do
+    if command -v "$PY" >/dev/null 2>&1; then
+        if [ -n "$EXTRAS_SITE" ]; then
+            exec "$PY" -c "import sys; sys.path.insert(0, '$EXTRAS_SITE'); sys.path.insert(0, '$PLUGIN_ROOT'); from rtfm.mcp import main; main()" "$@"
+        else
+            exec "$PY" -c "import sys; sys.path.insert(0, '$PLUGIN_ROOT'); from rtfm.mcp import main; main()" "$@"
+        fi
+    fi
+done
+
+echo "rtfm-serve: Python 3.10+ not found on PATH (tried: python3, python, py)" >&2
+exit 1

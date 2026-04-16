@@ -113,6 +113,11 @@ def _split_sections(text: str) -> list[dict]:
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         content = _clean_chunk(text[start:end])
 
+        # If a sectioning command has no body (title-only), keep the title
+        # as content so short LaTeX files remain indexable.
+        if not content and title:
+            content = title
+
         if not content:
             continue
 

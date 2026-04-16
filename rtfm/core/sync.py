@@ -556,17 +556,26 @@ def sync(
             print(f"[sync] error processing {rel}: {exc}", file=sys.stderr)
 
     # 6. Process removed
-    for rel in diff.removed:
-        try:
-            library.remove_file(rel)
-            result.removed += 1
+    # When retain_history is None (unlimited history), we preserve
+    # vanished files in the index so their file_versions snapshots stay
+    # accessible. This is the contract for memory-snapshot corpora:
+    # nothing is ever lost, even if the source file disappears.
+    if retain_history is None:
+        for rel in diff.removed:
             if on_progress:
-                on_progress("remove", rel, "removed")
-        except Exception as exc:
-            result.errors.append(f"{rel}: {exc}")
-            if on_progress:
-                on_progress("error", rel, str(exc))
-            print(f"[sync] error removing {rel}: {exc}", file=sys.stderr)
+                on_progress("remove", rel, "skipped (retain_history=None)")
+    else:
+        for rel in diff.removed:
+            try:
+                library.remove_file(rel)
+                result.removed += 1
+                if on_progress:
+                    on_progress("remove", rel, "removed")
+            except Exception as exc:
+                result.errors.append(f"{rel}: {exc}")
+                if on_progress:
+                    on_progress("error", rel, str(exc))
+                print(f"[sync] error removing {rel}: {exc}", file=sys.stderr)
 
     # 6b. Extract and resolve edges
     if result.added or result.modified:

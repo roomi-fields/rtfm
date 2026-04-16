@@ -1,0 +1,90 @@
+#!/usr/bin/env sh
+# Install RTFM optional extras into an isolated venv at
+# ${CLAUDE_PLUGIN_DATA}/extras/venv/. Avoids polluting the user's
+# system Python and bypasses PEP 668 because venv ≠ system site.
+#
+# Usage: rtfm-install-extras embeddings|pdf|pdf-full|all
+#
+#   embeddings  — FastEmbed ONNX (~85 MB), semantic + hybrid search.
+#   pdf         — pdftext only (~50 MB), fast text extraction from most PDFs.
+#   pdf-full    — pdftext + marker-pdf with CPU-only torch (~1.5 GB, no CUDA).
+#                 Needed for complex layouts (tables, figures, scanned docs).
+#   all         — embeddings + pdf (not pdf-full; opt-in for that one).
+
+EXTRA="${1:-all}"
+
+if [ -n "$CLAUDE_PLUGIN_DATA" ]; then
+    DATA_DIR="$CLAUDE_PLUGIN_DATA"
+else
+    DATA_DIR="$HOME/.claude/plugins/data/rtfm"
+fi
+
+mkdir -p "$DATA_DIR/extras"
+VENV="$DATA_DIR/extras/venv"
+
+# Find a usable Python
+BASE_PY=""
+for PY in python3 python py; do
+    if command -v "$PY" >/dev/null 2>&1; then
+        BASE_PY="$PY"
+        break
+    fi
+done
+
+if [ -z "$BASE_PY" ]; then
+    echo "rtfm-install-extras: Python 3.10+ not found on PATH" >&2
+    exit 1
+fi
+
+if [ ! -d "$VENV" ]; then
+    echo "Creating extras venv at $VENV ..."
+    "$BASE_PY" -m venv "$VENV" || {
+        echo "rtfm-install-extras: failed to create venv" >&2
+        exit 1
+    }
+fi
+
+PIP="$VENV/bin/pip"
+[ -x "$PIP" ] || PIP="$VENV/Scripts/pip"
+[ -x "$PIP" ] || {
+    echo "rtfm-install-extras: pip not found in $VENV" >&2
+    exit 1
+}
+
+TORCH_CPU_INDEX="https://download.pytorch.org/whl/cpu"
+
+case "$EXTRA" in
+    embeddings)
+        echo "Installing embeddings extra (fastembed, ~85 MB) ..."
+        "$PIP" install --quiet --upgrade fastembed
+        ;;
+    pdf)
+        echo "Installing PDF extras (pdftext only, ~50 MB) ..."
+        echo "  For complex layouts (tables, figures, scans), run 'pdf-full' instead."
+        "$PIP" install --quiet --upgrade pdftext
+        ;;
+    pdf-full)
+        echo "Installing full PDF extras (pdftext + marker-pdf + CPU-only torch, ~1.5 GB) ..."
+        # Install CPU-only torch first from the dedicated index, then the rest
+        # from PyPI. Avoids pulling ~5 GB of CUDA wheels when only CPU is needed.
+        "$PIP" install --quiet --upgrade --index-url "$TORCH_CPU_INDEX" torch
+        "$PIP" install --quiet --upgrade pdftext marker-pdf
+        ;;
+    all)
+        echo "Installing embeddings + light PDF (fastembed + pdftext, ~135 MB) ..."
+        echo "  For marker-pdf (heavy, ~1.5 GB with CPU torch), run 'pdf-full' separately."
+        "$PIP" install --quiet --upgrade fastembed pdftext
+        ;;
+    *)
+        echo "Unknown extra: $EXTRA (expected: embeddings, pdf, pdf-full, all)" >&2
+        exit 1
+        ;;
+esac
+
+STATUS=$?
+if [ $STATUS -eq 0 ]; then
+    echo "Done. Restart Claude Code for the new extras to be picked up."
+else
+    echo "Install failed with exit code $STATUS" >&2
+fi
+exit $STATUS

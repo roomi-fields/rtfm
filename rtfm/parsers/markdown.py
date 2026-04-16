@@ -54,6 +54,13 @@ def split_into_paragraphs(text: str) -> list[str]:
         p = ' '.join(p.split())
         if p and len(p) > 20:
             result.append(p)
+    # Fallback: if filter dropped everything but we had content,
+    # keep the trimmed text as a single paragraph so short files
+    # (header-only notes, short READMEs) remain indexable.
+    if not result:
+        stripped = text.strip()
+        if stripped:
+            result.append(' '.join(stripped.split()))
     return result
 
 
@@ -200,10 +207,12 @@ class MarkdownParser(BaseParser):
             header_match = re.match(r'^(#{1,6})\s+(.+)$', line)
             if header_match:
                 # Save previous section
-                if current_section['content_lines']:
+                if current_section['content_lines'] or current_section.get('title'):
                     current_section['content'] = '\n'.join(current_section['content_lines'])
                     current_section['line_end'] = line_num - 1
-                    if len(current_section['content'].strip()) > 100:
+                    if not current_section['content'].strip() and current_section.get('title'):
+                        current_section['content'] = current_section['title']
+                    if current_section['content'].strip():
                         sections.append(current_section)
 
                 # Start new section
@@ -233,10 +242,12 @@ class MarkdownParser(BaseParser):
             char_pos += len(line) + 1
 
         # Save final section
-        if current_section['content_lines']:
+        if current_section['content_lines'] or current_section.get('title'):
             current_section['content'] = '\n'.join(current_section['content_lines'])
             current_section['line_end'] = len(lines)
-            if len(current_section['content'].strip()) > 100:
+            if not current_section['content'].strip() and current_section.get('title'):
+                current_section['content'] = current_section['title']
+            if current_section['content'].strip():
                 sections.append(current_section)
 
         # If no headers found, treat whole content as one section

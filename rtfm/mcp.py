@@ -21,7 +21,7 @@ import time
 import threading
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from rtfm._mcp import FastMCP
 from rtfm.log import log
 
 mcp = FastMCP("rtfm")
