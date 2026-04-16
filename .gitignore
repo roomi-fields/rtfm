@@ -75,3 +75,4 @@ docs/COMMUNICATION_STATUS*.md
 .mcpregistry_github_token
 .mcpregistry_registry_token
 mcp-publisher
+docs/plugin-test-procedure.md

@@ -1,31 +1,42 @@
 # Positioning — RTFM in the AI Tooling Landscape
 
-## The Problem
+## How RTFM came to exist
 
-AI coding agents are blind. They grep through thousands of files, lose context every session, and hallucinate modules that don't exist. The bottleneck isn't reasoning — it's **localization**: finding the right files before writing code.
+RTFM started as **biblirag** — a semantic-search layer I built for an AI tool doing French tax optimization. The French tax code is a minefield of cross-references between articles, administrative doctrine, and case law. Embeddings over that corpus worked fine, but the whole pipeline was glued to that one domain: specific parsers for Legifrance XML, specific ingestion scripts, specific ranking.
 
-Our benchmarks on SWE-bench Verified show:
-- On repos with 1000+ files, agents with retrieval tools solve **more tasks**
-- Token cost drops **51%**, duration drops **16%**
-- The gain is proportional to repo size — small repos don't need it, large repos can't work without it
+When I moved back to my computational musicology research, I needed the same retrieval idea but for a completely different shape of project: symbolic music scripts, Python analysis code, dozens of LaTeX papers, an Obsidian vault years deep, a handful of PDFs. So I rewrote biblirag into RTFM — format-agnostic parsers, one SQLite file per project, incremental sync.
 
-See [[raw/benchmarks/benchmark_results|Benchmark Results]] for the data.
+Today the same plugin runs on both workloads. The tax AI points at the regulatory corpus; the research agent points at the lab folder. Same MCP server, same tools, different data.
 
-## The Landscape
+## The Problem RTFM addresses
+
+AI coding agents are blind. They grep through thousands of files, lose context every session, hallucinate modules that don't exist. The bottleneck isn't reasoning — it's **localization**: finding the right files before writing code or drafting a section.
+
+Measured gains on a document-heavy task (French tax article generation, ~50 pages of sourced regulatory text):
+
+- Token cost: **−51%** vs baseline
+- Turn duration: **−16%**
+- Output quality improves (fewer fabricated article numbers, tighter citations)
+
+The gain is proportional to corpus size. Small repos don't need retrieval. Large corpora (code + docs + PDFs, research archives, regulatory texts) can't work without it.
+
+See [[paper/benchmarks|benchmark details]].
+
+## The landscape
 
 ### Code-only indexers
 
-**Augment Context Engine**, **Sourcegraph**, **Code-Index-MCP** — all index code. None index docs, specs, legal texts, research papers, or domain-specific formats. If your project mixes code with non-code documents (which most regulated industries do), they can't help.
+**Augment Context Engine**, **Sourcegraph**, **Code-Index-MCP** all index code. They don't index LaTeX, PDFs, legal XML, YAML configs, research notes, or anything beyond source files. If your project mixes code with non-code (regulated industries, research, ops, legal tech), they don't help.
 
-### Karpathy's LLM Wiki
+### Karpathy's LLM Wiki pattern
 
-Andrej Karpathy proposed using Obsidian vaults as human-readable RAG — three layers (raw, wiki, schema) maintained by an LLM. Projects like **Claudesidian** (2.1k stars), **claude-obsidian**, **obsidian-second-brain** implement this.
+Andrej Karpathy proposed a 3-layer wiki (raw, wiki, schema) maintained by an agent in Obsidian. Projects like **Claudesidian** (2.1k stars), **claude-obsidian**, **obsidian-second-brain** implement that idea.
 
-**The ceiling**: navigation relies on a flat `index.md` maintained by the LLM. Works for ~100 notes. Breaks at scale.
+The ceiling: navigation leans on a flat `index.md` that the agent maintains. Fine for ~100 notes. Breaks at a few thousand because the index itself no longer fits in context.
 
-See [[docs/obsidian-vault-guide|Obsidian Vault Guide]] for how RTFM removes this ceiling.
+RTFM lifts that ceiling by moving the index into SQLite FTS5 and the graph into an `edges` table, while keeping the vault itself human-readable in Obsidian.
 
-### Where RTFM fits
+### Where RTFM sits
 
 ```
                     Code-only          Multi-domain
@@ -34,44 +45,39 @@ See [[docs/obsidian-vault-guide|Obsidian Vault Guide]] for how RTFM removes this
                     │ Augment CE      │                  │
                     ├─────────────────┼──────────────────┤
   Open source       │ Code-Index-MCP  │     RTFM         │
-                    │                 │                  │
                     └─────────────────┴──────────────────┘
 ```
 
-RTFM is the only open-source, multi-domain retrieval layer with:
-- 10 built-in parsers (extensible in ~50 lines)
-- FTS5 + semantic + hybrid search
-- Graph-based ranking (wikilinks, imports)
-- Progressive disclosure (metadata first, content on demand)
-- Obsidian vault integration with auto-generated navigation
-- MCP native (works with Claude Code, Cursor, Codex)
+To my knowledge, RTFM is the only open-source, multi-domain retrieval layer that combines:
+- 10 built-in format parsers, extensible in ~50 lines each
+- FTS5 out of the box, optional local embeddings (FastEmbed/ONNX), hybrid mode
+- Graph-based ranking from wikilinks, Python imports, LaTeX cites, legal cross-refs
+- Progressive disclosure — metadata first (~300 tokens for 5 results), content on demand
+- Obsidian vault mode with auto-generated navigation files (index, graph, hubs, orphans)
+- MCP native — Claude Code, Cursor, Codex, any MCP client
 
-## The Pitch
+## What makes RTFM different in practice
 
-> "Augment indexes your code. RTFM indexes everything."
+### vs hosted RAG pipelines
 
-> "Karpathy showed the vision. RTFM automates it."
+Most RAG stacks need: a vector database, embedding service, pipeline glue, per-query tokenization, opaque vector storage. RTFM needs: one SQLite file. Embeddings are optional and local (FastEmbed/ONNX, no GPU). FTS5 works without any model. You can open the DB with `sqlite3` and read everything.
 
-> "When your vault outgrows index.md, RTFM takes over."
+### vs Karpathy-style wiki tools
 
-## Key Differentiators
-
-### vs RAG pipelines
-
-RAG requires: vector database, embedding infrastructure, retrieval-per-query tokenization, opaque vectors. RTFM: SQLite file, local embeddings (optional), FTS5 by default, everything in readable markdown.
-
-### vs Karpathy wiki tools
-
-They inject entire files into context. RTFM serves **progressive disclosure** — metadata first (~300 tokens), then expand only what's needed. At 1700 files, the difference is the difference between burning your quota in minutes and working all day.
+They inject whole files into context when a note is relevant. RTFM serves metadata first, then the agent expands the chunk it actually needs. On a 1,700-file vault, the difference is between burning your quota in minutes and working through the day.
 
 ### vs code indexers
 
-They parse code. RTFM parses **everything**: code (Python AST), docs (Markdown headers), research (LaTeX sections), legal texts (XML articles), data (YAML/JSON keys), and any custom format via the parser API.
+They parse code. RTFM parses code **and** docs (Markdown headers), **and** research papers (LaTeX sections), **and** legal articles (XML with cross-references), **and** structured data (YAML/JSON keys), **and** whatever custom format you write a ~50-line parser for.
 
-## Target Audiences
+## Who RTFM is for
 
-1. **Developers with large codebases** — retrieval instead of grep
-2. **Researchers** — LaTeX + PDF + code in one searchable index
-3. **Regulated industries** — code + legal/compliance docs
-4. **Obsidian power users** — scalable vault retrieval for AI agents
-5. **MCP ecosystem** — drop-in retrieval server for any MCP client
+- **Developers with large codebases** who want retrieval instead of grep loops.
+- **Researchers** juggling LaTeX, PDFs, Python analysis code, data files — in one searchable index.
+- **Regulated industries** mixing code with compliance documents, legal text, internal procedures.
+- **Obsidian power users** whose vaults have outgrown `index.md` but who still want agent-readable navigation.
+- **MCP ecosystem users** looking for a drop-in retrieval server that doesn't care which client is on the other end.
+
+## Elevator description (150 chars)
+
+> Open, local retrieval layer for AI agents. Indexes code, docs, PDFs, legal, research into one SQLite file. Claude searches it before grepping.
