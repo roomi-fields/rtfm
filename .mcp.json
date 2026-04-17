@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "rtfm": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/rtfm-serve",
+      "command": "rtfm-serve",
       "args": [],
       "env": {
         "RTFM_DB": ".rtfm/library.db"
