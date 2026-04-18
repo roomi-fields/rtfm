@@ -19,6 +19,20 @@ DEFAULT_CLAUDE_MODEL = "claude-opus-4-7"
 DEFAULT_EMBED_MODEL = "quality"  # mxbai-embed-large-v1 alias
 DEFAULT_SEARCH_MODE = "hybrid"   # hybrid = FTS + embeddings
 
+
+def _resolve_rtfm_serve(rtfm_bin: str) -> str:
+    """Return the best command for the MCP server — prefer an absolute path
+    to the venv's rtfm-serve when rtfm_bin itself is a venv binary."""
+    resolved = shutil.which("rtfm-serve")
+    if resolved:
+        return resolved
+    # Derive from the rtfm CLI path if it's a venv entry
+    rtfm_path = shutil.which(rtfm_bin) or rtfm_bin
+    sibling = Path(rtfm_path).with_name("rtfm-serve")
+    if sibling.exists():
+        return str(sibling)
+    return "rtfm-serve"  # Fallback — will fail loudly if unresolved
+
 # Timeouts (seconds)
 SYNC_TIMEOUT = 300
 EMBED_TIMEOUT = 900
@@ -40,12 +54,12 @@ class SampleResult:
     error: Optional[str] = None
 
 
-def _write_mcp_config(sample_dir: Path, db_path: Path) -> None:
+def _write_mcp_config(sample_dir: Path, db_path: Path, rtfm_serve_cmd: str) -> None:
     """Write a local .mcp.json so `claude -p` run inside sample_dir uses our DB."""
     mcp = {
         "mcpServers": {
             "rtfm": {
-                "command": "rtfm-serve",
+                "command": rtfm_serve_cmd,
                 "args": [],
                 "env": {"RTFM_DB": str(db_path.resolve())},
             }
@@ -101,7 +115,7 @@ def run_sample(
     n_turns = serialize_turns(sample.history_turns, sample_dir)
 
     # 2. Write MCP + CLAUDE.md configs
-    _write_mcp_config(sample_dir, db_path)
+    _write_mcp_config(sample_dir, db_path, _resolve_rtfm_serve(rtfm_bin))
     _write_claude_md(sample_dir, template_path)
 
     if dry_run:
