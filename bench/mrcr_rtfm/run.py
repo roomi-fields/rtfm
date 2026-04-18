@@ -43,6 +43,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Skip embed + Claude; only validate layout")
     parser.add_argument("--resume", action="store_true",
                         help="Skip samples already recorded in results.jsonl")
+    parser.add_argument("--phase", default="all", choices=["all", "embed", "claude"],
+                        help="'embed' = sync+embed only (prep). 'claude' = score only "
+                             "(requires prior 'embed' run on the same out-dir). "
+                             "'all' = full pipeline per sample.")
     args = parser.parse_args(argv)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -79,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
                     embed_model=args.embed_model,
                     search_mode=args.search_mode,
                     dry_run=args.dry_run,
+                    phase=args.phase,
                 )
             except Exception as err:
                 print(f"  unexpected exception: {err}", file=sys.stderr)
@@ -87,7 +92,13 @@ def main(argv: list[str] | None = None) -> int:
             results_f.write(json.dumps(asdict(result)) + "\n")
             results_f.flush()
 
-            if result.score >= 0:
+            if args.phase == "embed":
+                print(
+                    f"  embedded {result.n_turns_indexed} turns "
+                    f"in {result.embed_time_sec:.1f}s "
+                    f"(wall={result.wall_time_sec:.1f}s)"
+                )
+            elif result.score >= 0:
                 scores.append(result.score)
                 running = sum(scores) / len(scores)
                 print(
@@ -97,13 +108,16 @@ def main(argv: list[str] | None = None) -> int:
                     f"(embed={result.embed_time_sec:.1f}s, "
                     f"claude={result.claude_time_sec:.1f}s)"
                 )
-            if result.error:
+            if result.error and result.error != "phase=embed":
                 print(f"  error: {result.error}", file=sys.stderr)
 
     if scores:
         print(f"\n=== {args.bin} bin ===")
         print(f"Samples:       {len(scores)}")
         print(f"Mean score:    {sum(scores)/len(scores):.4f}")
+        print(f"Results file:  {results_path}")
+    elif args.phase == "embed":
+        print(f"\n=== {args.bin} bin — EMBED phase done ===")
         print(f"Results file:  {results_path}")
     return 0
 

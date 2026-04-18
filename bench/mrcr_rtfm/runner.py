@@ -96,11 +96,16 @@ def run_sample(
     search_mode: str = DEFAULT_SEARCH_MODE,
     template_path: Optional[Path] = None,
     dry_run: bool = False,
+    phase: str = "all",
 ) -> SampleResult:
     """Run one MRCR sample end-to-end and return its score.
 
     out_dir: where to create `sample_<idx>/`. Left behind for inspection.
     dry_run: only serialize + write configs, skip embed + claude (validates layout).
+    phase: "all" (default) = sync+embed+claude+grade,
+           "embed" = sync+embed only (no Claude call, no grading, score=-1).
+           "claude" = assumes sample_dir already has an embedded DB, only runs
+           Claude + grade (used for resume after Phase 1).
     """
     start = time.time()
     sample_dir = out_dir / f"sample_{sample.idx:05d}"
@@ -111,61 +116,95 @@ def run_sample(
     if template_path is None:
         template_path = Path(__file__).parent / "CLAUDE_template.md"
 
-    # 1. Serialize conversation history to .md files
-    n_turns = serialize_turns(sample.history_turns, sample_dir)
+    embed_time = 0.0
+    claude_time = 0.0
 
-    # 2. Write MCP + CLAUDE.md configs
-    _write_mcp_config(sample_dir, db_path, _resolve_rtfm_serve(rtfm_bin))
-    _write_claude_md(sample_dir, template_path)
+    if phase not in ("all", "embed", "claude"):
+        raise ValueError(f"Invalid phase: {phase}")
 
-    if dry_run:
-        return SampleResult(
-            idx=sample.idx, n_chars=sample.n_chars,
-            approx_tokens=sample.approx_tokens,
-            score=-1.0, response="",
-            random_string=sample.random_string,
-            wall_time_sec=time.time() - start,
-            embed_time_sec=0.0, claude_time_sec=0.0,
-            n_turns_indexed=n_turns, error="dry_run",
+    # Phase 1 (embed) and "all" — serialize + sync + embed
+    if phase in ("all", "embed"):
+        # 1. Serialize conversation history to .md files
+        n_turns = serialize_turns(sample.history_turns, sample_dir)
+
+        # 2. Write MCP + CLAUDE.md configs
+        _write_mcp_config(sample_dir, db_path, _resolve_rtfm_serve(rtfm_bin))
+        _write_claude_md(sample_dir, template_path)
+
+        if dry_run:
+            return SampleResult(
+                idx=sample.idx, n_chars=sample.n_chars,
+                approx_tokens=sample.approx_tokens,
+                score=-1.0, response="",
+                random_string=sample.random_string,
+                wall_time_sec=time.time() - start,
+                embed_time_sec=0.0, claude_time_sec=0.0,
+                n_turns_indexed=n_turns, error="dry_run",
+            )
+
+        # 3. Sync conversation into RTFM
+        sync_proc = _run(
+            [rtfm_bin, "sync", "conv", "--db", str(db_path),
+             "--corpus", "mrcr", "--no-embeddings"],
+            cwd=sample_dir,
+            timeout=SYNC_TIMEOUT,
         )
+        if sync_proc.returncode != 0:
+            return SampleResult(
+                idx=sample.idx, n_chars=sample.n_chars,
+                approx_tokens=sample.approx_tokens,
+                score=0.0, response="", random_string=sample.random_string,
+                wall_time_sec=time.time() - start,
+                embed_time_sec=0.0, claude_time_sec=0.0,
+                n_turns_indexed=n_turns,
+                error=f"sync failed: {sync_proc.stderr[:500]}",
+            )
 
-    # 3. Sync conversation into RTFM
-    sync_proc = _run(
-        [rtfm_bin, "sync", "conv", "--db", str(db_path),
-         "--corpus", "mrcr", "--no-embeddings"],
-        cwd=sample_dir,
-        timeout=SYNC_TIMEOUT,
-    )
-    if sync_proc.returncode != 0:
-        return SampleResult(
-            idx=sample.idx, n_chars=sample.n_chars,
-            approx_tokens=sample.approx_tokens,
-            score=0.0, response="", random_string=sample.random_string,
-            wall_time_sec=time.time() - start,
-            embed_time_sec=0.0, claude_time_sec=0.0,
-            n_turns_indexed=n_turns,
-            error=f"sync failed: {sync_proc.stderr[:500]}",
+        # 4. Embed (slowest step for large samples)
+        embed_start = time.time()
+        embed_proc = _run(
+            [rtfm_bin, "embed", "--db", str(db_path),
+             "--embed-model", embed_model],
+            cwd=sample_dir,
+            timeout=EMBED_TIMEOUT,
         )
+        embed_time = time.time() - embed_start
+        if embed_proc.returncode != 0:
+            return SampleResult(
+                idx=sample.idx, n_chars=sample.n_chars,
+                approx_tokens=sample.approx_tokens,
+                score=0.0, response="", random_string=sample.random_string,
+                wall_time_sec=time.time() - start,
+                embed_time_sec=embed_time, claude_time_sec=0.0,
+                n_turns_indexed=n_turns,
+                error=f"embed failed: {embed_proc.stderr[:500]}",
+            )
 
-    # 4. Embed (slowest step for large samples)
-    embed_start = time.time()
-    embed_proc = _run(
-        [rtfm_bin, "embed", "--db", str(db_path),
-         "--embed-model", embed_model],
-        cwd=sample_dir,
-        timeout=EMBED_TIMEOUT,
-    )
-    embed_time = time.time() - embed_start
-    if embed_proc.returncode != 0:
-        return SampleResult(
-            idx=sample.idx, n_chars=sample.n_chars,
-            approx_tokens=sample.approx_tokens,
-            score=0.0, response="", random_string=sample.random_string,
-            wall_time_sec=time.time() - start,
-            embed_time_sec=embed_time, claude_time_sec=0.0,
-            n_turns_indexed=n_turns,
-            error=f"embed failed: {embed_proc.stderr[:500]}",
-        )
+        if phase == "embed":
+            return SampleResult(
+                idx=sample.idx, n_chars=sample.n_chars,
+                approx_tokens=sample.approx_tokens,
+                score=-1.0, response="", random_string=sample.random_string,
+                wall_time_sec=time.time() - start,
+                embed_time_sec=embed_time, claude_time_sec=0.0,
+                n_turns_indexed=n_turns, error="phase=embed",
+            )
+
+    # Phase 2 (claude) — assumes sync+embed already ran
+    if phase == "claude":
+        # Count existing files in conv/ so the result row has the right n_turns
+        conv_dir = sample_dir / "conv"
+        n_turns = len(list(conv_dir.glob("*.md"))) if conv_dir.exists() else 0
+        if not db_path.exists() or n_turns == 0:
+            return SampleResult(
+                idx=sample.idx, n_chars=sample.n_chars,
+                approx_tokens=sample.approx_tokens,
+                score=0.0, response="", random_string=sample.random_string,
+                wall_time_sec=time.time() - start,
+                embed_time_sec=0.0, claude_time_sec=0.0,
+                n_turns_indexed=n_turns,
+                error="phase=claude but no pre-embedded sample_dir found",
+            )
 
     # 5. Run Claude Code headless on the last user turn
     claude_start = time.time()
