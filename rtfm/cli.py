@@ -264,14 +264,34 @@ def cmd_compare_versions(args):
 
 def cmd_embed(args):
     """Generate embeddings for chunks."""
+    from rtfm.core.embeddings import resolve_model, warn_if_heavy
+
     lib = _get_lib(args)
 
-    stats = lib.generate_embeddings(
-        corpus=args.corpus,
-        batch_size=args.batch_size,
-        force=args.force,
-        show_progress=True,
-    )
+    requested = getattr(args, "embed_model", None)
+    if requested:
+        # Interactive size guard before triggering a possibly-large download
+        if not warn_if_heavy(requested):
+            print("Aborted.")
+            lib.close()
+            return
+        model = resolve_model(requested).hf_name
+    else:
+        model = None  # Library auto-picks: DB active → default
+
+    try:
+        stats = lib.generate_embeddings(
+            corpus=args.corpus,
+            batch_size=args.batch_size,
+            model=model,
+            force=args.force,
+            show_progress=True,
+        )
+    except ValueError as err:
+        # Raised on model-mismatch without --force
+        print(str(err))
+        lib.close()
+        return
 
     print(f"Embedded: {stats['embedded']} chunks")
     lib.close()
@@ -288,6 +308,22 @@ def cmd_embed_stats(args):
         print(f"Models:    {stats['models']}")
 
     lib.close()
+
+
+def cmd_embed_models(args):
+    """List curated embedding models (aliases) supported by RTFM."""
+    from rtfm.core.embeddings import EMBEDDING_MODELS, DEFAULT_ALIAS, is_model_cached
+
+    print(f"{'alias':<10} {'dim':<6} {'size':<9} {'cached':<8} {'lang':<14} model")
+    print(f"{'-'*10} {'-'*6} {'-'*9} {'-'*8} {'-'*14} {'-'*50}")
+    for alias, info in EMBEDDING_MODELS.items():
+        mark = " *" if alias == DEFAULT_ALIAS else ""
+        cached = "yes" if is_model_cached(info.hf_name) else "no"
+        print(
+            f"{alias+mark:<10} {info.dim:<6} ~{info.size_mb}MB    "
+            f"{cached:<8} {info.languages:<14} {info.hf_name}"
+        )
+    print(f"\n  * = default. Pass --embed-model <alias> or a full HF model name.")
 
 
 
@@ -1049,11 +1085,18 @@ def main():
     p_embed.add_argument("--corpus", "-c", help="Only embed chunks in this corpus")
     p_embed.add_argument("--batch-size", type=int, default=32, help="Batch size")
     p_embed.add_argument("--force", action="store_true", help="Re-generate all embeddings")
+    p_embed.add_argument("--embed-model", dest="embed_model", metavar="ALIAS|HF_NAME",
+                         help="Embedding model: alias (fast/balanced/quality) or full HF name. "
+                              "Defaults to the DB's active model or 'fast'.")
     p_embed.set_defaults(func=cmd_embed)
 
     # embed-stats (show embedding statistics)
     p_embed_stats = subparsers.add_parser("embed-stats", help="Show embedding statistics", parents=[db_parent])
     p_embed_stats.set_defaults(func=cmd_embed_stats)
+
+    # embed-models (list curated embedding models)
+    p_embed_models = subparsers.add_parser("embed-models", help="List available embedding model aliases")
+    p_embed_models.set_defaults(func=cmd_embed_models)
 
     # semantic-search (search using embeddings)
     p_semantic = subparsers.add_parser("semantic-search", help="Search using semantic similarity", parents=[db_parent])

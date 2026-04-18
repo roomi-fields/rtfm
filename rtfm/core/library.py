@@ -1585,10 +1585,29 @@ class Library:
             Stats dict with counts
         """
         from rtfm.core.embeddings import (
-            embed_texts, embedding_to_bytes, DEFAULT_MODEL
+            embed_texts, embedding_to_bytes, DEFAULT_MODEL, resolve_model
         )
 
-        model = model or DEFAULT_MODEL
+        # Resolve alias to full HF name early so we store a single canonical name
+        requested = resolve_model(model).hf_name if model else None
+        active = self.get_active_embedding_model()
+
+        if requested and active and requested != active and not force:
+            raise ValueError(
+                f"\n  ⚠️  Model mismatch: DB already uses '{active}', "
+                f"got '{requested}'.\n"
+                f"     Use --force to rebuild all embeddings with the new model,\n"
+                f"     or omit --embed-model to continue with the active model."
+            )
+
+        # Precedence: explicit arg → existing DB model → default
+        model = requested or active or DEFAULT_MODEL
+
+        # If forcing and the model is changing, wipe existing embeddings first
+        # so we don't end up with a mixed-dim DB that breaks similarity search.
+        if force and active and requested and requested != active:
+            self._get_conn().execute("DELETE FROM chunk_embeddings")
+
         conn = self._get_conn()
 
         # Get chunks to embed
@@ -1686,6 +1705,18 @@ class Library:
             "models": {r["model"]: r["count"] for r in models},
         }
 
+    def get_active_embedding_model(self) -> Optional[str]:
+        """Return the embedding model dominant in this DB, or None if empty.
+
+        If multiple models coexist (rare, usually a bug), returns the most used.
+        """
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT model, COUNT(*) as n FROM chunk_embeddings "
+            "GROUP BY model ORDER BY n DESC LIMIT 1"
+        ).fetchone()
+        return row["model"] if row else None
+
     def semantic_search(
         self,
         query: str,
@@ -1710,7 +1741,8 @@ class Library:
         )
         import numpy as np
 
-        model = model or DEFAULT_MODEL
+        # Use the DB's active model by default so dim matches stored vectors.
+        model = model or self.get_active_embedding_model() or DEFAULT_MODEL
         conn = self._get_conn()
 
         # Get query embedding
@@ -1801,7 +1833,7 @@ class Library:
             embed_text, bytes_to_embedding, cosine_similarity, DEFAULT_MODEL
         )
 
-        model = model or DEFAULT_MODEL
+        model = model or self.get_active_embedding_model() or DEFAULT_MODEL
 
         # Get FTS results (more than limit to have candidates)
         fts_results = self.search(query, limit=limit * 3, corpus=corpus)
