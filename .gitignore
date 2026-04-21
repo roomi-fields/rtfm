@@ -24,6 +24,9 @@ db/
 .rtfm/
 logs/
 
+# Bench scratch (local experiments, not for github)
+bench/
+
 # Environment
 *.env
 
