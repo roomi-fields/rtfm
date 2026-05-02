@@ -11,6 +11,12 @@ Index everything in your project — code, docs, PDFs, legal texts, research, da
 
 **`Free · Local · Open Source · MIT`**
 
+<br>
+
+<img src="docs/demo/rtfm-split.gif" alt="RTFM vs vanilla Claude Code — same task, same model, who pays the bill?" width="1100">
+
+<br>
+
 [![PyPI version](https://badge.fury.io/py/rtfm-ai.svg)](https://pypi.org/project/rtfm-ai/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/) [![MCP](https://img.shields.io/badge/MCP-2026-green.svg)](https://modelcontextprotocol.io/) [![Claude Code](https://img.shields.io/badge/Claude_Code-MCP-8A2BE2)](https://claude.ai/claude-code) [![GitHub stars](https://img.shields.io/github/stars/roomi-fields/rtfm?style=social)](https://github.com/roomi-fields/rtfm)
 
 </div>
