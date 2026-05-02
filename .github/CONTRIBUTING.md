@@ -41,7 +41,7 @@ cd rtfm
 python -m venv .venv
 source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -e ".[dev,mcp]"
-pytest tests/ -v
+pytest rtfm/tests/ -v
 ```
 
 ## Adding a Parser
@@ -52,15 +52,15 @@ RTFM's parser system is extensible. To add support for a new file type:
 2. Extend `BaseParser` from `rtfm/parsers/base.py`
 3. Register with `@ParserRegistry.register`
 4. Import in `rtfm/parsers/__init__.py` (before `plaintext` — order matters)
-5. Add tests in `tests/test_smart_parsers.py` or a dedicated test file
+5. Add tests in `rtfm/tests/test_smart_parsers.py` or a dedicated test file
 
 See existing parsers for examples — `markdown.py` is the simplest reference, `python.py` shows AST-based chunking.
 
 ## Running Tests
 
 ```bash
-pytest tests/ -v
-pytest tests/ -v -k "test_search"  # run specific tests
+pytest rtfm/tests/ -v
+pytest rtfm/tests/ -v -k "test_search"  # run specific tests
 ```
 
 ## Code Style
