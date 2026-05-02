@@ -79,3 +79,7 @@ docs/COMMUNICATION_STATUS*.md
 .mcpregistry_registry_token
 mcp-publisher
 docs/plugin-test-procedure.md
+
+# Internal WIP — not for public repo
+paper/
+plan.md

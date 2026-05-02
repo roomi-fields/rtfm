@@ -20,7 +20,7 @@ Measured gains on a document-heavy task (French tax article generation, ~50 page
 
 The gain is proportional to corpus size. Small repos don't need retrieval. Large corpora (code + docs + PDFs, research archives, regulatory texts) can't work without it.
 
-See [[paper/benchmarks|benchmark details]].
+Benchmarks are being formalized for an upcoming paper.
 
 ## The landscape
 
