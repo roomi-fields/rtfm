@@ -61,7 +61,7 @@ rtfm/
 
 ```bash
 # Run tests
-.venv/bin/pytest tests/ -v
+.venv/bin/pytest rtfm/tests/ -v
 
 # Search locally
 rtfm search "query" --db db/library.db

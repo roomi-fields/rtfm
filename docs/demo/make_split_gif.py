@@ -6,7 +6,7 @@ Both agents succeed. The contrast is in HOW MUCH it costs:
   Right (with RTFM)          : 1 search, 1 expand. Done fast. Bars stay green.
 
 Run: python3 docs/demo/make_split_gif.py
-Output: docs/demo/rtfm-split.gif
+Output: docs/demo/rtfm-split.png
 """
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
@@ -244,7 +244,7 @@ def make_frame(frame_idx):
 
 # ── Main ────────────────────────────────────────────────────────────────
 def main():
-    out = Path(__file__).parent / "rtfm-split.gif"
+    out = Path(__file__).parent / "rtfm-split.png"
     frames = [make_frame(i) for i in range(N_FRAMES)]
     durations = [int(1000 / FPS)] * (N_FRAMES - 1) + [600]  # hold last
     frames[0].save(
