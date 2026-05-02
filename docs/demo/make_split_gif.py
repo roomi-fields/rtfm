@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
 # ── Layout ──────────────────────────────────────────────────────────────
-W, H = 1000, 580
+W, H = 880, 510
 SPLIT = W // 2
 PAD = 30
 
@@ -52,22 +52,21 @@ F_FOOTER = find_font(12)
 
 # ── Animation parameters ────────────────────────────────────────────────
 FPS = 10
-DURATION_S = 4.5
-N_FRAMES = int(FPS * DURATION_S)  # 45 frames
+DURATION_S = 3.5
+N_FRAMES = int(FPS * DURATION_S)  # 35 frames
 
 # Left panel : sequence of tool calls — each appears at a given frame
 LEFT_CALLS = [
     (2,  "Glob   '**/*sync*'"),
     (5,  "Read   src/sync_handler.py"),
-    (9,  "Grep   'embed' -r"),
-    (13, "Read   src/pipeline.py"),
-    (17, "Read   src/embeddings.py"),
-    (21, "Glob   '**/*.py'"),
-    (25, "Read   src/config.py"),
-    (29, "Grep   'background'"),
-    (33, "Read   src/sync.py"),
+    (8,  "Grep   'embed' -r"),
+    (11, "Read   src/pipeline.py"),
+    (14, "Read   src/embeddings.py"),
+    (17, "Glob   '**/*.py'"),
+    (20, "Grep   'background'"),
+    (23, "Read   src/sync.py"),
 ]
-LEFT_FOUND_FRAME = 36  # ✓ found
+LEFT_FOUND_FRAME = 26  # ✓ found
 LEFT_FINAL_TOKENS = 142_000  # 142k of 200k context
 LEFT_FINAL_CALLS = 22
 LEFT_FINAL_TIME = "2m18s"
@@ -76,9 +75,9 @@ LEFT_FINAL_COST = 0.83
 # Right panel : just 2 calls
 RIGHT_CALLS = [
     (2,  "rtfm_search  'embedding sync logic'"),
-    (6,  "rtfm_expand  src/sync.py L138-156"),
+    (5,  "rtfm_expand  src/sync.py L138-156"),
 ]
-RIGHT_FOUND_FRAME = 9   # ✓ found — fast
+RIGHT_FOUND_FRAME = 8   # ✓ found — fast
 RIGHT_FINAL_TOKENS = 6_500
 RIGHT_FINAL_CALLS = 2
 RIGHT_FINAL_TIME = "3.4s"
@@ -247,7 +246,7 @@ def make_frame(frame_idx):
 def main():
     out = Path(__file__).parent / "rtfm-split.gif"
     frames = [make_frame(i) for i in range(N_FRAMES)]
-    durations = [int(1000 / FPS)] * (N_FRAMES - 1) + [800]  # hold last
+    durations = [int(1000 / FPS)] * (N_FRAMES - 1) + [600]  # hold last
     frames[0].save(
         out,
         save_all=True,

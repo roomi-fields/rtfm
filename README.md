@@ -13,7 +13,7 @@ Index everything in your project — code, docs, PDFs, legal texts, research, da
 
 <br>
 
-<img src="docs/demo/rtfm-split.gif" alt="RTFM vs vanilla Claude Code — same task, same model, who pays the bill?" width="1100">
+![RTFM vs vanilla Claude Code — same task, same model, who pays the bill?](docs/demo/rtfm-split.gif)
 
 <br>
 
