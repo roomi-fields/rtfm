@@ -27,6 +27,27 @@ from rtfm.log import log
 mcp = FastMCP("rtfm")
 
 
+# ── Tool profile (token footprint) ───────────────────────────────────────
+# RTFM_MCP_PROFILE controls which tools are exposed to the agent at runtime.
+#   "runtime" (default) : 6 retrieval tools — minimal context footprint
+#   "admin" / "all"     : all 13 tools (incl. sync, ingest, remove, tags…)
+# Admin operations (sync, ingest, …) are also available via CLI and the
+# Python API (used by hooks), so excluding them from MCP doesn't break them.
+
+_PROFILE = os.environ.get("RTFM_MCP_PROFILE", "runtime").lower()
+
+
+def _admin_tool():
+    """Register a tool ONLY when RTFM_MCP_PROFILE is admin/all.
+
+    Returns a no-op decorator otherwise (function stays callable from Python
+    but isn't exposed as an MCP tool).
+    """
+    if _PROFILE in ("admin", "all"):
+        return mcp.tool()
+    return lambda fn: fn
+
+
 # ── Progressive disclosure helpers ───────────────────────────────────────
 
 def _deduplicate_by_source(results, limit: int):
@@ -196,49 +217,48 @@ def _resolve_book_by_path(conn, filepath: str):
     return None
 
 
-def _format_source_line(entry: dict, rank: int) -> str:
+def _format_source_line(entry: dict, rank: int = 0) -> str:
     """Format a source as a search result line.
 
     Format:
-      [rank] /abs/path > best_section — L<start>-<end> — score: 0.89
-          Also: section2 (L<start>-<end>), section3 (L<start>-<end>)
+      /abs/path L<start>-<end> (section_name)
+        + L<start>-<end> (other), L<start>-<end> (other2)
 
+    `rank` arg is kept for API compat but unused (agent counts naturally).
     Expects entry["abs_path"] to be pre-resolved by _deduplicate_by_source.
     """
     r = entry["best"]
     others = entry.get("others", [])
 
-    # Best chunk info
-    section = r.chunk.chapter_title or ""
+    display = entry.get("abs_path") or r.chunk.book_file or r.chunk.book_slug
+    parts = [display]
+
     ls = r.chunk.line_start
     le = r.chunk.line_end
-
-    # Build: path > section — L<lines> — score
-    display = entry.get("abs_path") or r.chunk.book_file or r.chunk.book_slug
-    if section:
-        display += f" > {section}"
-
-    parts = [display]
     if ls:
-        line_str = f"L{ls}-{le}" if le and le != ls else f"L{ls}"
-        parts.append(line_str)
-    parts.append(f"score: {r.score:.2f}")
+        parts.append(f"L{ls}-{le}" if le and le != ls else f"L{ls}")
 
-    main_line = f"[{rank}] {' — '.join(parts)}"
+    section = r.chunk.chapter_title or ""
+    if section:
+        parts.append(f"({section})")
 
-    # "Also:" line for other chunks in the same file
+    main_line = " ".join(parts)
+
     if others:
         also_items = []
         for o in others:
-            s = o.chunk.chapter_title or "?"
             o_ls = o.chunk.line_start
             o_le = o.chunk.line_end
+            o_section = o.chunk.chapter_title or ""
+            piece = ""
             if o_ls:
-                line_str = f"L{o_ls}-{o_le}" if o_le and o_le != o_ls else f"L{o_ls}"
-                also_items.append(f"{s} ({line_str})")
-            else:
-                also_items.append(s)
-        main_line += f"\n    Also: {', '.join(also_items)}"
+                piece = f"L{o_ls}-{o_le}" if o_le and o_le != o_ls else f"L{o_ls}"
+            if o_section:
+                piece = f"{piece} ({o_section})" if piece else f"({o_section})"
+            if piece:
+                also_items.append(piece)
+        if also_items:
+            main_line += f"\n  + {', '.join(also_items)}"
 
     return main_line
 
@@ -296,18 +316,16 @@ def rtfm_search(
     freshness_weight: float = 0.0,
     centrality_weight: float = 0.0,
 ) -> str:
-    """Search the knowledge base. Returns metadata only — no content.
-
-    Like a search engine results page: shows which sources are relevant.
-    Use rtfm_expand(source) to read the actual content.
+    """Search the indexed knowledge base. Returns ranked source paths
+    with line ranges, no content. Use rtfm_expand to read content.
 
     Args:
-        query: The search query.
-        limit: Maximum number of unique sources to return (default 5).
-        corpus: Filter by corpus name (optional).
-        search_type: One of "fts", "semantic", or "hybrid" (default "fts").
-        freshness_weight: Boost recently indexed files (0.0 = off, 0.1 = mild).
-        centrality_weight: Boost files with many incoming edges (0.0 = off, 0.1 = mild).
+        query: search query
+        limit: max sources (default 5)
+        corpus: filter by corpus name
+        search_type: "fts" | "semantic" | "hybrid"
+        freshness_weight: boost recently indexed files (0.0–0.5)
+        centrality_weight: boost files with many incoming edges (0.0–0.5)
     """
     t0 = time.time()
     lib = _get_library()
@@ -340,15 +358,14 @@ def rtfm_search(
     deduped = _deduplicate_by_source(results, limit)
     log("search", f"query={query!r} type={search_type} sources={len(deduped)}/{results.total_found} time={elapsed:.3f}s")
 
-    # Metadata-only output — no content, minimal tokens
-    lines = [f"Found {len(deduped)} sources for \"{query}\":\n"]
-    for rank, entry in enumerate(deduped, 1):
-        lines.append(_format_source_line(entry, rank))
+    lines = [f"{len(deduped)} sources for \"{query}\":\n"]
+    for entry in deduped:
+        lines.append(_format_source_line(entry))
 
     return "\n".join(lines)
 
 
-@mcp.tool()
+@_admin_tool()
 def rtfm_stats() -> str:
     """Get library statistics: total chunks, books, corpora, tag and embedding coverage.
 
@@ -448,7 +465,7 @@ def rtfm_stats() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@_admin_tool()
 def rtfm_tags(corpus: str | None = None) -> str:
     """List all tags in the library, optionally filtered by corpus.
 
@@ -470,15 +487,12 @@ def rtfm_books(
     limit: int = 50,
     offset: int = 0,
 ) -> str:
-    """List indexed books/documents with pagination.
-
-    Returns a per-corpus summary, then books from `offset` to `offset + limit`.
-    Call again with a higher `offset` to paginate through all books.
+    """List indexed books with per-corpus summary and pagination.
 
     Args:
-        corpus: Filter by corpus name (optional).
-        limit: Max books per page (default 50). Set 0 for all.
-        offset: Number of books to skip (default 0). Use for pagination.
+        corpus: filter by corpus name (optional)
+        limit: max books per page (default 50, 0 for all)
+        offset: skip N books for pagination (default 0)
     """
     log("books", f"corpus={corpus!r} limit={limit} offset={offset}")
     lib = _get_library()
@@ -516,7 +530,7 @@ def rtfm_books(
 
 # ── Write tools ───────────────────────────────────────────────────────────
 
-@mcp.tool()
+@_admin_tool()
 def rtfm_sync(
     path: str = ".",
     corpus: str = "default",
@@ -586,7 +600,7 @@ def rtfm_sync(
     return "\n".join(out)
 
 
-@mcp.tool()
+@_admin_tool()
 def rtfm_ingest(path: str, corpus: str = "default") -> str:
     """Ingest a single file into the library.
 
@@ -610,7 +624,7 @@ def rtfm_ingest(path: str, corpus: str = "default") -> str:
         return f"Error ingesting {path}: {exc}"
 
 
-@mcp.tool()
+@_admin_tool()
 def rtfm_tag_chunks(chunk_ids: str, tags: str) -> str:
     """Add tags to specific chunks.
 
@@ -628,7 +642,7 @@ def rtfm_tag_chunks(chunk_ids: str, tags: str) -> str:
     return f"Added tags {tag_list} to {count} chunks."
 
 
-@mcp.tool()
+@_admin_tool()
 def rtfm_remove(filepath: str) -> str:
     """Remove a file and its chunks from the library.
 
@@ -646,13 +660,11 @@ def rtfm_remove(filepath: str) -> str:
 
 @mcp.tool()
 def rtfm_discover(path: str = ".") -> str:
-    """Scan a project directory and return a structural map.
-
-    Fast (~1 second). Returns file types, languages, entry points,
-    and size breakdown — useful to understand a project before diving in.
+    """Scan a project directory and return a structural map (file types,
+    languages, entry points, size breakdown). ~1 second.
 
     Args:
-        path: Project root directory (default: current directory).
+        path: project root directory (default ".")
     """
     from rtfm.plugin.discover import discover, format_discover
 
@@ -672,15 +684,13 @@ def rtfm_context(
     scope: str | None = None,
     limit: int = 5,
 ) -> str:
-    """Get relevant context for a subject. Returns metadata only — no content.
-
-    Like a search engine results page: shows which sources are relevant.
-    Use rtfm_expand(source, subject) to read the actual content.
+    """Get sources relevant to a subject. Returns paths + line ranges,
+    no content. Use rtfm_expand to read.
 
     Args:
-        subject: Topic, concept, file path, or question to get context for.
-        scope: Optional corpus filter.
-        limit: Maximum unique sources to return (default 5).
+        subject: topic, concept, file path, or question
+        scope: corpus filter (optional)
+        limit: max sources (default 5)
     """
     t0 = time.time()
     lib = _get_library()
@@ -712,10 +722,9 @@ def rtfm_context(
     deduped = _deduplicate_by_source(results, limit)
     log("context", f"subject={subject!r} scope={scope!r} sources={len(deduped)}/{results.total_found} time={elapsed:.3f}s")
 
-    # Metadata-only output — no content, minimal tokens
-    lines = [f"Context for \"{subject}\" ({len(deduped)} sources):\n"]
-    for rank, entry in enumerate(deduped, 1):
-        lines.append(_format_source_line(entry, rank))
+    lines = [f"{len(deduped)} sources for \"{subject}\":\n"]
+    for entry in deduped:
+        lines.append(_format_source_line(entry))
 
     return "\n".join(lines)
 
@@ -730,16 +739,16 @@ def rtfm_expand(
     offset: int = 0,
     count: int = 1,
 ) -> str:
-    """Read content from an indexed source with line numbers.
+    """Read content of an indexed file with line numbers.
 
-    Use AFTER rtfm_search to read actual content. Like Read, but for indexed files.
+    Use after rtfm_search. Like Read, but for indexed files.
 
     Args:
-        source: Absolute file path (from search results).
-        target: Jump to a section name ("class Foo") or line ("L120").
-        query: Filter chunks by relevance within the file.
-        offset: Pagination offset for query results (default 0).
-        count: Number of chunks to return (default 1). Use 0 for all remaining.
+        source: absolute file path (from search results)
+        target: jump to section name ("class Foo") or "L120"
+        query: filter chunks by relevance within the file
+        offset: pagination offset (default 0)
+        count: chunks to return, 0 for all remaining (default 1)
     """
     t0 = time.time()
     lib = _get_library()
@@ -926,15 +935,12 @@ def rtfm_graph(
     direction: str = "both",
     relation_type: str | None = None,
 ) -> str:
-    """Show dependency graph neighbors of a file.
-
-    Shows which files import/link/include the source and which files
-    the source depends on. Useful for understanding code structure.
+    """Show graph neighbors of a file (imports, links, includes, citations).
 
     Args:
-        source: Book slug or absolute file path.
-        direction: "outgoing" (dependencies), "incoming" (dependents), or "both".
-        relation_type: Filter by type: "import", "link", "include", "cite" (optional).
+        source: book slug or absolute file path
+        direction: "outgoing" (deps), "incoming" (dependents), or "both"
+        relation_type: filter by "import" | "link" | "include" | "cite"
     """
     log("graph", f"source={source!r} direction={direction} type={relation_type!r}")
     lib = _get_library()
@@ -982,7 +988,7 @@ def rtfm_graph(
 
 # ── History tools ────────────────────────────────────────────────────────
 
-@mcp.tool()
+@_admin_tool()
 def rtfm_history(
     source: str,
     version: int | None = None,

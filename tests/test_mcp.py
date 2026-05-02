@@ -110,8 +110,8 @@ class TestMCPSearch:
     def test_search_returns_results(self, mcp_db):
         from rtfm.mcp import rtfm_search
         result = rtfm_search("consciousness self-inquiry")
-        assert "Found" in result
-        assert "score:" in result
+        assert "sources for" in result
+        assert "L" in result  # line markers (L42-58 format)
 
     def test_search_no_results(self, mcp_db):
         from rtfm.mcp import rtfm_search
@@ -242,8 +242,8 @@ class TestMCPContext:
         from rtfm.mcp import rtfm_context
         result = rtfm_context("consciousness meditation")
 
-        assert "Context for" in result
-        assert "score:" in result
+        assert "sources for" in result
+        assert "L" in result  # line markers (L42-58 format)
 
     def test_context_no_results(self, mcp_db):
         """rtfm_context with unknown topic returns fallback hint."""
@@ -258,9 +258,8 @@ class TestMCPContext:
         from rtfm.mcp import rtfm_context
         result = rtfm_context("consciousness", limit=1)
 
-        # Should have at most 1 source
-        assert "[1]" in result
-        assert "[2]" not in result
+        # Header reports source count
+        assert "1 sources for" in result or "0 sources for" in result or "No context" in result
 
     def test_context_lazy_ingest(self, mcp_db, tmp_path):
         """rtfm_context indexes an unindexed file on-the-fly."""
@@ -285,26 +284,26 @@ class TestProgressiveDisclosure:
         result = rtfm_search("programming functions", limit=5)
 
         assert "sources" in result
-        assert "score:" in result
+        assert "L" in result  # line markers
 
     def test_search_shows_also_line(self, multi_source_db):
-        """Sources with multiple relevant chunks show 'Also:' line."""
+        """Sources with multiple relevant chunks show '+' continuation line."""
         from rtfm.mcp import rtfm_search
         result = rtfm_search("programming functions", limit=5)
 
         # Each guide has 3 chunks; multiple should match "programming functions"
-        # so we expect "Also:" lines for at least some sources
-        assert "Also:" in result or "score:" in result
+        # so we expect "+" lines for at least some sources
+        assert "\n  + " in result or "L" in result
 
     def test_search_returns_different_sources(self, multi_source_db):
         """With 3 sources all about programming, we should get 3 unique sources."""
         from rtfm.mcp import rtfm_search
         result = rtfm_search("programming", limit=10)
 
-        # Count source entries [1], [2], [3]
-        assert "[1]" in result
-        assert "[2]" in result
-        assert "[3]" in result
+        # 3 unique source files appear in the output
+        assert "python_guide.md" in result
+        assert "javascript_guide.md" in result
+        assert "rust_guide.md" in result
 
     def test_context_deduplicates(self, multi_source_db):
         """rtfm_context also returns 1 chunk per source."""
@@ -312,7 +311,7 @@ class TestProgressiveDisclosure:
         result = rtfm_context("functions programming")
 
         assert "sources" in result
-        assert "score:" in result
+        assert "L" in result  # line markers
 
     def test_expand_first_chunk(self, multi_source_db):
         """rtfm_expand without target returns first chunk with line numbers."""
@@ -388,9 +387,7 @@ class TestProgressiveDisclosure:
         from rtfm.mcp import rtfm_search
         result = rtfm_search("programming", limit=2)
 
-        assert "[1]" in result
-        assert "[2]" in result
-        assert "[3]" not in result
+        assert "2 sources for" in result
 
 
 class TestMetadataOnlyOutput:
@@ -402,7 +399,7 @@ class TestMetadataOnlyOutput:
         result = rtfm_search("programming functions", limit=3)
 
         # Should have metadata
-        assert "score:" in result
+        assert "L" in result  # line markers
 
         # Should NOT have full content from the documents
         assert "first-class" not in result  # content from Python/JS guides
@@ -420,8 +417,8 @@ class TestMetadataOnlyOutput:
         from rtfm.mcp import rtfm_context
         result = rtfm_context("programming functions")
 
-        assert "Context for" in result
-        assert "score:" in result
+        assert "sources for" in result
+        assert "L" in result  # line markers
         # Should not have full content
         assert "first-class" not in result
 
@@ -734,11 +731,11 @@ class TestSearchExpandEditWorkflow:
 
         # Step 1: Search
         search_result = rtfm_search("programming functions")
-        assert "Found" in search_result
+        assert "sources for" in search_result
 
         # Extract file path from search result (first result line)
-        # Format: [1] /path/to/file > section — L<n>-<m> — score: 0.xx
-        path_match = re.search(r'\[1\]\s+(\S+\.md)', search_result)
+        # Format: /path/to/file L<n>-<m> (section)
+        path_match = re.search(r'^(/\S+\.md)', search_result, re.MULTILINE)
         assert path_match, f"Could not extract path from search result:\n{search_result}"
         filepath = path_match.group(1)
         assert os.path.isfile(filepath), f"Search returned non-existent path: {filepath}"

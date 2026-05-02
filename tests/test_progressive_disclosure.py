@@ -171,15 +171,14 @@ class TestMetadataCompleteness:
     """Verify search results contain all expected metadata fields."""
 
     def test_search_has_required_fields(self, multilang_db):
-        """Each search result must have: score, file path, section, header."""
+        """Each search result must have: file path, line marker, header."""
         from rtfm.mcp import rtfm_search
 
         result = rtfm_search("flags BP3", limit=5, search_type="fts")
 
-        assert "score:" in result, "Missing score"
+        assert "L" in result, "Missing line marker"
         assert "B4_Flags.md" in result, "Missing file path"
-        assert ">" in result, "Missing section indicator"
-        assert "Found" in result, "Missing header"
+        assert "sources for" in result, "Missing header"
 
     def test_en_articles_identifiable_by_path(self, multilang_db):
         """English articles must be identifiable by _en/ in their file path."""
@@ -214,13 +213,13 @@ class TestMetadataCompleteness:
         )
 
     def test_context_has_required_fields(self, multilang_db):
-        """rtfm_context should have score and path in results."""
+        """rtfm_context should have line markers and header."""
         from rtfm.mcp import rtfm_context
 
         result = rtfm_context("grammaires musicales BP3")
 
-        assert "score:" in result, "Missing score"
-        assert "Context for" in result or "No context" in result
+        assert "L" in result or "No context" in result, "Missing line marker"
+        assert "sources for" in result or "No context" in result
 
     def test_expand_header_has_path_and_section(self, multilang_db):
         """Expand should show file path and section in its header."""
@@ -358,8 +357,10 @@ class TestSearchQuality:
 
         result = rtfm_search("grammaires musicales", limit=5, search_type="fts")
 
-        # Should have at least 2 unique sources
-        assert "[2]" in result, (
+        # Header reports source count; broad query should yield ≥2
+        import re
+        m = re.match(r"(\d+) sources for", result)
+        assert m and int(m.group(1)) >= 2, (
             f"Broad query should return multiple sources.\nActual output:\n{result}"
         )
 
@@ -418,4 +419,4 @@ class TestRawVsMCPComparison:
 
         print(f"\n  FTS search time: {elapsed*1000:.0f}ms")
         assert elapsed < 2.0, f"FTS search took {elapsed:.2f}s (should be <2s)"
-        assert "Found" in result
+        assert "sources for" in result
