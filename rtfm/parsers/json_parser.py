@@ -10,8 +10,10 @@ import json
 from pathlib import Path
 from typing import Iterator, Optional
 
-from rtfm.core.models import Chunk
+from rtfm.core.models import Chunk, EdgeCandidate
 from rtfm.parsers.base import BaseParser, ParserRegistry
+from rtfm.parsers.mappings import MappingRegistry
+from rtfm.parsers.mappings.apply import apply_chunks, apply_edges
 
 TARGET_CHUNK_CHARS = 800
 MIN_CHUNK_CHARS = 100
@@ -158,6 +160,10 @@ class JSONParser(BaseParser):
         book_file = metadata.get("source_file", str(path))
 
         if isinstance(data, dict):
+            mapping = MappingRegistry.find_mapping(data)
+            if mapping is not None:
+                yield from apply_chunks(mapping, data, path, book_slug, book_title)
+                return
             blocks = _chunks_from_object(data)
         elif isinstance(data, list):
             blocks = _chunks_from_array(data)
@@ -187,6 +193,23 @@ class JSONParser(BaseParser):
                 content_hash=_content_hash(chunk_text),
                 metadata=metadata.get("extended", {}),
             )
+
+    def extract_edges(self, path: Path, metadata: Optional[dict] = None) -> list[EdgeCandidate]:
+        """If a mapping matches the document, return its declared edges."""
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            data = json.loads(text)
+        except (OSError, json.JSONDecodeError):
+            return []
+
+        if not isinstance(data, dict):
+            return []
+
+        mapping = MappingRegistry.find_mapping(data)
+        if mapping is None:
+            return []
+
+        return apply_edges(mapping, data, str(path))
 
     def extract_metadata(self, path: Path) -> dict:
         return {

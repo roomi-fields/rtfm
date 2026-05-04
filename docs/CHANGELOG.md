@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.0] — 2026-05-04
+
+### Added
+- **Generic JSON schema mappings** — declaratively map any JSON schema to chunks and edges via YAML files in `.rtfm/mappings/`, no Python required. Drop a mapping file (matched by `$schema` URL or by a discriminator like `type: foo`) and matching JSON files are extracted into typed chunks at sync time. The system replaces what would otherwise be N format-specific parsers (NotebookLM exports, Linear/Jira dumps, OpenAPI specs, structured logs…) with one extensibility point that lives outside RTFM. Mini-templating engine (`{{ dotted.path }}` only — no eval, no Jinja). 35 new tests, zero new dependencies. See [docs/json-mappings.md](json-mappings.md).
+- **NotebookLM integration recipe** — [docs/notebooklm-integration.md](notebooklm-integration.md) covers both the zero-friction markdown path and the typed JSON path, with a ready-to-copy `nblm-answer.yaml` mapping for `notebooklm-mcp` batch outputs.
+
+### Changed
+- `JSONParser` consults `MappingRegistry.find_mapping(data)` before falling back to the generic structural parser. Plain JSON files are unaffected.
+- `Library.__init__` autoloads mappings from `<db_dir>/mappings/*.{yaml,yml,json}`.
+
 ## [0.6.0] — 2026-05-04
 
 ### Added

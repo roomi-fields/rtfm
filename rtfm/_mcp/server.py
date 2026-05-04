@@ -24,7 +24,7 @@ PROTOCOL_VERSION = "2025-06-18"
 class FastMCP:
     """Minimal drop-in replacement for the FastMCP API used in rtfm/mcp.py."""
 
-    def __init__(self, name: str, version: str = "0.6.0") -> None:
+    def __init__(self, name: str, version: str = "0.7.0") -> None:
         self._name = name
         self._version = version
         self._tools: dict[str, dict[str, Any]] = {}

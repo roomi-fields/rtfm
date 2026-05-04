@@ -4,7 +4,7 @@
 
 The open retrieval layer for AI coding agents. Indexes entire projects (code, docs, legal, research, data) and serves surgical context via MCP.
 
-Key differentiator: extensible parser architecture. Anyone can add support for any file format in ~50 lines of Python. Ships with 15 parsers, but the community can add any format.
+Key differentiator: extensible parser architecture. Anyone can add support for any file format in ~50 lines of Python — or, for JSON-based formats, ~30 lines of declarative YAML via the JSON schema mappings system (`.rtfm/mappings/`). Ships with 15 parsers, the community can add any format.
 
 Not a task manager — a knowledge layer that complements GSD, Taskmaster, Claude Flow, and any workflow tool.
 
@@ -40,7 +40,8 @@ rtfm/
 │   ├── jupyter.py      # Jupyter .ipynb (cells grouped by heading)
 │   ├── csv_parser.py   # CSV/TSV (overview + sample with type inference)
 │   ├── xlsx.py         # XLSX (per-sheet schema + sample, openpyxl)
-│   └── plaintext.py    # Catch-all plain text
+│   ├── plaintext.py    # Catch-all plain text
+│   └── mappings/       # Generic JSON schema mappings (.rtfm/mappings/*.yaml)
 ├── plugin/
 │   ├── claude_md.py    # CLAUDE.md injection for target projects
 │   ├── discover.py     # Fast project structure scan

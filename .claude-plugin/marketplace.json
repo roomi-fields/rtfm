@@ -12,7 +12,7 @@
       "name": "rtfm",
       "source": "./",
       "description": "Indexes your project (code, docs, PDFs, legal, research) into a local SQLite FTS5 knowledge base. Serves surgical context to Claude via MCP. Auto-syncs on every prompt.",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "homepage": "https://github.com/roomi-fields/rtfm",
       "license": "MIT",
       "keywords": [

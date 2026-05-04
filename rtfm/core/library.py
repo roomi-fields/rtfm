@@ -215,6 +215,13 @@ class Library:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
+        self._load_mappings()
+
+    def _load_mappings(self):
+        """Load user-defined JSON schema mappings from <db_dir>/mappings/."""
+        from rtfm.parsers.mappings import load_mappings_from_dir
+        mappings_dir = self.db_path.parent / "mappings"
+        load_mappings_from_dir(mappings_dir)
 
     def _get_conn(self) -> sqlite3.Connection:
         """Get database connection with proper settings."""

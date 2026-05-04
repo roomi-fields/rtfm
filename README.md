@@ -299,6 +299,8 @@ class FHIRParser(BaseParser):
 
 Drop it in your project, restart Claude Code, your medical AI agent now understands FHIR records.
 
+Or, for any JSON-based format, skip the Python entirely — declare a [JSON schema mapping](docs/json-mappings.md) in `.rtfm/mappings/*.yaml`. Same extensibility, no code, ~30 lines of YAML.
+
 ### Built-in parsers
 
 | Parser         | Extensions                      | Strategy                                              |
