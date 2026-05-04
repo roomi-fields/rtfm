@@ -1,3 +1,10 @@
+---
+title: RTFM Changelog
+description: >-
+  Release notes for RTFM (rtfm-ai) — every version since 0.1.0 with
+  added features, bug fixes, and breaking changes.
+---
+
 # Changelog
 
 ## [0.7.0] — 2026-05-04

@@ -1,3 +1,11 @@
+---
+title: Why RTFM — Positioning in the AI Tooling Landscape
+description: >-
+  How RTFM compares to Augment Context Engine, Sourcegraph, classical
+  vector RAG, and Karpathy's LLM Wiki pattern. The open, multi-domain,
+  local alternative for AI agent retrieval.
+---
+
 # Positioning — RTFM in the AI Tooling Landscape
 
 ## How RTFM came to exist

@@ -1,3 +1,11 @@
+---
+title: RTFM Parsers Guide — 15 built-in formats and how to add your own
+description: >-
+  Complete reference for RTFM's 15 built-in parsers (Markdown, Python AST,
+  LaTeX, YAML, JSON, TOML, PDF, XML, HTML, SQLite, Jupyter, CSV, XLSX,
+  Shell, plain text). How to write a custom parser in ~50 lines.
+---
+
 # Parsers Guide
 
 ## How Parsers Work

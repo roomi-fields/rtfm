@@ -1,3 +1,11 @@
+---
+title: RAG Fundamentals — the 6 axes every retrieval system chooses on
+description: >-
+  The six design decisions hidden inside "RAG" — chunking, indexing,
+  ranking, expansion, generation, eval — and how RTFM's choices differ
+  from typical vector-RAG stacks.
+---
+
 # RAG Fundamentals — the 6 axes that every retrieval system makes choices on
 
 "RAG" (Retrieval-Augmented Generation) is a suitcase word. It hides six very different design decisions, each with clear trade-offs. Most "RAG tools" get some of them right and hand-wave the rest — which is why one agent outperforms another on the same corpus.

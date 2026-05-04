@@ -1,3 +1,11 @@
+---
+title: RTFM × Obsidian — Vault Integration Guide
+description: >-
+  Karpathy's LLM Wiki pattern, scaled past 500 notes. RTFM detects
+  Obsidian vaults, resolves [[wikilinks]] as graph edges, generates
+  _rtfm/ navigation files (Dataview-queryable, Mermaid graphs).
+---
+
 # RTFM × Obsidian — Vault Integration Guide
 
 ## The Problem

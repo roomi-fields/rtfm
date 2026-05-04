@@ -1,3 +1,12 @@
+---
+title: RTFM × NotebookLM — Break the 50 queries/day cap
+description: >-
+  Pair RTFM with notebooklm-mcp to index NotebookLM batch answers locally.
+  Two integration paths: zero-config markdown, or typed JSON sidecar via
+  declarative YAML mapping. Citations queryable, edges between answers
+  and sources.
+---
+
 # RTFM × NotebookLM
 
 NotebookLM caps you at 50 queries/day per notebook. RTFM removes that ceiling

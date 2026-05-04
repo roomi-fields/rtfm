@@ -1,3 +1,11 @@
+---
+title: JSON Schema Mappings — Index any JSON format declaratively
+description: >-
+  Map any JSON schema to typed RTFM chunks via declarative YAML files in
+  .rtfm/mappings/. Replaces format-specific Python parsers. Used for
+  NotebookLM exports, Linear, OpenAPI specs, structured logs.
+---
+
 # JSON Schema Mappings
 
 RTFM lets you declaratively map *any* JSON schema to chunks and edges via

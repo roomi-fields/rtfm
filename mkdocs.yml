@@ -1,0 +1,143 @@
+site_name: RTFM
+site_url: https://roomi-fields.github.io/rtfm/
+site_description: >-
+  RTFM — The open retrieval layer for AI coding agents. Index code, docs,
+  legal text, research, and data into one SQLite knowledge base. Serve
+  surgical context to Claude Code, Cursor, Codex via MCP. Free and open source.
+site_author: roomi-fields
+repo_name: roomi-fields/rtfm
+repo_url: https://github.com/roomi-fields/rtfm
+edit_uri: edit/main/docs/
+copyright: MIT — built by roomi-fields. Source on GitHub.
+
+docs_dir: docs
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - content.tabs.link
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/roomi-fields/rtfm
+      name: RTFM on GitHub
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/rtfm-ai/
+      name: RTFM on PyPI
+  generator: false
+  analytics:
+    feedback:
+      title: Was this page helpful?
+      ratings:
+        - icon: material/emoticon-happy-outline
+          name: This page was helpful
+          data: 1
+          note: Thanks!
+        - icon: material/emoticon-sad-outline
+          name: This page could be improved
+          data: 0
+          note: >-
+            Tell us how — open an
+            <a href="https://github.com/roomi-fields/rtfm/issues/new" target="_blank" rel="noopener">issue</a>.
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - toc:
+      permalink: true
+      title: On this page
+
+plugins:
+  - search:
+      lang: en
+  - social:
+      cards_layout_options:
+        background_color: "#000000"
+        color: "#FFFFFF"
+  - redirects:
+      redirect_maps: {}
+
+exclude_docs: |
+  COMMUNICATION_STATUS.md
+  COMMUNICATION_STATUS_fr.md
+  PUBLISH_MCP_DIRECTORIES.md
+  PUBLISH_MCP_DIRECTORIES_fr.md
+  plugin-test-procedure.md
+  benchmarks/ab_test_b10_analysis_fr.md
+  benchmarks/benchmark_paper_fr.md
+
+nav:
+  - Home: index.md
+  - Why RTFM: positioning.md
+  - How it works:
+      - Architecture: architecture.md
+      - Parsers: parsers.md
+      - JSON Mappings: json-mappings.md
+  - Integrations:
+      - NotebookLM: notebooklm-integration.md
+      - Obsidian Vault: obsidian-vault-guide.md
+  - Comparisons:
+      - vs Vector RAG: comparisons/vs-vector-rag.md
+  - Background: rag-fundamentals.md
+  - Benchmarks:
+      - A/B test (B10 article): benchmarks/ab_test_b10_analysis.md
+      - FeatureBench: benchmarks/featurebench.md
+      - Paper plan: benchmarks/benchmark_paper.md
+      - Results summary: benchmarks/benchmark_results.md
+  - Changelog: CHANGELOG.md

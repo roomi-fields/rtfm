@@ -1,3 +1,11 @@
+---
+title: RTFM Architecture — SQLite, FTS5, parsers, edges, sync
+description: >-
+  Internal architecture of the RTFM open retrieval layer. Library class,
+  SQLite + FTS5 schema, parser registry, incremental sync with hash
+  tracking, edges table, optional FastEmbed semantic layer.
+---
+
 # Architecture
 
 ## Pipeline
