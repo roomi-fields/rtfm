@@ -251,7 +251,7 @@ RTFM works anywhere your project isn't just code:
 - **Knowledge graph** — wikilinks + Python imports resolved as graph edges, hub detection, centrality ranking
 
 ### Multi-format indexing
-- **10 parsers built-in** — Markdown, Python (AST), LaTeX, YAML, JSON, Shell, PDF, XML, HTML, plain text
+- **15 parsers built-in** — Markdown, Python (AST), LaTeX, YAML, JSON, TOML, Shell, PDF, XML, HTML, SQLite, Jupyter, CSV/TSV, XLSX, plain text
 - **Extensible** — add any format in ~50 lines of Python
 - **Auto-sync hooks** — index stays fresh every prompt, zero manual work
 - **Incremental** — only re-indexes what changed
@@ -301,18 +301,23 @@ Drop it in your project, restart Claude Code, your medical AI agent now understa
 
 ### Built-in parsers
 
-| Parser         | Extensions                      | Strategy                                      |
-| -------------- | ------------------------------- | --------------------------------------------- |
-| Markdown       | `.md`                           | Split by headers, YAML frontmatter extraction |
-| Python         | `.py`                           | AST-based: each class/function = 1 chunk      |
-| LaTeX          | `.tex`                          | Split by `\section`, `\chapter`, etc.         |
-| YAML           | `.yaml`, `.yml`                 | Split by top-level keys                       |
-| JSON           | `.json`                         | Split by top-level keys or array elements     |
-| Shell          | `.sh`, `.bash`, `.zsh`          | Function-aware chunking                       |
-| PDF            | `.pdf`                          | Page-based (`pip install rtfm-ai[pdf]`)       |
-| Legifrance XML | `.xml`                          | French legal codes (LEGI format)              |
-| BOFiP HTML     | `.html`                         | French tax doctrine                           |
-| Plain text     | `.js`, `.ts`, `.rs`, `.go`, ... | Line-boundary chunks (~500 chars)             |
+| Parser         | Extensions                      | Strategy                                              |
+| -------------- | ------------------------------- | ----------------------------------------------------- |
+| Markdown       | `.md`                           | Split by headers, YAML frontmatter extraction         |
+| Python         | `.py`                           | AST-based: each class/function = 1 chunk              |
+| LaTeX          | `.tex`                          | Split by `\section`, `\chapter`, etc.                 |
+| YAML           | `.yaml`, `.yml`                 | Split by top-level keys                               |
+| JSON           | `.json`                         | Split by top-level keys or array elements             |
+| TOML           | `.toml`                         | Top-level tables; emits `depends_on` edges (PEP 621, Cargo, Poetry) |
+| Shell          | `.sh`, `.bash`, `.zsh`          | Function-aware chunking                               |
+| PDF            | `.pdf`                          | Page-based (`pip install rtfm-ai[pdf]`)               |
+| Legifrance XML | `.xml`                          | French legal codes (LEGI format)                      |
+| BOFiP HTML     | `.html`                         | French tax doctrine                                   |
+| SQLite         | `.sqlite`, `.sqlite3`, `.db`    | Schema + sample rows per table; FK edges (read-only)  |
+| Jupyter        | `.ipynb`                        | Group cells by markdown heading; outputs dropped      |
+| CSV / TSV      | `.csv`, `.tsv`                  | Header + sample rows + lightweight type inference     |
+| XLSX           | `.xlsx`                         | Per-sheet schema + sample (`pip install rtfm-ai[xlsx]`) |
+| Plain text     | `.js`, `.ts`, `.rs`, `.go`, ... | Line-boundary chunks (~500 chars)                     |
 
 ---
 

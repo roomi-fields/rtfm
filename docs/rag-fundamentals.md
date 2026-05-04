@@ -239,7 +239,7 @@ FeatureBench, RepoQA, SWE-QA, LocAgent, and BRIGHT are all reasonable starting p
 
 | Axis         | RTFM's choice                                         |
 | ------------ | ----------------------------------------------------- |
-| Indexation   | Structural (10 parsers, AST-aware)                    |
+| Indexation   | Structural (15 parsers, AST-aware)                    |
 | Retrieval    | FTS5 default, optional embeddings, hybrid, graph      |
 | Augmentation | Progressive disclosure (metadata → expand on request) |
 | Integration  | MCP + `CLAUDE.md` injection                           |

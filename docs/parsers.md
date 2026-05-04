@@ -51,6 +51,12 @@ class MyParser(BaseParser):
 - **Extensions**: `.json`
 - **Strategy**: Top-level keys or array elements
 
+### TOML (`rtfm/parsers/toml_parser.py`)
+
+- **Extensions**: `.toml`
+- **Strategy**: One chunk per top-level table; uses stdlib `tomllib` (Python 3.11+) with `tomli` fallback
+- **Edges**: Dependencies → `EdgeCandidate(relation_type="depends_on")` for `pyproject.toml` (PEP 621, Poetry, build-system) and `Cargo.toml`
+
 ### Shell (`rtfm/parsers/shell.py`)
 
 - **Extensions**: `.sh`, `.bash`, `.zsh`
@@ -71,9 +77,32 @@ class MyParser(BaseParser):
 - **Extensions**: `.html`
 - **Strategy**: French tax doctrine paragraphs
 
+### SQLite (`rtfm/parsers/sqlite_parser.py`)
+
+- **Extensions**: `.sqlite`, `.sqlite3`, `.db`
+- **Strategy**: Read-only URI connection. Emits an overview chunk (tables, views, indexes, triggers + row counts), then per-table schema + sample chunks. Views and triggers as separate chunks. FTS5 shadow tables filtered.
+- **Edges**: Foreign keys → `EdgeCandidate(relation_type="fk")`
+- **`.db` guard**: validated by SQLite magic bytes (`SQLite format 3\x00`) to avoid false positives on unrelated `.db` files
+
+### Jupyter (`rtfm/parsers/jupyter.py`)
+
+- **Extensions**: `.ipynb`
+- **Strategy**: Walk cells in order, group by markdown heading. Each section = one chunk containing markdown narration + following code cells (fenced as ```python). Cell outputs are dropped.
+
+### CSV / TSV (`rtfm/parsers/csv_parser.py`)
+
+- **Extensions**: `.csv`, `.tsv`
+- **Strategy**: Sniff dialect (delimiter), emit overview chunk (column names + lightweight type inference: int/float/bool/text + row count) and sample chunk (first N rows formatted as a table). Big files are not fully read into memory.
+
+### XLSX (`rtfm/parsers/xlsx.py`)
+
+- **Extensions**: `.xlsx`
+- **Strategy**: Per-workbook overview + per-sheet schema + per-sheet sample. Uses `read_only=True` so massive workbooks don't load fully in memory.
+- **Optional dependency**: `pip install rtfm-ai[xlsx]` (openpyxl)
+
 ### Plain text (`rtfm/parsers/plaintext.py`)
 
-- **Extensions**: `.js`, `.ts`, `.rs`, `.go`, `.java`, `.c`, `.cpp`, `.rb`, `.php`, `.css`, `.toml`, `.cfg`, `.txt`
+- **Extensions**: `.js`, `.ts`, `.rs`, `.go`, `.java`, `.c`, `.cpp`, `.rb`, `.php`, `.css`, `.cfg`, `.txt` (also acts as fallback for `.toml` when `tomllib`/`tomli` is unavailable)
 - **Strategy**: Line-boundary chunks (~500 chars)
 
 ## Writing a Custom Parser

@@ -93,7 +93,7 @@ CLAUDE.md   ← Schema: references rtfm_search for retrieval
 | Search | Read index → scan pages | FTS5 + semantic + hybrid |
 | Token cost | Grows with wiki size | Constant (~300 tokens per search) |
 | Wikilinks | Written by LLM | Resolved and indexed as graph edges |
-| Multi-format | Markdown only | 10 parsers (MD, Python, PDF, LaTeX, ...) |
+| Multi-format | Markdown only | 15 parsers (MD, Python, PDF, LaTeX, SQLite, Jupyter, CSV, XLSX, ...) |
 | Metrics | None | Backlink counts, hub detection, orphan detection |
 
 ## Topologies: One Vault or Many?

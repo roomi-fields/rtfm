@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0] — 2026-05-04
+
+### Added
+- **SQLite parser** (`.sqlite`, `.sqlite3`, `.db`) — read-only URI connection. Emits an overview chunk (tables, views, indexes, triggers + row counts), then per-table schema + sample chunks. Foreign keys extracted as `EdgeCandidate(relation_type="fk")`. FTS5 shadow tables filtered. `.db` extension validated by SQLite magic bytes to avoid false positives.
+- **Jupyter parser** (`.ipynb`) — groups cells by markdown heading, code cells fenced as ```python, outputs dropped (often huge / low-signal). Zero deps.
+- **TOML parser** (`.toml`) — one chunk per top-level table; emits `depends_on` edges for `pyproject.toml` (PEP 621, Poetry, build-system) and `Cargo.toml`. Uses stdlib `tomllib` (3.11+) with `tomli` fallback; gracefully unregistered if neither importable.
+- **CSV/TSV parser** (`.csv`, `.tsv`) — dialect sniffing (delimiter), overview chunk with column types via lightweight inference (int/float/bool/text), sample chunk (first N rows aligned). Streams rows so big files don't blow memory.
+- **XLSX parser** (`.xlsx`) — per-workbook overview + per-sheet schema + per-sheet sample. Optional dependency: `pip install rtfm-ai[xlsx]` (openpyxl). Uses `read_only=True` for huge workbooks.
+
+### Changed
+- Parser count: **10 → 15**.
+- `pyproject.toml`: new optional extras `[xlsx]` (openpyxl).
+
 ## [0.3.1] — 2026-03-01
 
 ### Changed

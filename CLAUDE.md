@@ -4,7 +4,7 @@
 
 The open retrieval layer for AI coding agents. Indexes entire projects (code, docs, legal, research, data) and serves surgical context via MCP.
 
-Key differentiator: extensible parser architecture. Anyone can add support for any file format in ~50 lines of Python. Ships with 10 parsers, but the community can add any format.
+Key differentiator: extensible parser architecture. Anyone can add support for any file format in ~50 lines of Python. Ships with 15 parsers, but the community can add any format.
 
 Not a task manager — a knowledge layer that complements GSD, Taskmaster, Claude Flow, and any workflow tool.
 
@@ -31,10 +31,15 @@ rtfm/
 │   ├── latex.py        # LaTeX (section-based)
 │   ├── yaml_parser.py  # YAML (top-level keys)
 │   ├── json_parser.py  # JSON (keys/arrays)
+│   ├── toml_parser.py  # TOML (top-level tables; depends_on edges)
 │   ├── shell.py        # Shell (function-aware)
 │   ├── pdf.py          # PDF (pdftext/marker)
 │   ├── xml_legifrance.py  # Legifrance XML
 │   ├── html_bofip.py   # BOFiP HTML
+│   ├── sqlite_parser.py   # SQLite DB (schema + samples; FK edges)
+│   ├── jupyter.py      # Jupyter .ipynb (cells grouped by heading)
+│   ├── csv_parser.py   # CSV/TSV (overview + sample with type inference)
+│   ├── xlsx.py         # XLSX (per-sheet schema + sample, openpyxl)
 │   └── plaintext.py    # Catch-all plain text
 ├── plugin/
 │   ├── claude_md.py    # CLAUDE.md injection for target projects
@@ -54,7 +59,7 @@ rtfm/
 - `rtfm/mcp.py` — MCP server (search, context, discover, sync tools + background embeddings)
 - `rtfm/plugin/install.py` — `rtfm init` orchestration
 - `rtfm/plugin/discover.py` — Fast project structure scan (~1s)
-- `rtfm/parsers/` — 10 document parsers (markdown, python AST, latex, yaml, json, shell, pdf, xml, html, plaintext)
+- `rtfm/parsers/` — 15 document parsers (markdown, python AST, latex, yaml, json, toml, shell, pdf, xml, html, sqlite, jupyter, csv/tsv, xlsx, plaintext)
 - `rtfm/cli.py` — CLI interface
 
 ## Common Dev Commands

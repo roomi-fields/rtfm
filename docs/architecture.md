@@ -38,7 +38,7 @@ Uses `paraphrase-multilingual-MiniLM-L12-v2` via FastEmbed (ONNX, no GPU). Cosin
 
 See [[docs/parsers|Parsers Guide]].
 
-10 built-in parsers, extensible via `@ParserRegistry.register`. Each parser implements `parse()` → `Iterator[Chunk]` and optionally `extract_edges()` → `list[EdgeCandidate]`.
+15 built-in parsers, extensible via `@ParserRegistry.register`. Each parser implements `parse()` → `Iterator[Chunk]` and optionally `extract_edges()` → `list[EdgeCandidate]`.
 
 ## Plugin System
 
