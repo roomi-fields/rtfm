@@ -13,6 +13,35 @@
 - Parser count: **10 → 15**.
 - `pyproject.toml`: new optional extras `[xlsx]` (openpyxl).
 
+## [0.5.0] — 2026-04-16
+
+### Added — native Claude Code plugin
+- **`/plugin marketplace add roomi-fields/rtfm` + `/plugin install rtfm@rtfm`** — zero pip required on user side.
+- **Pure-Python MCP server** (`rtfm/_mcp/`, ~300 LOC) — drops the upstream `mcp` SDK, no `pydantic`, no `cryptography`, no native binaries. JSON-RPC 2.0 over stdio, schemas inferred from type hints + docstrings.
+- **Cross-platform launchers** (`bin/`) — POSIX `sh` + Windows `.cmd`, auto-resolve `python3`/`python`/`py`, dodge the Microsoft Store `python3` stub.
+- **Plugin hooks** — `SessionStart` bootstraps the project, `UserPromptSubmit` throttled sync (30s), `Stop` final sync.
+- **Skills** — `/rtfm:search`, `/rtfm:expand`, `/rtfm:install-embeddings` (FastEmbed ONNX ~85 MB), `/rtfm:install-pdf` (~50 MB), `/rtfm:install-pdf-full` (CPU-only torch + marker-pdf, ~1.5 GB, isolated venv in `$CLAUDE_PLUGIN_DATA`, no PEP 668 conflicts).
+
+### Fixed
+- **Short files no longer silently skipped** — single-header markdown, title-only LaTeX sections, Python modules without classes, short legal articles. Affects `markdown`, `pdf`, `python`, `latex`, `xml_legifrance`, `html_bofip`.
+- **Memory history preserved on file deletion** — `sync(retain_history=None)` no longer cascades deletes through `books.id → file_versions.book_id`. Restores the "unlimited version history" promise of the memory hook. Default (`retain_history=50`) unchanged.
+
+### Changed
+- Dropped `mcp>=1.0.0` dependency. Only `pyyaml` remains.
+- README: plugin install promoted to primary path; `pip install rtfm-ai` kept as fallback for Cursor, Codex, Claude Desktop chat, other MCP clients.
+
+## [0.4.0] — 2026-04-09
+
+### Added — Obsidian Vault Integration
+- **`rtfm vault` command** — detects Obsidian vaults (`.obsidian/`), auto-proposes corpus mappings from folder structure, generates `_rtfm/` navigation files (Obsidian-native: wikilinks, YAML frontmatter Dataview-queryable, callouts, Mermaid).
+- **Wikilink resolution** — `[[wikilinks]]` resolved to actual files following Obsidian rules (basename match case-insensitive, path-suffix `[[folder/Note]]`, disambiguation by path distance). Resolved links become graph edges → powers hub detection + centrality ranking.
+- **`_rtfm/` auto-generated navigation** — `index.md` (corpus list, top connected docs), `graph.md` (hubs, orphans, broken links, Mermaid), `recent.md` (auto-updates on sync), `corpus/*.md` (per-corpus indexes).
+- **Karpathy 3-layer repo restructure** — `raw/` (source), `docs/` (compiled wiki), `CLAUDE.md` (schema).
+- **Docs**: Obsidian Vault Guide, Architecture, Parsers Guide, Positioning.
+
+### Stats
+- 357 tests pass, 0 regressions; 32 new tests (wikilink + vault integration); 7,100+ LOC added.
+
 ## [0.3.1] — 2026-03-01
 
 ### Changed
