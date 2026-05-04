@@ -1,0 +1,72 @@
+name: Release to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release (e.g. v0.7.0)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install with dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run unit tests (skip network)
+        run: pytest -q -m 'not network'
+
+  build-and-publish:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/rtfm-ai/
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Verify package metadata
+        run: |
+          twine check dist/*
+          ls -la dist/
+
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: twine upload --non-interactive dist/*
+
+      - name: Upload artifacts (for inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.ref_name }}
+          path: dist/
+          retention-days: 30
