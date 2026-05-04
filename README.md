@@ -184,6 +184,21 @@ The LLM still writes your wiki. RTFM handles the retrieval that `index.md` can't
 
 ---
 
+## NotebookLM integration
+
+RTFM pairs naturally with [`notebooklm-mcp`](https://github.com/roomi-fields/notebooklm-mcp). NotebookLM caps you at 50 queries/day per notebook; RTFM removes that ceiling by indexing answers locally — ask once, retrieve forever, offline, in milliseconds.
+
+`notebooklm-mcp`'s `/batch-to-vault` endpoint writes citation-backed Q&A as `{slug}.md` (markdown with frontmatter) plus `{slug}.json` (structured `nblm-answer-v1` sidecar). Both are guaranteed to coexist. Two integration paths, both ship today:
+
+- **Path A — Markdown (zero config)**: drop the vault into RTFM and `rtfm sync`. The default markdown parser slices each answer into question / answer / per-citation chunks automatically. No mapping, no schema, no code.
+- **Path B — JSON sidecar (typed metadata)**: drop a [`nblm-answer.yaml` mapping](docs/notebooklm-integration.md#path-b--json-sidecar-typed-metadata--edges) into `.rtfm/mappings/`. Each `.json` answer file produces typed chunks with `notebook_id`, `source_name`, `citation_marker` queryable via SQL, plus `cites` edge candidates between answers and sources.
+
+Use Path A unless you specifically need to filter or graph by structured citation fields.
+
+**[Full NotebookLM recipe →](docs/notebooklm-integration.md)**
+
+---
+
 ## What I measured
 
 I ran two kinds of benchmarks. The honest picture is nuanced — retrieval helps most on tasks that are actually solvable and where the agent is spending time *looking for things*.
@@ -299,7 +314,16 @@ class FHIRParser(BaseParser):
 
 Drop it in your project, restart Claude Code, your medical AI agent now understands FHIR records.
 
-Or, for any JSON-based format, skip the Python entirely — declare a [JSON schema mapping](docs/json-mappings.md) in `.rtfm/mappings/*.yaml`. Same extensibility, no code, ~30 lines of YAML.
+### Two levels of JSON integration
+
+For JSON-based formats specifically, RTFM offers a second extensibility path that doesn't need any Python:
+
+| Level | What you do | What you get |
+| --- | --- | --- |
+| **1. Generic** | Nothing. Just index the file. | Each top-level key becomes a chunk. Full-text search works on values. |
+| **2. Mapped** | Drop a YAML mapping in `.rtfm/mappings/` (~30 lines). | Typed chunks with declared metadata, custom titles, foreach extraction over arrays, edge candidates. The producing project (NotebookLM, Linear, Notion, OpenAPI…) ships the mapping; RTFM stays generic. |
+
+See [JSON schema mappings](docs/json-mappings.md) for the full reference, and [RTFM × NotebookLM](docs/notebooklm-integration.md) for a concrete recipe.
 
 ### Built-in parsers
 

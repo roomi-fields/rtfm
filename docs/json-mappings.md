@@ -166,8 +166,9 @@ under the sun.
 
 ## Examples to look at
 
-- **Start here**: NotebookLM `answer.json` (covered above) — questions +
-  citations, classic structured Q&A.
+- **Start here**: NotebookLM `answer.json` — see the full
+  [RTFM × NotebookLM recipe](notebooklm-integration.md) for the
+  ready-to-copy mapping and the markdown-only alternative path.
 - **OpenAPI specs**: one chunk per `paths.<route>` operation, edges for
   `$ref`s.
 - **Linear/Jira exports**: one chunk per issue, edges for `parent_id`,
