@@ -1,10 +1,13 @@
 """Tests for embeddings and semantic search."""
 
 import pytest
-import numpy as np
 
-# Skip all tests if fastembed not installed
+# Skip all tests if either dependency is missing — both come from the
+# [embeddings] extra and aren't installed in core/dev test environments.
+pytest.importorskip("numpy")
 pytest.importorskip("fastembed")
+
+import numpy as np  # noqa: E402  — gated by importorskip above
 
 
 class TestEmbeddingsModule:
