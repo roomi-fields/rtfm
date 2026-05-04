@@ -11,6 +11,7 @@ from rtfm.parsers import latex
 from rtfm.parsers import yaml_parser
 from rtfm.parsers import json_parser
 from rtfm.parsers import shell
+from rtfm.parsers import sqlite_parser
 from rtfm.parsers import plaintext  # catch-all — must be last
 
 # PDF parser (optional dependency)

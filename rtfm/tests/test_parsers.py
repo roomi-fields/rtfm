@@ -14,6 +14,7 @@ from rtfm.parsers.html_bofip import (
     lien_bofip,
     HTMLTextExtractor,
 )
+from rtfm.parsers.sqlite_parser import SQLiteParser
 
 
 class TestParserRegistry:
@@ -41,6 +42,102 @@ class TestParserRegistry:
         """Test getting parser for unknown extension."""
         parser = ParserRegistry.get_parser(Path("test.xyz"))
         assert parser is None
+
+    def test_get_parser_for_sqlite(self):
+        """Test getting parser for SQLite extensions."""
+        for ext in (".sqlite", ".sqlite3"):
+            parser = ParserRegistry.get_parser(Path(f"foo{ext}"))
+            assert isinstance(parser, SQLiteParser), f"failed for {ext}"
+
+
+class TestSQLiteParser:
+    """Tests for SQLite parser."""
+
+    @pytest.fixture
+    def sample_db(self, tmp_path):
+        import sqlite3
+
+        db_path = tmp_path / "sample.sqlite"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE authors (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                author_id INTEGER,
+                FOREIGN KEY (author_id) REFERENCES authors(id)
+            );
+            CREATE VIEW recent_books AS SELECT * FROM books ORDER BY id DESC;
+            INSERT INTO authors (id, name) VALUES (1, 'Borges'), (2, 'Calvino');
+            INSERT INTO books (id, title, author_id) VALUES
+                (1, 'Ficciones', 1),
+                (2, 'Invisible Cities', 2);
+            """
+        )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_parse_produces_chunks(self, sample_db):
+        parser = SQLiteParser()
+        chunks = list(parser.parse(sample_db))
+        # overview + (schema + sample) × 2 tables + 1 view = 6
+        assert len(chunks) == 6
+
+        titles = [c.chapter_title for c in chunks]
+        assert "overview" in titles
+        assert "table: authors (schema)" in titles
+        assert "table: books (sample)" in titles
+        assert "view: recent_books" in titles
+
+    def test_overview_lists_tables_with_counts(self, sample_db):
+        parser = SQLiteParser()
+        overview = next(c for c in parser.parse(sample_db) if c.chapter_title == "overview")
+        assert "authors (2 rows)" in overview.content
+        assert "books (2 rows)" in overview.content
+
+    def test_schema_chunk_includes_create_and_columns(self, sample_db):
+        parser = SQLiteParser()
+        chunk = next(c for c in parser.parse(sample_db) if c.chapter_title == "table: books (schema)")
+        assert "CREATE TABLE books" in chunk.content
+        assert "`title`" in chunk.content
+        assert "`author_id`" in chunk.content
+        assert "Foreign Keys" in chunk.content
+        assert "authors" in chunk.content
+
+    def test_sample_rows_rendered(self, sample_db):
+        parser = SQLiteParser()
+        chunk = next(c for c in parser.parse(sample_db) if c.chapter_title == "table: books (sample)")
+        assert "Ficciones" in chunk.content
+        assert "Invisible Cities" in chunk.content
+
+    def test_extract_edges_returns_foreign_keys(self, sample_db):
+        parser = SQLiteParser()
+        edges = parser.extract_edges(sample_db)
+        assert len(edges) == 1
+        assert edges[0].relation_type == "fk"
+        assert edges[0].target_ref == "authors"
+        assert "books.author_id" in edges[0].source_detail
+
+    def test_db_extension_requires_magic_bytes(self, tmp_path):
+        """A `.db` file that is not actually SQLite should be skipped."""
+        fake = tmp_path / "fake.db"
+        fake.write_text("this is not a sqlite db at all")
+        parser = SQLiteParser()
+        assert parser.can_parse(fake) is False
+        assert list(parser.parse(fake)) == []
+        assert parser.extract_edges(fake) == []
+
+    def test_corrupt_db_handled_gracefully(self, tmp_path):
+        bad = tmp_path / "bad.sqlite"
+        bad.write_bytes(b"\x00" * 100)  # not a valid SQLite file
+        parser = SQLiteParser()
+        # Doesn't raise — just yields nothing
+        assert list(parser.parse(bad)) == []
 
 
 class TestXMLLegiFranceParser:
