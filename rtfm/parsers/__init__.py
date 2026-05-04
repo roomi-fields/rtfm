@@ -12,12 +12,26 @@ from rtfm.parsers import yaml_parser
 from rtfm.parsers import json_parser
 from rtfm.parsers import shell
 from rtfm.parsers import sqlite_parser
+from rtfm.parsers import jupyter
+from rtfm.parsers import csv_parser
 from rtfm.parsers import plaintext  # catch-all — must be last
 
-# PDF parser (optional dependency)
+# PDF parser (optional dependency: pdftext)
 try:
     from rtfm.parsers import pdf
 except ImportError:
-    pass  # pdftext not installed
+    pass
+
+# TOML parser (needs tomllib stdlib 3.11+ or tomli backport)
+try:
+    from rtfm.parsers import toml_parser
+except ImportError:
+    pass
+
+# XLSX parser (optional dependency: openpyxl)
+try:
+    from rtfm.parsers import xlsx
+except ImportError:
+    pass
 
 __all__ = ["BaseParser", "ParserRegistry"]

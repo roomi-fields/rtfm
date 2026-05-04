@@ -15,6 +15,22 @@ from rtfm.parsers.html_bofip import (
     HTMLTextExtractor,
 )
 from rtfm.parsers.sqlite_parser import SQLiteParser
+from rtfm.parsers.jupyter import JupyterParser
+from rtfm.parsers.csv_parser import CSVParser
+
+try:
+    from rtfm.parsers.toml_parser import TOMLParser, tomllib as _toml_lib
+    _HAS_TOML = _toml_lib is not None
+except ImportError:
+    TOMLParser = None  # type: ignore
+    _HAS_TOML = False
+
+try:
+    from rtfm.parsers.xlsx import XLSXParser, load_workbook as _wb
+    _HAS_XLSX = _wb is not None
+except ImportError:
+    XLSXParser = None  # type: ignore
+    _HAS_XLSX = False
 
 
 class TestParserRegistry:
@@ -296,3 +312,198 @@ class TestHTMLTextExtractor:
 
         assert "Item 1" in text
         assert "Item 2" in text
+
+
+class TestJupyterParser:
+    """Tests for Jupyter notebook parser."""
+
+    @pytest.fixture
+    def sample_notebook(self, tmp_path):
+        import json
+        nb = {
+            "cells": [
+                {"cell_type": "markdown", "source": "# Analysis\n\nIntro paragraph."},
+                {"cell_type": "code", "source": "import pandas as pd\ndf = pd.read_csv('data.csv')"},
+                {"cell_type": "markdown", "source": "## Cleaning"},
+                {"cell_type": "code", "source": "df = df.dropna()"},
+                {"cell_type": "markdown", "source": "## Modeling"},
+                {"cell_type": "code", "source": "from sklearn.linear_model import LogisticRegression"},
+            ],
+            "metadata": {}, "nbformat": 4, "nbformat_minor": 5,
+        }
+        path = tmp_path / "demo.ipynb"
+        path.write_text(json.dumps(nb))
+        return path
+
+    def test_parse_groups_by_heading(self, sample_notebook):
+        chunks = list(JupyterParser().parse(sample_notebook))
+        titles = [c.chapter_title for c in chunks]
+        assert titles == ["Analysis", "Cleaning", "Modeling"]
+
+    def test_code_cells_fenced(self, sample_notebook):
+        chunk = next(c for c in JupyterParser().parse(sample_notebook)
+                     if c.chapter_title == "Analysis")
+        assert "```python" in chunk.content
+        assert "import pandas" in chunk.content
+
+    def test_invalid_json_skipped(self, tmp_path):
+        bad = tmp_path / "bad.ipynb"
+        bad.write_text("not json")
+        assert list(JupyterParser().parse(bad)) == []
+
+    def test_registry_routes_ipynb(self):
+        parser = ParserRegistry.get_parser(Path("nb.ipynb"))
+        assert isinstance(parser, JupyterParser)
+
+
+@pytest.mark.skipif(not _HAS_TOML, reason="tomllib/tomli not available")
+class TestTOMLParser:
+    """Tests for TOML parser (pyproject/Cargo style)."""
+
+    @pytest.fixture
+    def pyproject(self, tmp_path):
+        path = tmp_path / "pyproject.toml"
+        path.write_text(
+            '[build-system]\n'
+            'requires = ["hatchling>=1.0"]\n'
+            '\n'
+            '[project]\n'
+            'name = "demo"\n'
+            'version = "0.1.0"\n'
+            'dependencies = ["requests>=2.0", "pyyaml"]\n'
+            '\n'
+            '[project.optional-dependencies]\n'
+            'dev = ["pytest>=7.0"]\n'
+        )
+        return path
+
+    def test_parse_emits_chunks_per_table(self, pyproject):
+        chunks = list(TOMLParser().parse(pyproject))
+        assert len(chunks) >= 1
+        joined = "\n".join(c.chapter_title for c in chunks)
+        assert "build-system" in joined
+        assert "project" in joined
+
+    def test_extract_dep_edges_pep621(self, pyproject):
+        edges = TOMLParser().extract_edges(pyproject)
+        targets = {e.target_ref for e in edges}
+        assert "requests" in targets
+        assert "pyyaml" in targets
+        assert "pytest" in targets
+        assert "hatchling" in targets
+        assert all(e.relation_type == "depends_on" for e in edges)
+
+    def test_extract_dep_edges_cargo(self, tmp_path):
+        cargo = tmp_path / "Cargo.toml"
+        cargo.write_text(
+            '[package]\nname = "demo"\nversion = "0.1.0"\n\n'
+            '[dependencies]\nserde = "1.0"\ntokio = { version = "1", features = ["full"] }\n\n'
+            '[dev-dependencies]\nproptest = "1.0"\n'
+        )
+        edges = TOMLParser().extract_edges(cargo)
+        targets = {e.target_ref for e in edges}
+        assert "serde" in targets
+        assert "tokio" in targets
+        assert "proptest" in targets
+
+    def test_invalid_toml_skipped(self, tmp_path):
+        bad = tmp_path / "bad.toml"
+        bad.write_text("this is = not [valid toml ===")
+        assert list(TOMLParser().parse(bad)) == []
+        assert TOMLParser().extract_edges(bad) == []
+
+
+class TestCSVParser:
+    """Tests for CSV / TSV parser."""
+
+    @pytest.fixture
+    def sample_csv(self, tmp_path):
+        path = tmp_path / "data.csv"
+        path.write_text(
+            "name,age,active,score\n"
+            "Alice,30,true,98.5\n"
+            "Bob,25,false,87.2\n"
+            "Carol,42,true,93.1\n"
+        )
+        return path
+
+    def test_parse_emits_overview_and_sample(self, sample_csv):
+        chunks = list(CSVParser().parse(sample_csv))
+        titles = [c.chapter_title for c in chunks]
+        assert titles == ["overview", "sample"]
+
+    def test_overview_has_column_types(self, sample_csv):
+        overview = next(c for c in CSVParser().parse(sample_csv)
+                        if c.chapter_title == "overview")
+        assert "`name` *(text)*" in overview.content
+        assert "`age` *(int)*" in overview.content
+        assert "`active` *(bool)*" in overview.content
+        assert "`score` *(float)*" in overview.content
+        assert "3 data rows" in overview.content
+
+    def test_sample_renders_data(self, sample_csv):
+        sample = next(c for c in CSVParser().parse(sample_csv)
+                      if c.chapter_title == "sample")
+        assert "Alice" in sample.content
+        assert "Carol" in sample.content
+
+    def test_tsv_routed_correctly(self, tmp_path):
+        path = tmp_path / "data.tsv"
+        path.write_text("a\tb\n1\t2\n3\t4\n")
+        chunks = list(CSVParser().parse(path))
+        assert len(chunks) == 2
+
+    def test_empty_file_yields_nothing(self, tmp_path):
+        path = tmp_path / "empty.csv"
+        path.write_text("")
+        assert list(CSVParser().parse(path)) == []
+
+
+@pytest.mark.skipif(not _HAS_XLSX, reason="openpyxl not installed")
+class TestXLSXParser:
+    """Tests for XLSX workbook parser."""
+
+    @pytest.fixture
+    def sample_xlsx(self, tmp_path):
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws1 = wb.active
+        ws1.title = "sales"
+        ws1.append(["product", "qty", "price"])
+        ws1.append(["Apple", 10, 1.5])
+        ws1.append(["Bread", 5, 3.0])
+        ws2 = wb.create_sheet("inventory")
+        ws2.append(["sku", "stock"])
+        ws2.append(["A001", 100])
+        path = tmp_path / "wb.xlsx"
+        wb.save(path)
+        return path
+
+    def test_parse_emits_overview_and_per_sheet(self, sample_xlsx):
+        chunks = list(XLSXParser().parse(sample_xlsx))
+        titles = [c.chapter_title for c in chunks]
+        # 1 overview + (schema + sample) × 2 sheets
+        assert "overview" in titles
+        assert "sheet: sales (schema)" in titles
+        assert "sheet: sales (sample)" in titles
+        assert "sheet: inventory (schema)" in titles
+        assert "sheet: inventory (sample)" in titles
+
+    def test_overview_lists_sheets_with_dimensions(self, sample_xlsx):
+        overview = next(c for c in XLSXParser().parse(sample_xlsx)
+                        if c.chapter_title == "overview")
+        assert "`sales`" in overview.content
+        assert "`inventory`" in overview.content
+        assert "2 rows × 3 cols" in overview.content
+
+    def test_sample_includes_data(self, sample_xlsx):
+        sample = next(c for c in XLSXParser().parse(sample_xlsx)
+                      if c.chapter_title == "sheet: sales (sample)")
+        assert "Apple" in sample.content
+        assert "Bread" in sample.content
+
+    def test_corrupt_xlsx_handled(self, tmp_path):
+        bad = tmp_path / "bad.xlsx"
+        bad.write_bytes(b"not a real xlsx")
+        # Doesn't raise — yields nothing
+        assert list(XLSXParser().parse(bad)) == []

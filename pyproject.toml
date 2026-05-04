@@ -42,6 +42,9 @@ pdf = [
 embeddings = [
     "fastembed>=0.3.0",
 ]
+xlsx = [
+    "openpyxl>=3.0",
+]
 # kept for backward-compatibility — users still doing `pip install rtfm-ai[mcp]` won't break
 mcp = []
 dev = [
