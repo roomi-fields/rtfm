@@ -50,6 +50,7 @@ mcp = []
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "jsonschema>=4.0",
 ]
 
 [project.scripts]
@@ -57,9 +58,11 @@ rtfm = "rtfm.cli:main"
 rtfm-serve = "rtfm.mcp:main"
 
 [project.urls]
-Homepage = "https://github.com/roomi-fields/rtfm"
+Homepage = "https://roomi-fields.github.io/rtfm/"
+Documentation = "https://roomi-fields.github.io/rtfm/"
 Repository = "https://github.com/roomi-fields/rtfm"
 Issues = "https://github.com/roomi-fields/rtfm/issues"
+Changelog = "https://roomi-fields.github.io/rtfm/CHANGELOG/"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rtfm"]
@@ -70,3 +73,6 @@ name = "io.github.roomi-fields/rtfm"
 [tool.pytest.ini_options]
 testpaths = ["rtfm/tests"]
 python_files = "test_*.py"
+markers = [
+    "network: tests that require outbound network access (skip with `pytest -m 'not network'`)",
+]
