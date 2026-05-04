@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.roomi-fields.com/rtfm-mapping-v1.json",
+  "title": "RTFM JSON Schema Mapping (rtfm-mapping-v1)",
+  "description": "Declarative mapping consumed by the RTFM open retrieval layer. Drop a file conforming to this schema in .rtfm/mappings/ and any JSON document matching match.schema_url or match.discriminator is extracted into typed chunks at sync time. Full reference: https://roomi-fields.github.io/rtfm/json-mappings/",
+  "type": "object",
+  "required": ["name", "match", "chunks"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional self-reference. Set to https://schemas.roomi-fields.com/rtfm-mapping-v1.json to enable IDE validation and autocomplete."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable identifier for this mapping. Used for deduplication on registration — two mappings with the same name replace each other (most-recently-loaded wins). Conventionally kebab-case with a version suffix, e.g. nblm-answer-v1.",
+      "examples": ["nblm-answer-v1", "linear-issue-export", "openapi-3"]
+    },
+    "match": {
+      "type": "object",
+      "description": "Rules used to detect that a JSON document should be processed by this mapping. A mapping matches when ANY declared rule matches.",
+      "additionalProperties": false,
+      "anyOf": [
+        { "required": ["schema_url"] },
+        { "required": ["discriminator"] }
+      ],
+      "properties": {
+        "schema_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Match if the document's $schema or $id field equals this URL. Preferred when the producing project publishes a formal JSON Schema.",
+          "examples": [
+            "https://schemas.roomi-fields.com/nblm-answer-v1.json"
+          ]
+        },
+        "discriminator": {
+          "type": "object",
+          "description": "Match if every entry { field_path: expected_value } resolves to the expected value in the document. Field paths use dotted notation (a.b.c) and walk into nested dicts and list indices.",
+          "minProperties": 1,
+          "additionalProperties": {
+            "description": "Expected value (any JSON scalar — string, number, boolean, null)."
+          },
+          "examples": [
+            { "type": "nblm-answer" },
+            { "kind": "issue", "version": "1" }
+          ]
+        }
+      }
+    },
+    "chunks": {
+      "type": "array",
+      "description": "Ordered list of chunk specifications. Each spec emits zero or more chunks at sync time. Required: at least one spec.",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/chunkSpec" }
+    },
+    "edges": {
+      "type": "array",
+      "description": "Optional edge specifications. Each spec emits zero or more EdgeCandidates with the declared relation_type. Edge resolution to the database depends on the existing sync layer (import/link/include resolve to indexed files; custom relations like cites are produced but currently not materialized).",
+      "items": { "$ref": "#/$defs/edgeSpec" }
+    }
+  },
+  "$defs": {
+    "chunkSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content"],
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Template for the chunk's chapter_title. Supports {{ dotted.path }} placeholders evaluated against the current context (root document, or each item if foreach is set).",
+          "examples": ["Q: {{ question }}", "{{ marker }} {{ source_name }}"]
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Template for the chunk content. Required and non-empty after rendering — empty content is silently skipped. Supports {{ dotted.path }} placeholders.",
+          "examples": ["{{ answer.text }}", "{{ source_text }}"]
+        },
+        "foreach": {
+          "type": "string",
+          "description": "Dotted path resolving to a list. When set, one chunk is emitted per item, and templates inside this spec evaluate against each item.",
+          "examples": ["citations", "issues", "paths.get.operations"]
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Key-value pairs stored in chunks.metadata (JSON column). String values are template-rendered; non-string values pass through unchanged.",
+          "additionalProperties": true,
+          "examples": [
+            { "source_name": "{{ source_name }}", "marker": "{{ marker }}" }
+          ]
+        }
+      }
+    },
+    "edgeSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relation", "target"],
+      "properties": {
+        "relation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stored as relation_type in the edges table. Standard values: import, link, include (resolved by sync layer). Custom values are produced as EdgeCandidates but not yet materialized.",
+          "examples": ["cites", "blocks", "depends_on", "supersedes"]
+        },
+        "foreach": {
+          "type": "string",
+          "description": "Like chunk-spec foreach: walks a list, emits one edge per item.",
+          "examples": ["citations", "blockedBy"]
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Template for the edge target reference. Supports {{ dotted.path }} placeholders. Resolution semantics depend on relation type.",
+          "examples": ["{{ source_name }}", "{{ id }}", "{{ url }}"]
+        },
+        "target_kind": {
+          "type": "string",
+          "enum": ["literal", "slug", "url"],
+          "default": "literal",
+          "description": "Informational hint about the kind of reference produced by target. Stored in EdgeCandidate.source_detail; future versions of the resolver may use it for resolution heuristics."
+        }
+      }
+    }
+  }
+}

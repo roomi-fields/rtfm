@@ -40,6 +40,7 @@ A NotebookLM batch export `answer.json`:
 The matching mapping at `.rtfm/mappings/nblm-answer.yaml`:
 
 ```yaml
+# yaml-language-server: $schema=https://schemas.roomi-fields.com/rtfm-mapping-v1.json
 name: nblm-answer-v1
 
 match:
@@ -137,6 +138,69 @@ Template expressions use `{{ dotted.path.to.field }}` syntax. Rules:
 
 Anything more sophisticated is intentionally out of scope. If your schema
 needs computation, write a Python parser instead.
+
+## Schema reference & IDE validation
+
+The mapping format itself is published as a JSON Schema at:
+
+> [https://schemas.roomi-fields.com/rtfm-mapping-v1.json](https://schemas.roomi-fields.com/rtfm-mapping-v1.json)
+
+Reference it from your mapping files to get **autocomplete and inline
+validation** in any IDE that supports JSON Schema (VS Code, JetBrains,
+Neovim with `coc-yaml`, Helix, …):
+
+=== "YAML"
+
+    ```yaml
+    # yaml-language-server: $schema=https://schemas.roomi-fields.com/rtfm-mapping-v1.json
+    name: my-mapping
+    match:
+      discriminator: { type: foo }
+    chunks:
+      - content: "{{ payload }}"
+    ```
+
+    Requires the [YAML extension](https://marketplace.visualstudio.com/items?itemName=redhat.vscode-yaml)
+    in VS Code (or equivalent in your editor). The directive is a
+    standard YAML comment, ignored at runtime.
+
+=== "JSON"
+
+    ```json
+    {
+      "$schema": "https://schemas.roomi-fields.com/rtfm-mapping-v1.json",
+      "name": "my-mapping",
+      "match": { "discriminator": { "type": "foo" } },
+      "chunks": [{ "content": "{{ payload }}" }]
+    }
+    ```
+
+    The `$schema` field is recognized natively by VS Code, JetBrains
+    IDEs, and most editors with no extension required.
+
+The schema is **versioned**: the `v1` suffix freezes the contract.
+Breaking changes ship as `rtfm-mapping-v2.json` and v1 stays valid
+indefinitely.
+
+## Matching JSON files that declare their own schema
+
+A growing number of producing projects publish formal JSON Schemas for
+their outputs:
+
+| Producer | Schema URL |
+|---|---|
+| [`notebooklm-mcp`](https://github.com/roomi-fields/notebooklm-mcp) | [`https://schemas.roomi-fields.com/nblm-answer-v1.json`](https://schemas.roomi-fields.com/nblm-answer-v1.json) |
+
+When the JSON file you index has a `$schema` field pointing to one of
+these URLs, you reference the same URL in your mapping's
+`match.schema_url`. RTFM does an exact string match — no remote fetch,
+no validation. The URL acts as a stable discriminator.
+
+If you maintain a JSON-producing tool, **publishing your schema makes
+RTFM integration trivial** for any user: they paste your schema URL
+into a mapping file and they're done. Consider publishing alongside
+your project (a static JSON file behind any CDN or GitHub Pages
+suffices).
 
 ## Discovery
 

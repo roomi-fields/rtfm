@@ -10,6 +10,9 @@ description: >-
 
 **The open retrieval layer your AI coding agent was missing.**
 
+![RTFM vs vanilla Claude Code — same task, same model, who pays the bill?](demo/rtfm-split.png){ .center-img }
+
+
 RTFM indexes your entire project — source code, documentation, legal text,
 research papers, structured data — into one local SQLite knowledge base, and
 serves surgical context to your AI agent over the [Model Context

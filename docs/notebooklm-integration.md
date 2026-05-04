@@ -34,9 +34,11 @@ vault/
 ```
 
 The markdown is the human-friendly artifact. The JSON sidecar conforms to
-the [`nblm-answer-v1`
-schema](https://github.com/roomi-fields/notebooklm-mcp/blob/main/deployment/docs/14-RTFM-INTEGRATION.md).
-Both are guaranteed to coexist.
+the **[nblm-answer-v1 JSON Schema](https://schemas.roomi-fields.com/nblm-answer-v1.json)**
+(stable, semver-versioned — breaking changes ship as `nblm-answer-v2`).
+Full integration notes:
+[`notebooklm-mcp/deployment/docs/14-RTFM-INTEGRATION.md`](https://github.com/roomi-fields/notebooklm-mcp/blob/main/deployment/docs/14-RTFM-INTEGRATION.md).
+Both files are guaranteed to coexist.
 
 ## Path A — Markdown (zero config)
 
@@ -68,6 +70,7 @@ names, and `cites` edges between answer and source files, drop the
 
 ```yaml
 # .rtfm/mappings/nblm-answer.yaml
+# yaml-language-server: $schema=https://schemas.roomi-fields.com/rtfm-mapping-v1.json
 name: nblm-answer-v1
 
 match:
