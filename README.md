@@ -76,6 +76,14 @@ In Claude Code (CLI or Desktop **Code** tab) :
 /plugin install rtfm@rtfm
 ```
 
+> **Or grab RTFM and NotebookLM together** from the aggregator marketplace:
+> ```
+> /plugin marketplace add roomi-fields/claude-plugins
+> /plugin install rtfm@roomi-fields
+> /plugin install notebooklm@roomi-fields
+> ```
+> Same RTFM plugin (sourced from this repo), plus [`notebooklm-mcp`](https://github.com/roomi-fields/notebooklm-mcp) for citation-backed Q&A. See [roomi-fields/claude-plugins](https://github.com/roomi-fields/claude-plugins).
+
 That's it. The plugin auto-initializes each project on first use:
 - Creates `.rtfm/library.db` (one SQLite file)
 - Injects search instructions into `CLAUDE.md`

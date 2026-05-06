@@ -83,6 +83,16 @@ The fastest path is the Claude Code plugin — zero pip required:
 /plugin install rtfm@rtfm
 ```
 
+!!! tip "Want RTFM and NotebookLM together?"
+    Use the aggregator marketplace
+    [`roomi-fields/claude-plugins`](https://github.com/roomi-fields/claude-plugins)
+    to install both in one go:
+    ```
+    /plugin marketplace add roomi-fields/claude-plugins
+    /plugin install rtfm@roomi-fields
+    /plugin install notebooklm@roomi-fields
+    ```
+
 Then in your project:
 
 ```

@@ -22,6 +22,16 @@ outputs into RTFM. Two paths, both work:
 - **JSON path** — typed metadata + faceted source filtering via a one-time
   YAML mapping
 
+!!! tip "Install both plugins in one command"
+    Both RTFM and NotebookLM are available together via the
+    [`roomi-fields/claude-plugins`](https://github.com/roomi-fields/claude-plugins)
+    aggregator marketplace:
+    ```
+    /plugin marketplace add roomi-fields/claude-plugins
+    /plugin install rtfm@roomi-fields
+    /plugin install notebooklm@roomi-fields
+    ```
+
 ## What `notebooklm-mcp` produces
 
 Calling `POST /batch-to-vault` writes two files per question into a
