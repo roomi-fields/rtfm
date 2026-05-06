@@ -157,7 +157,7 @@ rtfm init
   "applicationCategory": "DeveloperApplication",
   "applicationSubCategory": "Retrieval, Search, Indexing, MCP",
   "operatingSystem": "Linux, macOS, Windows",
-  "softwareVersion": "0.7.0",
+  "softwareVersion": "0.7.1",
   "license": "https://opensource.org/licenses/MIT",
   "offers": {
     "@type": "Offer",

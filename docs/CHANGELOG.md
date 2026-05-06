@@ -7,6 +7,13 @@ description: >-
 
 # Changelog
 
+## [0.7.1] — 2026-05-06
+
+### Changed
+- **Distribution: marketplace consolidated.** The standalone `roomi-fields/rtfm` marketplace is retired; RTFM now ships exclusively through the aggregator marketplace [`roomi-fields/claude-plugins`](https://github.com/roomi-fields/claude-plugins). Install command changes: `/plugin marketplace add roomi-fields/claude-plugins` then `/plugin install rtfm@roomi-fields`. The plugin itself is unchanged — same `bin/rtfm-serve`, same hooks, same skills. Existing users of the standalone marketplace should run `/plugin marketplace remove rtfm` and re-install via the aggregator.
+
+No code changes — the wheel is byte-identical to 0.7.0. This release exists to carry the version bump in `.claude-plugin/plugin.json` and signal the marketplace migration to PyPI users via the release feed.
+
 ## [0.7.0] — 2026-05-04
 
 ### Added
@@ -16,7 +23,6 @@ description: >-
 ### Changed
 - `JSONParser` consults `MappingRegistry.find_mapping(data)` before falling back to the generic structural parser. Plain JSON files are unaffected.
 - `Library.__init__` autoloads mappings from `<db_dir>/mappings/*.{yaml,yml,json}`.
-- **Distribution: marketplace consolidated.** The standalone `roomi-fields/rtfm` marketplace is retired; RTFM now ships exclusively through the aggregator marketplace [`roomi-fields/claude-plugins`](https://github.com/roomi-fields/claude-plugins). Install command changes: `/plugin marketplace add roomi-fields/claude-plugins` then `/plugin install rtfm@roomi-fields`. The plugin itself is unchanged — same `bin/rtfm-serve`, same hooks, same skills. Existing users of the standalone marketplace should run `/plugin marketplace remove rtfm` and re-install via the aggregator.
 
 ## [0.6.0] — 2026-05-04
 
