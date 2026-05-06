@@ -72,17 +72,15 @@ Three results, ~300 tokens. The agent decides what to read next with `rtfm_expan
 In Claude Code (CLI or Desktop **Code** tab) :
 
 ```
-/plugin marketplace add roomi-fields/rtfm
-/plugin install rtfm@rtfm
+/plugin marketplace add roomi-fields/claude-plugins
+/plugin install rtfm@roomi-fields
 ```
 
-> **Or grab RTFM and NotebookLM together** from the aggregator marketplace:
-> ```
-> /plugin marketplace add roomi-fields/claude-plugins
-> /plugin install rtfm@roomi-fields
-> /plugin install notebooklm@roomi-fields
-> ```
-> Same RTFM plugin (sourced from this repo), plus [`notebooklm-mcp`](https://github.com/roomi-fields/notebooklm-mcp) for citation-backed Q&A. See [roomi-fields/claude-plugins](https://github.com/roomi-fields/claude-plugins).
+RTFM is distributed via the [`roomi-fields/claude-plugins`](https://github.com/roomi-fields/claude-plugins) marketplace, which also ships [`notebooklm-mcp`](https://github.com/roomi-fields/notebooklm-mcp) for citation-backed Q&A. To grab both at once:
+
+```
+/plugin install notebooklm@roomi-fields
+```
 
 That's it. The plugin auto-initializes each project on first use:
 - Creates `.rtfm/library.db` (one SQLite file)

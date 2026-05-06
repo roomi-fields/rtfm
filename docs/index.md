@@ -79,19 +79,13 @@ sourced regulatory text):
 The fastest path is the Claude Code plugin — zero pip required:
 
 ```
-/plugin marketplace add roomi-fields/rtfm
-/plugin install rtfm@rtfm
+/plugin marketplace add roomi-fields/claude-plugins
+/plugin install rtfm@roomi-fields
 ```
 
-!!! tip "Want RTFM and NotebookLM together?"
-    Use the aggregator marketplace
-    [`roomi-fields/claude-plugins`](https://github.com/roomi-fields/claude-plugins)
-    to install both in one go:
-    ```
-    /plugin marketplace add roomi-fields/claude-plugins
-    /plugin install rtfm@roomi-fields
-    /plugin install notebooklm@roomi-fields
-    ```
+RTFM ships via the [`roomi-fields/claude-plugins`](https://github.com/roomi-fields/claude-plugins)
+marketplace, alongside [`notebooklm-mcp`](https://github.com/roomi-fields/notebooklm-mcp)
+for citation-backed Q&A. Add `/plugin install notebooklm@roomi-fields` to grab both.
 
 Then in your project:
 
