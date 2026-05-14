@@ -29,6 +29,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Version sync gate
+        run: python scripts/sync_version.py --check
+
       - name: Run unit tests (skip network)
         run: pytest -q -m 'not network'
 
@@ -70,3 +73,41 @@ jobs:
           name: dist-${{ github.ref_name }}
           path: dist/
           retention-days: 30
+
+  github-release:
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag and version
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract changelog section
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          awk -v ver="$VERSION" '
+            $0 ~ ("^## \\[" ver "\\]") { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' docs/CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release $VERSION — see docs/CHANGELOG.md" > release-notes.md
+          fi
+          echo "--- release notes ---"
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --title "${{ steps.tag.outputs.tag }}" \
+            --notes-file release-notes.md \
+            --verify-tag
