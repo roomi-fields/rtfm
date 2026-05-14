@@ -10,7 +10,7 @@ description: >-
 ## [0.7.2] — 2026-05-06
 
 ### Fixed
-- **MCP server connection: `bin/rtfm-serve` now executable.** The shell launchers (`rtfm-serve`, `rtfm-hook`, `rtfm-install-extras`) were checked into git with mode `100644` (no exec bit) because they were authored on a WSL/NTFS filesystem that does not preserve the POSIX exec bit. Claude Code clones plugins respecting the git index modes, so on Linux/macOS the MCP server failed to start with no helpful error in the `/plugin` UI ("rtfm MCP · failed"). Index permissions are now `100755` for the three shell launchers; `.cmd` siblings keep `100644` (Windows ignores the exec bit). Run `/plugin update rtfm@roomi-fields` to receive the fix.
+- **MCP server connection: `bin/rtfm-serve` now executable.** The shell launchers (`rtfm-serve`, `rtfm-hook`, `rtfm-install-extras`) were checked into git with mode `100644` (no exec bit) because they were authored on a WSL/NTFS filesystem that does not preserve the POSIX exec bit. Claude Code clones plugins respecting the git index modes, so on Linux/macOS the MCP server failed to start with no helpful error in the `/plugin` UI ("rtfm MCP · failed"). Index permissions are now `100755` for the three shell launchers; `.cmd` siblings keep `100644` (Windows ignores the exec bit). To receive the fix: `/plugin marketplace update roomi-fields` then `/reload-plugins`.
 
 ## [0.7.1] — 2026-05-06
 

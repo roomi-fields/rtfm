@@ -118,6 +118,7 @@ exclude_docs: |
   COMMUNICATION_STATUS_fr.md
   PUBLISH_MCP_DIRECTORIES.md
   PUBLISH_MCP_DIRECTORIES_fr.md
+  DISTRIBUTION.md
   plugin-test-procedure.md
   benchmarks/ab_test_b10_analysis_fr.md
   benchmarks/benchmark_paper_fr.md
