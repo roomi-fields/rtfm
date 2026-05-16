@@ -7,7 +7,7 @@ description: >-
 
 # Changelog
 
-## [Unreleased]
+## [0.8.0] — 2026-05-16
 
 ### Added
 - **7 new document parsers — ebook and office formats.** RTFM now indexes EPUB, MOBI/AZW/AZW3, FB2, DJVU, DOCX, ODT, and RTF in addition to the existing 15 formats.
