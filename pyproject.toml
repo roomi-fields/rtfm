@@ -45,6 +45,19 @@ embeddings = [
 xlsx = [
     "openpyxl>=3.0",
 ]
+epub = [
+    "ebooklib>=0.18",
+    "beautifulsoup4>=4.12",
+]
+mobi = [
+    "mobi>=0.3.3",
+    "beautifulsoup4>=4.12",
+]
+office = [
+    "python-docx>=1.0",
+    "odfpy>=1.4",
+    "striprtf>=0.0.26",
+]
 # kept for backward-compatibility — users still doing `pip install rtfm-ai[mcp]` won't break
 mcp = []
 dev = [

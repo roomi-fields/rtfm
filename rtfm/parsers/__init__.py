@@ -14,6 +14,8 @@ from rtfm.parsers import shell
 from rtfm.parsers import sqlite_parser
 from rtfm.parsers import jupyter
 from rtfm.parsers import csv_parser
+from rtfm.parsers import fb2  # stdlib XML — no extra dep
+from rtfm.parsers import djvu  # subprocess to djvutxt (system binary) — no Python dep
 from rtfm.parsers import plaintext  # catch-all — must be last
 
 # PDF parser (optional dependency: pdftext)
@@ -31,6 +33,36 @@ except ImportError:
 # XLSX parser (optional dependency: openpyxl)
 try:
     from rtfm.parsers import xlsx
+except ImportError:
+    pass
+
+# EPUB parser (optional: ebooklib + beautifulsoup4)
+try:
+    from rtfm.parsers import epub
+except ImportError:
+    pass
+
+# MOBI / AZW / AZW3 parser (optional: mobi + beautifulsoup4)
+try:
+    from rtfm.parsers import mobi_parser
+except ImportError:
+    pass
+
+# DOCX parser (optional: python-docx)
+try:
+    from rtfm.parsers import docx
+except ImportError:
+    pass
+
+# ODT parser (optional: odfpy)
+try:
+    from rtfm.parsers import odt
+except ImportError:
+    pass
+
+# RTF parser (optional: striprtf)
+try:
+    from rtfm.parsers import rtf
 except ImportError:
     pass
 

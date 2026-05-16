@@ -7,6 +7,20 @@ description: >-
 
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **7 new document parsers — ebook and office formats.** RTFM now indexes EPUB, MOBI/AZW/AZW3, FB2, DJVU, DOCX, ODT, and RTF in addition to the existing 15 formats.
+  - `epub` (extra `[epub]`: `ebooklib`, `beautifulsoup4`) — walks the spine in reading order, one chunk group per chapter, OPF title/author lifted into metadata.
+  - `mobi_parser` (extra `[mobi]`: `mobi`, `beautifulsoup4`) — Kindle MOBI/AZW/AZW3, DRM-free only; DRM-protected files surface a clean `MOBIExtractionError`.
+  - `fb2` — FictionBook XML, zero external dependency (stdlib `xml.etree`). Sections become chapters, `<title-info>` becomes title/author.
+  - `djvu` — DJVU via the `djvutxt` system binary from `djvulibre-bin` (no Python dep), one chunk group per page.
+  - `docx` (extra `[office]`: `python-docx`, `odfpy`, `striprtf`) — paragraphs walked in document order, Heading 1/2/3 styles cut sections, tables flattened to `cell | cell`. `core_properties.title/author` lifted into metadata.
+  - `odt` (extra `[office]`) — same shape as `docx`, sections cut by `text:h` with `text:outline-level`. Metadata via `dc:title` / `dc:creator`.
+  - `rtf` (extra `[office]`) — text-only extraction via `striprtf`; RTF has no native hierarchy so chunking is paragraph-based.
+- **Shared chunking helpers** in `rtfm/parsers/_chunking.py` (`split_into_paragraphs`, `merge_short_paragraphs`, `split_on_sentence`, `slugify`, `content_hash`, `estimate_page`). New parsers reuse these; the older `markdown.py` and `pdf.py` keep their own copies for now (no behaviour change).
+- New tests: `rtfm/tests/test_ebook_parsers.py` and `rtfm/tests/test_office_parsers.py` — fixtures synthesise minimal files in-process; tests `importorskip` cleanly when an optional dep is absent.
+
 ## [0.7.2] — 2026-05-06
 
 ### Fixed
