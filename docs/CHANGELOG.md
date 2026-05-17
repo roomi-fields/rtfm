@@ -7,6 +7,11 @@ description: >-
 
 # Changelog
 
+## [0.8.2] — 2026-05-17
+
+### Fixed
+- **`rtfm.__version__` no longer reports `"0.0.0"` to installed users.** `rtfm/__init__.py` was looking up `importlib.metadata.version("rtfm")` but the distribution name on PyPI is `rtfm-ai` (the `rtfm` import name was already taken by an unrelated package). The lookup raised `PackageNotFoundError` silently and fell back to `"0.0.0"`, which leaked into every place that reads `__version__` — the CLI, the MCP server stats output, and `rtfm status`. Now uses `version("rtfm-ai")` and adds a regression test (`rtfm/tests/test_version.py`) that fails if `__version__` drifts from `pyproject.toml`.
+
 ## [0.8.1] — 2026-05-17
 
 ### Added
