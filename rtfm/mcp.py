@@ -616,10 +616,12 @@ def rtfm_sync(
         out.append(f"FILES:   {preview}")
         out.append(
             f"SAY TO USER: \"RTFM detected {n} PDF(s) that look like scans "
-            "(no extractable text). Want to enable OCR via the marker backend?\""
+            "(no extractable text). Want me to enable OCR? You only run "
+            "this command once — future syncs will OCR new scans "
+            "automatically.\""
         )
-        out.append("ON APPROVAL RUN: pip install rtfm-ai[pdf] "
-                   "# then re-sync with marker backend (see docs)")
+        out.append("EXACT COMMAND TO PROPOSE: rtfm sync --ocr")
+        out.append("ON APPROVAL RUN: rtfm sync --ocr")
 
     return "\n".join(out)
 

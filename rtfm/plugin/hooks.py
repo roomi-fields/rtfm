@@ -44,11 +44,13 @@ def main():
     config_path = rtfm_dir / "config.json"
     sources = []
     default_corpus = "default"
+    ocr_fallback = False
     if config_path.exists():
         try:
             cfg = json.loads(config_path.read_text())
             sources = cfg.get("sources", [])
             default_corpus = cfg.get("corpus", "default")
+            ocr_fallback = cfg.get("ocr_fallback", False)
         except Exception:
             pass
 
@@ -76,6 +78,7 @@ def main():
                 corpus=src_corpus,
                 extensions=ext_set,
                 generate_embeddings=False,
+                ocr_fallback=ocr_fallback,
             )
             total_added += result.added
             total_modified += result.modified
@@ -174,11 +177,13 @@ def main():
     config_path = rtfm_dir / "config.json"
     sources = []
     default_corpus = "default"
+    ocr_fallback = False
     if config_path.exists():
         try:
             cfg = json.loads(config_path.read_text())
             sources = cfg.get("sources", [])
             default_corpus = cfg.get("corpus", "default")
+            ocr_fallback = cfg.get("ocr_fallback", False)
         except Exception:
             pass
 
@@ -248,6 +253,7 @@ def main():
                 corpus=src_corpus,
                 extensions=ext_set,
                 generate_embeddings=False,
+                ocr_fallback=ocr_fallback,
             )
             total_added += result.added
             total_modified += result.modified
@@ -292,10 +298,13 @@ def main():
                       "auto-sync — likely scanned images.", flush=True)
                 print(f"FILES:   {preview}", flush=True)
                 print(f"SAY TO USER: \"RTFM detected {n} PDF(s) that look "
-                      "like scans (no extractable text). Want to enable OCR?\"",
+                      "like scans (no extractable text). Want me to "
+                      "enable OCR? You only run this command once — "
+                      "future syncs will OCR new scans automatically.\"",
                       flush=True)
-                print("ON APPROVAL RUN: pip install rtfm-ai[pdf] "
-                      "# then re-sync with marker backend", flush=True)
+                print("EXACT COMMAND TO PROPOSE: rtfm sync --ocr",
+                      flush=True)
+                print("ON APPROVAL RUN: rtfm sync --ocr", flush=True)
                 seen.update(fresh)
                 _save_seen_scans(rtfm_dir, seen)
     except Exception as e:

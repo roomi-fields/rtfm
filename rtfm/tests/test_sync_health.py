@@ -218,3 +218,158 @@ def test_mcp_sync_silent_when_clean(library, tmp_path, monkeypatch):
 
     out = mcp_mod.rtfm_sync(path=str(tmp_path), corpus="test", extensions="md")
     assert "ACTION REQUIRED" not in out
+
+
+def test_mcp_action_required_points_to_rtfm_sync_ocr(library, tmp_path, monkeypatch):
+    """The ACTION REQUIRED block must point to `rtfm sync --ocr` so the
+    agent can propose an exact, executable command to the user."""
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    def fake_ingest(self, path, corpus="default", parser=None, metadata=None):
+        return {"chunks": 0, "chars": 0}
+
+    monkeypatch.setattr(type(library), "ingest", fake_ingest)
+    import rtfm.mcp as mcp_mod
+    monkeypatch.setattr(mcp_mod, "_get_library", lambda: library)
+    monkeypatch.setattr(mcp_mod, "_embed_in_background", lambda corpus=None: None)
+
+    out = mcp_mod.rtfm_sync(path=str(tmp_path), corpus="test", extensions="pdf")
+    assert "rtfm sync --ocr" in out
+    assert "ON APPROVAL RUN: rtfm sync --ocr" in out
+
+
+# ── OCR fallback: PDFParser backend='auto' ────────────────────────────────
+
+def test_pdf_parser_auto_falls_back_to_marker(monkeypatch, tmp_path):
+    """backend='auto' tries pdftext first, then marker when pdftext
+    returns no extractable text (i.e. the file is a scan)."""
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    pdftext_calls = []
+    marker_calls = []
+
+    def fake_pdftext(path):
+        pdftext_calls.append(path)
+        return [{"page": 1, "text": "   "}]  # blank — triggers fallback
+
+    def fake_marker(path):
+        marker_calls.append(path)
+        return [{"page": 1, "text": "OCR'd content paragraph " * 30}]
+
+    from rtfm.parsers import pdf as pdf_mod
+    monkeypatch.setattr(pdf_mod, "extract_with_pdftext", fake_pdftext)
+    monkeypatch.setattr(pdf_mod, "extract_with_marker", fake_marker)
+
+    parser = pdf_mod.PDFParser(backend="auto")
+    chunks = list(parser.parse(pdf))
+    assert len(pdftext_calls) == 1
+    assert len(marker_calls) == 1
+    assert chunks, "auto backend should produce chunks via marker fallback"
+
+
+def test_pdf_parser_auto_skips_marker_when_pdftext_works(monkeypatch, tmp_path):
+    """auto must NOT spin up marker when pdftext already returned text."""
+    pdf = tmp_path / "real.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    marker_calls = []
+    def fake_pdftext(path):
+        return [{"page": 1, "text": "real text " * 50}]
+    def fake_marker(path):
+        marker_calls.append(path)
+        return []
+
+    from rtfm.parsers import pdf as pdf_mod
+    monkeypatch.setattr(pdf_mod, "extract_with_pdftext", fake_pdftext)
+    monkeypatch.setattr(pdf_mod, "extract_with_marker", fake_marker)
+
+    parser = pdf_mod.PDFParser(backend="auto")
+    list(parser.parse(pdf))
+    assert marker_calls == [], "marker should not run when pdftext succeeded"
+
+
+def test_pdf_parser_rejects_unknown_backend():
+    """The constructor must refuse unknown backend names."""
+    from rtfm.parsers import pdf as pdf_mod
+    import pytest
+    with pytest.raises(ValueError):
+        pdf_mod.PDFParser(backend="ocr-magic")
+
+
+# ── sync(ocr_fallback=True) wires the auto-backend PDFParser ──────────────
+
+def test_sync_ocr_fallback_injects_auto_parser(library, tmp_path, monkeypatch):
+    """When ocr_fallback=True, sync() must pass a PDFParser(backend='auto')
+    to library.ingest for .pdf files."""
+    (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    captured: dict = {}
+
+    def fake_ingest(self, path, corpus="default", parser=None, metadata=None):
+        captured["parser"] = parser
+        captured["suffix"] = path.suffix.lower()
+        return {"chunks": 1, "chars": 100}
+
+    monkeypatch.setattr(type(library), "ingest", fake_ingest)
+
+    sync(
+        library=library, root=tmp_path, corpus="t",
+        extensions={".pdf"}, generate_embeddings=False,
+        ocr_fallback=True,
+    )
+
+    assert captured["suffix"] == ".pdf"
+    from rtfm.parsers.pdf import PDFParser
+    assert isinstance(captured["parser"], PDFParser)
+    assert captured["parser"].backend == "auto"
+
+
+def test_sync_no_ocr_fallback_uses_registry_default(library, tmp_path, monkeypatch):
+    """Without ocr_fallback, sync() must not pre-instantiate a parser
+    (parser=None means library.ingest picks the registry default)."""
+    (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    captured: dict = {}
+
+    def fake_ingest(self, path, corpus="default", parser=None, metadata=None):
+        captured["parser"] = parser
+        return {"chunks": 1, "chars": 100}
+
+    monkeypatch.setattr(type(library), "ingest", fake_ingest)
+
+    sync(
+        library=library, root=tmp_path, corpus="t",
+        extensions={".pdf"}, generate_embeddings=False,
+    )
+    assert captured["parser"] is None
+
+
+# ── Progress reporter ─────────────────────────────────────────────────────
+
+def test_sync_emits_progress_callback_at_interval(library, tmp_path, monkeypatch):
+    """With progress_interval set, sync() must fire 'progress' callbacks
+    while iterating over many files."""
+    # Create 5 files so we have iterations to observe
+    for i in range(5):
+        (tmp_path / f"f{i}.md").write_text(f"content {i}")
+
+    def fake_ingest(self, path, corpus="default", parser=None, metadata=None):
+        return {"chunks": 1, "chars": 10}
+
+    monkeypatch.setattr(type(library), "ingest", fake_ingest)
+
+    progress_events = []
+    def cb(action, fp, detail):
+        if action == "progress":
+            progress_events.append(detail)
+
+    # Tiny interval so every iteration triggers it.
+    sync(
+        library=library, root=tmp_path, corpus="t",
+        extensions={".md"}, generate_embeddings=False,
+        on_progress=cb, progress_interval=0.000001,
+    )
+    assert len(progress_events) >= 1
+    assert "files" in progress_events[0]

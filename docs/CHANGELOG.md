@@ -7,6 +7,18 @@ description: >-
 
 # Changelog
 
+## [0.8.5] — 2026-05-17
+
+### Added
+- **One-shot `rtfm sync --ocr` — persistent OCR fallback for scanned PDFs.** Activates an `ocr_fallback: true` flag in `.rtfm/config.json` and re-runs sync with `force=True` so previously-empty scans get OCR'd immediately. From then on, every sync (CLI or auto via hook) instantiates `PDFParser(backend='auto')` for PDFs: it tries `pdftext` first (fast, ~ms) and only falls back to `marker-pdf` (slow OCR) when no text was extractable. **The user runs the command once** — new scans added to indexed sources are OCR'd automatically by the next sync. Successfully OCR'd files drop off `.rtfm/seen_scans.json` so `rtfm status` reflects the real remaining backlog.
+- **`PDFParser` gains a `backend='auto'` mode** that does the pdftext → marker fallback in-process. Existing `pdftext` and `marker` modes are unchanged. Picks the cheap backend by default; only spends OCR cycles on real scans.
+- **Periodic progress reporting inside `sync()`.** New `progress_interval` parameter (seconds) emits a heartbeat line via `on_progress("progress", "", "K/N files, Xmin elapsed, ~Ymin remaining")` while the inner loop runs. CLI auto-enables a 10-minute interval when `--ocr` is set; `--progress-every N` overrides. Long OCR passes no longer look frozen.
+- **`ACTION REQUIRED` blocks now propose a concrete copy-pastable command.** Both the MCP `rtfm_sync` tool and the auto-sync hook print `ON APPROVAL RUN: rtfm sync --ocr` (instead of the previous "install [pdf] and re-sync" phrasing) and explicitly tell the user that the command is one-shot — future scans are handled automatically.
+
+### Changed
+- The hook (UserPromptSubmit + Stop) reads `ocr_fallback` from `.rtfm/config.json` and propagates it to the inner `sync()` call, so the auto-sync respects the persistent flag.
+- `_print_health_warnings()` now adapts its message: when OCR fallback is already on but scans still survive, it tells the user the PDFs are likely corrupt rather than re-suggesting OCR.
+
 ## [0.8.4] — 2026-05-17
 
 ### Fixed

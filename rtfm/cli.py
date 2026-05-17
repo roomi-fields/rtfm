@@ -623,7 +623,7 @@ def cmd_status(args):
     lib.close()
 
 
-def _print_health_warnings(result) -> None:
+def _print_health_warnings(result, ocr_already_on: bool = False) -> None:
     """Surface scan/empty-file warnings after a sync."""
     if result.suspect_scans:
         print()
@@ -633,8 +633,13 @@ def _print_health_warnings(result) -> None:
             print(f"    - {path}")
         if len(result.suspect_scans) > 10:
             print(f"    ... et {len(result.suspect_scans) - 10} autre(s)")
-        print("  → activer l'OCR : pip install rtfm-ai[pdf] "
-              "puis rtfm sync (backend marker requis)")
+        if ocr_already_on:
+            print("  → marker n'a pas pu en extraire de texte non plus "
+                  "(PDF corrompu / pages vides).")
+        else:
+            print("  → activer l'OCR automatique :  rtfm sync --ocr")
+            print("    (commande à lancer UNE FOIS — les syncs suivantes "
+                  "OCR-isent automatiquement les nouveaux scans)")
     if result.empty_files:
         print()
         print(f"⚠ {len(result.empty_files)} fichier(s) sans contenu extrait :")
@@ -644,14 +649,35 @@ def _print_health_warnings(result) -> None:
             print(f"    ... et {len(result.empty_files) - 10} autre(s)")
 
 
+def _write_seen_scans(rtfm_root, suspects: list[str]) -> None:
+    """Replace .rtfm/seen_scans.json with the current still-suspect set.
+
+    Called after a sync so the file reflects only PDFs that are still
+    broken — successfully OCR'd files (now with chunks > 0) drop off
+    the list automatically.
+    """
+    if rtfm_root is None:
+        return
+    seen_file = rtfm_root / ".rtfm" / "seen_scans.json"
+    try:
+        if suspects:
+            seen_file.parent.mkdir(parents=True, exist_ok=True)
+            seen_file.write_text(json.dumps(sorted(set(suspects))))
+        elif seen_file.exists():
+            seen_file.unlink()
+    except Exception:
+        pass  # best-effort
+
+
 def cmd_sync(args):
     """Sync files into the library."""
     from rtfm.core.sync import sync
-    from rtfm.config import find_rtfm_root, load_config
+    from rtfm.config import find_rtfm_root, load_config, save_config
 
     lib = _get_lib(args)
 
-    symbols = {"add": "+", "update": "~", "remove": "-", "error": "!", "embed": "*", "skip": "."}
+    symbols = {"add": "+", "update": "~", "remove": "-", "error": "!",
+               "embed": "*", "skip": ".", "progress": ">"}
 
     def _progress(action: str, filepath: str, detail: str) -> None:
         sym = symbols.get(action, "?")
@@ -659,6 +685,40 @@ def cmd_sync(args):
             print(f"  {sym} {filepath}  ({detail})")
         else:
             print(f"  {sym} {detail}")
+
+    # --ocr flips the persistent ocr_fallback flag in .rtfm/config.json
+    # so every future sync (CLI and auto-sync hook) auto-OCRs scans.
+    # The first run also forces re-ingest so previously-empty scans
+    # get OCR-extracted; future syncs touch only changed files.
+    if getattr(args, "ocr", False):
+        rtfm_root = find_rtfm_root()
+        if rtfm_root:
+            cfg = load_config(rtfm_root)
+            already_on = cfg.get("ocr_fallback", False)
+            cfg["ocr_fallback"] = True
+            save_config(rtfm_root, cfg)
+            if already_on:
+                print("OCR fallback already enabled — re-running OCR pass.")
+            else:
+                print("OCR fallback enabled (persisted to .rtfm/config.json).")
+                print("Future syncs will auto-OCR scanned PDFs.")
+        args.force = True  # so already-indexed scans get re-OCR'd now
+
+    # Read persistent flags
+    ocr_fallback = False
+    rtfm_root = find_rtfm_root()
+    if rtfm_root:
+        ocr_fallback = load_config(rtfm_root).get("ocr_fallback", False)
+
+    # Default progress heartbeat: 10 min during OCR runs, otherwise off.
+    progress_interval = args.progress_every
+    if progress_interval is None and ocr_fallback:
+        progress_interval = 600.0
+
+    # Accumulator for still-suspect scans across all sources, written
+    # back to .rtfm/seen_scans.json at the end so successful OCRs drop
+    # off the list automatically.
+    all_suspects: list[str] = []
 
     # Detect if user provided explicit path or corpus
     explicit_mode = args.path is not None or args.corpus is not None
@@ -688,6 +748,8 @@ def cmd_sync(args):
                         generate_embeddings=not args.no_embeddings,
                         on_progress=_progress,
                         force=args.force,
+                        ocr_fallback=ocr_fallback,
+                        progress_interval=progress_interval,
                     )
 
                     prefix = "[dry-run] " if args.dry_run else ""
@@ -696,9 +758,11 @@ def cmd_sync(args):
                     if result.errors:
                         for e in result.errors:
                             print(f"  ! {e}")
-                    _print_health_warnings(result)
+                    _print_health_warnings(result, ocr_already_on=ocr_fallback)
+                    all_suspects.extend(result.suspect_scans)
                     print()
 
+                _write_seen_scans(rtfm_root, all_suspects)
                 lib.close()
                 return
 
@@ -728,6 +792,8 @@ def cmd_sync(args):
         files=files_list,
         on_progress=_progress,
         force=args.force,
+        ocr_fallback=ocr_fallback,
+        progress_interval=progress_interval,
     )
 
     prefix = "[dry-run] " if args.dry_run else ""
@@ -739,7 +805,9 @@ def cmd_sync(args):
         print(f"Errors: {len(result.errors)}")
         for e in result.errors:
             print(f"  - {e}")
-    _print_health_warnings(result)
+    _print_health_warnings(result, ocr_already_on=ocr_fallback)
+    all_suspects.extend(result.suspect_scans)
+    _write_seen_scans(rtfm_root, all_suspects)
 
     lib.close()
 
@@ -1236,6 +1304,18 @@ def main():
     p_sync.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
     p_sync.add_argument("--force", action="store_true", help="Re-index all files (ignore hash cache)")
     p_sync.add_argument("--files", nargs="+", help="Specific files to sync (for git hooks)")
+    p_sync.add_argument(
+        "--ocr", action="store_true",
+        help="Enable OCR fallback (marker backend) for scanned PDFs. "
+             "Persists in .rtfm/config.json so future syncs auto-OCR new "
+             "scans. The first run will re-index every PDF (fast for those "
+             "with a text layer, slow OCR only for true scans).",
+    )
+    p_sync.add_argument(
+        "--progress-every", type=float, default=None, metavar="SECONDS",
+        help="Print a progress line every N seconds (default: auto — 600s "
+             "when --ocr is set, off otherwise).",
+    )
     p_sync.set_defaults(func=cmd_sync)
 
     # add (register a source)

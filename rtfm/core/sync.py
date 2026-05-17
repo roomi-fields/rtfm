@@ -459,6 +459,8 @@ def sync(
     on_progress: "Callable[[str, str, str], None] | None" = None,
     force: bool = False,
     retain_history: int | None = 50,
+    ocr_fallback: bool = False,
+    progress_interval: float | None = None,
 ) -> SyncResult:
     """Orchestrate a full incremental sync.
 
@@ -562,7 +564,25 @@ def sync(
             print(f"[sync] error moving {old_rel}: {exc}", file=sys.stderr)
 
     # 5. Process added + modified
-    for fpath in diff.added + diff.modified:
+    # When ocr_fallback is on, we build a single auto-backend PDFParser and
+    # reuse it for every PDF instead of letting the registry instantiate
+    # the default pdftext-only one.
+    pdf_parser = None
+    if ocr_fallback:
+        try:
+            from rtfm.parsers.pdf import PDFParser
+            pdf_parser = PDFParser(backend="auto")
+        except Exception as exc:
+            print(f"[sync] could not enable OCR fallback: {exc}", file=sys.stderr)
+
+    # Periodic progress reporting. Long syncs (OCR, large corpora) benefit
+    # from a heartbeat line so the user knows it is still alive.
+    import time as _time
+    total_to_process = len(diff.added) + len(diff.modified)
+    progress_t0 = _time.time()
+    last_progress_emit = progress_t0
+
+    for idx, fpath in enumerate(diff.added + diff.modified, start=1):
         try:
             rel = str(fpath.relative_to(root))
         except ValueError:
@@ -586,9 +606,15 @@ def sync(
                 except Exception:
                     pass  # Non-critical — versioning is best-effort
 
+            # Inject the auto-backend PDFParser only for PDFs; other formats
+            # keep registry-default behaviour.
+            ingest_parser = None
+            if pdf_parser is not None and fpath.suffix.lower() == ".pdf":
+                ingest_parser = pdf_parser
+
             # Pass slug and relative path to parser so it doesn't generate its own
             stats = library.ingest(
-                fpath, corpus=corpus,
+                fpath, corpus=corpus, parser=ingest_parser,
                 metadata={"book_slug": book_slug, "source_file": rel},
             )
             library.update_indexed_file(
@@ -620,6 +646,27 @@ def sync(
             if on_progress:
                 on_progress("error", rel, str(exc))
             print(f"[sync] error processing {rel}: {exc}", file=sys.stderr)
+
+        # Periodic progress heartbeat (e.g. every 10 min during OCR).
+        # Disabled by default (progress_interval=None) so short syncs
+        # stay quiet.
+        if progress_interval and progress_interval > 0:
+            now = _time.time()
+            if now - last_progress_emit >= progress_interval:
+                elapsed = now - progress_t0
+                rate = idx / elapsed if elapsed > 0 else 0
+                remaining = max(0, total_to_process - idx)
+                eta_sec = remaining / rate if rate > 0 else 0
+                detail = (
+                    f"{idx}/{total_to_process} files, "
+                    f"{elapsed/60:.1f}min elapsed, "
+                    f"~{eta_sec/60:.1f}min remaining"
+                )
+                if on_progress:
+                    on_progress("progress", "", detail)
+                else:
+                    print(f"[sync] progress: {detail}", file=sys.stderr)
+                last_progress_emit = now
 
     # 6. Process removed
     # When retain_history is None (unlimited history), we preserve

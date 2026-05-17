@@ -234,14 +234,18 @@ class PDFParser(BaseParser):
         Initialize PDF parser.
 
         Args:
-            backend: 'pdftext' (fast) or 'marker' (quality)
+            backend: 'pdftext' (fast), 'marker' (quality OCR), or 'auto'
+                (try pdftext first, fall back to marker when 0 pages of
+                text were extracted — i.e. the PDF is a scanned image).
             **config: Additional configuration
         """
         super().__init__(**config)
         self.backend = backend
 
-        if backend not in ('pdftext', 'marker'):
-            raise ValueError(f"Unknown backend: {backend}. Use 'pdftext' or 'marker'.")
+        if backend not in ('pdftext', 'marker', 'auto'):
+            raise ValueError(
+                f"Unknown backend: {backend}. Use 'pdftext', 'marker', or 'auto'."
+            )
 
     def parse(
         self,
@@ -255,6 +259,12 @@ class PDFParser(BaseParser):
         # Extract text based on backend
         if self.backend == 'marker':
             pages = extract_with_marker(path)
+        elif self.backend == 'auto':
+            pages = extract_with_pdftext(path)
+            if not pages or all(not p.get('text', '').strip() for p in pages):
+                # pdftext produced nothing extractable — almost always a
+                # scanned image. Fall back to marker (OCR).
+                pages = extract_with_marker(path)
         else:
             pages = extract_with_pdftext(path)
 
