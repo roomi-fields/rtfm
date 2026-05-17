@@ -7,6 +7,16 @@ description: >-
 
 # Changelog
 
+## [0.8.1] — 2026-05-17
+
+### Added
+- **Sync health signals — RTFM no longer swallows scanned PDFs silently.** `SyncResult` now exposes `suspect_scans` (PDFs that parsed without error but produced 0 chunks — almost always image-only scans needing OCR) and `empty_files` (other 0-chunk parses). The CLI, MCP server and the auto-sync hook all surface this state instead of silently treating it as a successful sync.
+  - `rtfm sync` (CLI) prints a localized warning block listing the suspect PDFs and the OCR install path.
+  - `rtfm_sync` (MCP) emits an `ACTION REQUIRED — surface to the user verbatim` block, the same format used when the `pdf` extra is missing, so the agent raises it with the user instead of moving on.
+  - `UserPromptSubmit` hook dry-runs the diff first; announces `→ RTFM: indexing N files...` when there are ≥ 50 new/modified files, prints `✓ RTFM sync: +A ~M -R files (Xs)` when something actually changed, and forwards new scan warnings as the same `ACTION REQUIRED` block. Already-reported scans are tracked in `.rtfm/seen_scans.json` so the warning does not repeat on every turn.
+- **`rtfm status` — new "Index health" section.** Reports pending added / modified / removed files relative to the configured sources (best-effort dry-run) and known scan suspects. Answers the question "is my index up to date?" in one command.
+- Tests: 9 new in `rtfm/tests/test_sync_health.py` covering `SyncResult` shape, sync-time classification, the CLI warning helper, and the MCP `ACTION REQUIRED` block. Full suite: 448 passed, 17 skipped.
+
 ## [0.8.0] — 2026-05-16
 
 ### Added
