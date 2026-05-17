@@ -552,7 +552,86 @@ def cmd_status(args):
         else:
             print(f"  {mark} {name:<12}missing — pip install {pkg}   ({purpose})")
 
+    # Health: pending sync work + known scan suspects. Best-effort, only
+    # if a .rtfm/ config is reachable (skipped for ad-hoc db paths).
+    try:
+        from rtfm.config import find_rtfm_root, load_config
+        from rtfm.core.sync import sync as _sync
+        root = find_rtfm_root()
+        if root:
+            cfg = load_config(root)
+            sources = cfg.get("sources") or [
+                {"path": str(root), "corpus": cfg.get("corpus", "default")}
+            ]
+            pending_added = pending_modified = pending_removed = 0
+            for src in sources:
+                src_path = Path(src.get("path", ".")).resolve()
+                src_corpus = src.get("corpus", "default")
+                ext_set = None
+                if src.get("extensions"):
+                    ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
+                               for e in src["extensions"].split(",")}
+                try:
+                    dry = _sync(
+                        library=lib, root=src_path, corpus=src_corpus,
+                        extensions=ext_set, dry_run=True,
+                        generate_embeddings=False,
+                    )
+                    pending_added += dry.added
+                    pending_modified += dry.modified
+                    pending_removed += dry.removed
+                except Exception:
+                    pass
+
+            seen_scans = []
+            scans_file = root / ".rtfm" / "seen_scans.json"
+            if scans_file.exists():
+                try:
+                    seen_scans = json.loads(scans_file.read_text())
+                except Exception:
+                    pass
+
+            print("\nIndex health:")
+            if pending_added or pending_modified or pending_removed:
+                if pending_added:
+                    print(f"  + {pending_added} new file(s) not yet indexed   → rtfm sync")
+                if pending_modified:
+                    print(f"  ~ {pending_modified} modified file(s) since last sync → rtfm sync")
+                if pending_removed:
+                    print(f"  - {pending_removed} file(s) in DB but missing on disk → rtfm sync")
+            else:
+                print("  ✓ index is up to date")
+            if seen_scans:
+                print(f"  ⚠ {len(seen_scans)} PDF(s) flagged as likely scans (0 text)")
+                for path in seen_scans[:5]:
+                    print(f"      - {path}")
+                if len(seen_scans) > 5:
+                    print(f"      ... +{len(seen_scans) - 5} more")
+    except Exception:
+        pass  # health section is best-effort
+
     lib.close()
+
+
+def _print_health_warnings(result) -> None:
+    """Surface scan/empty-file warnings after a sync."""
+    if result.suspect_scans:
+        print()
+        print(f"⚠ {len(result.suspect_scans)} PDF probablement scannés "
+              f"(0 texte extrait) :")
+        for path in result.suspect_scans[:10]:
+            print(f"    - {path}")
+        if len(result.suspect_scans) > 10:
+            print(f"    ... et {len(result.suspect_scans) - 10} autre(s)")
+        print("  → activer l'OCR : pip install rtfm-ai[pdf] "
+              "puis rtfm sync (backend marker requis)")
+    if result.empty_files:
+        print()
+        print(f"⚠ {len(result.empty_files)} fichier(s) sans contenu extrait :")
+        for path in result.empty_files[:10]:
+            print(f"    - {path}")
+        if len(result.empty_files) > 10:
+            print(f"    ... et {len(result.empty_files) - 10} autre(s)")
 
 
 def cmd_sync(args):
@@ -607,6 +686,7 @@ def cmd_sync(args):
                     if result.errors:
                         for e in result.errors:
                             print(f"  ! {e}")
+                    _print_health_warnings(result)
                     print()
 
                 lib.close()
@@ -649,6 +729,7 @@ def cmd_sync(args):
         print(f"Errors: {len(result.errors)}")
         for e in result.errors:
             print(f"  - {e}")
+    _print_health_warnings(result)
 
     lib.close()
 

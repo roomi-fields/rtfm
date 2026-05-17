@@ -597,6 +597,30 @@ def rtfm_sync(
             )
             out.append("ON APPROVAL RUN: pip install rtfm-ai[pdf] && rtfm sync --force")
 
+    # PDFs that parsed without error but produced zero text → almost
+    # always scanned images. Same ACTION REQUIRED format so the agent
+    # raises it with the user instead of silently ignoring.
+    if result.suspect_scans:
+        n = len(result.suspect_scans)
+        preview = ", ".join(result.suspect_scans[:3])
+        if n > 3:
+            preview += f", +{n - 3} more"
+        out.append("")
+        out.append("=" * 60)
+        out.append("ACTION REQUIRED — surface to the user verbatim:")
+        out.append("=" * 60)
+        out.append(f"TRIGGER: {n} PDF file(s) extracted 0 text — likely scanned "
+                   "images (no text layer).")
+        out.append(f"IMPACT:  Those {n} PDFs are indexed as empty. Their content "
+                   "will not appear in any search result.")
+        out.append(f"FILES:   {preview}")
+        out.append(
+            f"SAY TO USER: \"RTFM detected {n} PDF(s) that look like scans "
+            "(no extractable text). Want to enable OCR via the marker backend?\""
+        )
+        out.append("ON APPROVAL RUN: pip install rtfm-ai[pdf] "
+                   "# then re-sync with marker backend (see docs)")
+
     return "\n".join(out)
 
 

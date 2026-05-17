@@ -98,13 +98,19 @@ HOOK_SCRIPT = r'''#!/usr/bin/env python3
 
 Runs on every prompt:
 1. Reads corpus from .rtfm/config.json (set during init)
-2. Quick incremental sync (FTS only, no embeddings) — typically <2s
-3. Embeddings are handled by the MCP server in background (model stays loaded)
+2. Dry-run diff first: if a lot of new files are detected, announce it
+3. Quick incremental sync (FTS only, no embeddings) — typically <2s
+4. After sync, surface result + any health warnings (PDF scans, ...)
+5. Embeddings are handled by the MCP server in background
+
+Anything printed to stdout is injected into the agent's context for the
+current turn, so the agent will mention it to the user when relevant.
 """
 import json, os, sys, time
 from pathlib import Path
 
-STALE_SECONDS = 30  # Re-sync at most every 30 seconds
+STALE_SECONDS = 30          # Re-sync at most every 30 seconds
+ANNOUNCE_THRESHOLD = 50     # Pre-sync announce if > N files to index
 
 # Resolve project root from $CLAUDE_PROJECT_DIR so the hook works regardless
 # of the agent's current working directory.
@@ -119,6 +125,29 @@ def _log(msg):
             f.write(f"[{ts}]       hook | {msg}\n")
     except Exception:
         pass
+
+
+def _load_seen_scans(rtfm_dir):
+    """Scans already signalled to the agent during this project's lifetime.
+
+    Stored as a JSON list so the hook doesn't repeat the same warning on
+    every single turn. User can reset it by deleting .rtfm/seen_scans.json.
+    """
+    p = rtfm_dir / "seen_scans.json"
+    if not p.exists():
+        return set()
+    try:
+        return set(json.loads(p.read_text()))
+    except Exception:
+        return set()
+
+
+def _save_seen_scans(rtfm_dir, seen):
+    try:
+        (rtfm_dir / "seen_scans.json").write_text(json.dumps(sorted(seen)))
+    except Exception:
+        pass
+
 
 def main():
     rtfm_dir = PROJECT_ROOT / ".rtfm"
@@ -157,7 +186,6 @@ def main():
     if not sources:
         sources = [{"path": str(PROJECT_ROOT), "corpus": default_corpus}]
 
-    # Quick incremental sync for each source (no embeddings — fast)
     _log(f"sync starting {len(sources)} source(s)")
     t0 = time.time()
     try:
@@ -165,7 +193,39 @@ def main():
         from rtfm.core.sync import sync
 
         lib = Library(str(db_path))
+
+        # 1. Dry-run pass to count what's actually new/changed across all
+        #    sources. Cheap (no parsing), lets us decide whether to announce.
+        pending_total = 0
+        for src in sources:
+            src_path = Path(src.get("path", ".")).resolve()
+            src_corpus = src.get("corpus", default_corpus)
+            ext_set = None
+            if src.get("extensions"):
+                ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
+                           for e in src["extensions"].split(",")}
+            try:
+                dry = sync(
+                    library=lib,
+                    root=src_path,
+                    corpus=src_corpus,
+                    extensions=ext_set,
+                    dry_run=True,
+                    generate_embeddings=False,
+                )
+                pending_total += dry.added + dry.modified
+            except Exception:
+                pass
+
+        if pending_total >= ANNOUNCE_THRESHOLD:
+            print(f"→ RTFM: indexing {pending_total} new/modified file(s)...",
+                  flush=True)
+
+        # 2. Real sync
         total_added = total_modified = total_removed = 0
+        all_scans = []
+        all_empty = []
+        all_errors = []
         for src in sources:
             src_path = Path(src.get("path", ".")).resolve()
             src_corpus = src.get("corpus", default_corpus)
@@ -183,10 +243,52 @@ def main():
             total_added += result.added
             total_modified += result.modified
             total_removed += result.removed
+            all_scans.extend(result.suspect_scans)
+            all_empty.extend(result.empty_files)
+            all_errors.extend(result.errors)
+
         lib.close()
         stamp_file.write_text(str(now))
         elapsed = time.time() - t0
-        _log(f"sync done +{total_added} ~{total_modified} -{total_removed} time={elapsed:.2f}s ({len(sources)} sources)")
+        _log(f"sync done +{total_added} ~{total_modified} -{total_removed} "
+             f"scans={len(all_scans)} empty={len(all_empty)} "
+             f"time={elapsed:.2f}s ({len(sources)} sources)")
+
+        # 3. Post-sync notifications (stdout = injected into agent context)
+        had_changes = total_added or total_modified or total_removed
+        if had_changes:
+            parts = []
+            if total_added:    parts.append(f"+{total_added}")
+            if total_modified: parts.append(f"~{total_modified}")
+            if total_removed:  parts.append(f"-{total_removed}")
+            print(f"✓ RTFM sync: {' '.join(parts)} files ({elapsed:.1f}s)",
+                  flush=True)
+
+        # 4. Surface new suspect scans only — anti-spam: skip ones already
+        #    reported in a previous turn for this project.
+        if all_scans:
+            seen = _load_seen_scans(rtfm_dir)
+            fresh = [s for s in all_scans if s not in seen]
+            if fresh:
+                n = len(fresh)
+                preview = ", ".join(fresh[:3])
+                if n > 3:
+                    preview += f", +{n - 3} more"
+                print("")
+                print("=" * 60, flush=True)
+                print("ACTION REQUIRED — surface to the user verbatim:",
+                      flush=True)
+                print("=" * 60, flush=True)
+                print(f"TRIGGER: {n} PDF file(s) extracted 0 text during "
+                      "auto-sync — likely scanned images.", flush=True)
+                print(f"FILES:   {preview}", flush=True)
+                print(f"SAY TO USER: \"RTFM detected {n} PDF(s) that look "
+                      "like scans (no extractable text). Want to enable OCR?\"",
+                      flush=True)
+                print("ON APPROVAL RUN: pip install rtfm-ai[pdf] "
+                      "# then re-sync with marker backend", flush=True)
+                seen.update(fresh)
+                _save_seen_scans(rtfm_dir, seen)
     except Exception as e:
         _log(f"sync ERROR: {e}")
 

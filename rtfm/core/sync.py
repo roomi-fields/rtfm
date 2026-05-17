@@ -63,6 +63,10 @@ class SyncResult:
     moved: int = 0
     unchanged: int = 0
     errors: list[str] = field(default_factory=list)
+    # PDFs that produced 0 chunks — likely scanned images needing OCR.
+    suspect_scans: list[str] = field(default_factory=list)
+    # Other files that produced 0 chunks (empty, corrupt, parser quirks).
+    empty_files: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -72,6 +76,8 @@ class SyncResult:
             "moved": self.moved,
             "unchanged": self.unchanged,
             "errors": self.errors,
+            "suspect_scans": self.suspect_scans,
+            "empty_files": self.empty_files,
         }
 
     def __str__(self) -> str:
@@ -541,6 +547,15 @@ def sync(
                 book_slug=book_slug,
                 file_size=fpath.stat().st_size,
             )
+            # Health signal: a file that produces 0 chunks is suspicious.
+            # PDFs are almost always scans needing OCR; other formats may
+            # just be empty or corrupt. We surface both separately so the
+            # CLI/MCP can suggest the right fix.
+            if stats.get("chunks", 0) == 0:
+                if fpath.suffix.lower() == ".pdf":
+                    result.suspect_scans.append(rel)
+                else:
+                    result.empty_files.append(rel)
             if fpath in diff.added:
                 result.added += 1
                 if on_progress:
