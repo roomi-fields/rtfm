@@ -7,12 +7,12 @@
     "url": "https://github.com/roomi-fields/rtfm",
     "source": "github"
   },
-  "version": "0.8.6",
+  "version": "0.8.7",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "rtfm-ai",
-      "version": "0.8.6",
+      "version": "0.8.7",
       "transport": {
         "type": "stdio"
       }

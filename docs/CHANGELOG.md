@@ -7,6 +7,11 @@ description: >-
 
 # Changelog
 
+## [0.8.7] — 2026-05-17
+
+### Fixed
+- **Slash command moved to the correct location and renamed to `/rtfm.ocr`.** In 0.8.6 the file lived at `.claude-plugin/commands/ocr.md`, which is not a directory scanned by Claude Code — plugin slash commands must sit in `commands/` at the plugin root (per the official Plugins reference). Renamed to `commands/rtfm.ocr.md`, so the command surfaces as `/rtfm.ocr` in the slash menu once the marketplace plugin is updated (`/plugin marketplace update roomi-fields` then reinstall `rtfm@roomi-fields`).
+
 ## [0.8.6] — 2026-05-17
 
 ### Added

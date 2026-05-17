@@ -1,7 +1,7 @@
 {
   "name": "rtfm",
   "description": "The open retrieval layer for AI agents — indexes code, docs, data. Search via MCP.",
-  "version": "0.8.6",
+  "version": "0.8.7",
   "author": {
     "name": "roomi-fields"
   },
