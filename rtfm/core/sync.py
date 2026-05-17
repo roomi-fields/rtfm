@@ -177,6 +177,57 @@ def scan_directory(
     return files
 
 
+def quick_diff(
+    library: "Library",
+    root: Path,
+    corpus: str,
+    extensions: set[str] | None = None,
+    exclude_dirs: set[str] | None = None,
+) -> SyncDiff:
+    """Cheap diff used for status reporting — no MD5, just path + stat.
+
+    Trade-off vs :func:`compute_diff`: hash-free, so a file modified
+    in place without changing size can be missed. That is acceptable
+    for the "is the index up to date?" health signal because every
+    real ``rtfm sync`` still uses the hash-based diff for correctness.
+
+    Returns a :class:`SyncDiff` populated only with counts that are
+    cheap to derive (file_size + path comparison against
+    ``indexed_files``).
+    """
+    diff = SyncDiff()
+    files_on_disk = scan_directory(root, extensions, exclude_dirs)
+    indexed = library.list_indexed_files(corpus=corpus)
+
+    seen_paths: set[str] = set()
+    for fpath in files_on_disk:
+        try:
+            rel = str(fpath.relative_to(root))
+        except ValueError:
+            rel = str(fpath)
+        seen_paths.add(rel)
+
+        info = indexed.get(rel)
+        if info is None:
+            diff.added.append(fpath)
+            continue
+        try:
+            current_size = fpath.stat().st_size
+        except OSError:
+            continue
+        prev_size = info.get("file_size") or 0
+        if prev_size and current_size != prev_size:
+            diff.modified.append(fpath)
+        else:
+            diff.unchanged += 1
+
+    for db_path in indexed:
+        if db_path not in seen_paths:
+            diff.removed.append(db_path)
+
+    return diff
+
+
 def compute_diff(
     files_on_disk: list[Path],
     indexed_files: dict[str, dict],

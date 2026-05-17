@@ -14,7 +14,7 @@ from contextlib import redirect_stdout
 
 import pytest
 
-from rtfm.core.sync import SyncResult, sync
+from rtfm.core.sync import SyncResult, quick_diff, sync
 
 
 # ── SyncResult ────────────────────────────────────────────────────────────
@@ -94,6 +94,54 @@ def test_sync_does_not_flag_when_chunks_extracted(library, tmp_path, monkeypatch
 
     assert result.suspect_scans == []
     assert result.empty_files == []
+
+
+# ── quick_diff: cheap path/size comparison for status ────────────────────
+
+def test_quick_diff_detects_new_files(library, tmp_path):
+    """quick_diff reports brand-new files as added without hashing."""
+    (tmp_path / "a.md").write_text("hello")
+    (tmp_path / "b.md").write_text("world")
+    qd = quick_diff(library, tmp_path, "test", extensions={".md"})
+    rels = {str(p.relative_to(tmp_path)) for p in qd.added}
+    assert rels == {"a.md", "b.md"}
+    assert qd.modified == []
+
+
+def test_quick_diff_detects_modified_when_size_changes(library, tmp_path, monkeypatch):
+    """quick_diff flags a tracked file whose on-disk size differs from the
+    stored file_size as modified."""
+    (tmp_path / "doc.md").write_text("hello")
+
+    def fake_indexed(self, corpus=None):
+        return {
+            "doc.md": {
+                "file_hash": "stale",
+                "corpus": "test",
+                "book_slug": "doc",
+                "indexed_at": "2026-01-01T00:00:00",
+                "file_size": 999,  # disk file is 5 bytes — size mismatch
+            }
+        }
+
+    monkeypatch.setattr(type(library), "list_indexed_files", fake_indexed)
+    qd = quick_diff(library, tmp_path, "test", extensions={".md"})
+    assert [str(p.name) for p in qd.modified] == ["doc.md"]
+    assert qd.added == []
+
+
+def test_quick_diff_detects_removed(library, tmp_path, monkeypatch):
+    """A file present in the index but missing on disk shows as removed."""
+    def fake_indexed(self, corpus=None):
+        return {
+            "ghost.md": {
+                "file_hash": "h", "corpus": "test", "book_slug": "ghost",
+                "indexed_at": "2026-01-01T00:00:00", "file_size": 10,
+            }
+        }
+    monkeypatch.setattr(type(library), "list_indexed_files", fake_indexed)
+    qd = quick_diff(library, tmp_path, "test", extensions={".md"})
+    assert qd.removed == ["ghost.md"]
 
 
 # ── CLI helper: _print_health_warnings ────────────────────────────────────

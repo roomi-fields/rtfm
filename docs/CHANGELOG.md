@@ -7,6 +7,12 @@ description: >-
 
 # Changelog
 
+## [0.8.3] — 2026-05-17
+
+### Fixed
+- **`rtfm status` no longer hangs on large corpora.** The "Index health" section introduced in 0.8.1 ran `sync(..., dry_run=True)` for every configured source, which computes the MD5 of every tracked file — fine on a small repo, but a hard wait on corpora with hundreds of large PDFs (e.g. research libraries). Replaced by a new `quick_diff()` helper in `rtfm/core/sync.py` that compares path presence + on-disk `st_size` against the stored tracking metadata. The same helper now also feeds the `UserPromptSubmit` hook's "indexing N files" announcement. Trade-off: an in-place edit that does not change the file size can be missed by `quick_diff`; the real `rtfm sync` still uses the hash diff for correctness.
+- Tests: 3 new in `rtfm/tests/test_sync_health.py` covering the added / modified-by-size / removed paths of `quick_diff`.
+
 ## [0.8.2] — 2026-05-17
 
 ### Fixed

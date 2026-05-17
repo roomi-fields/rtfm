@@ -554,9 +554,12 @@ def cmd_status(args):
 
     # Health: pending sync work + known scan suspects. Best-effort, only
     # if a .rtfm/ config is reachable (skipped for ad-hoc db paths).
+    # Uses quick_diff (path + file_size) instead of the hash-based diff
+    # to keep status snappy on big corpora — a real `rtfm sync` will
+    # still use the hash diff for correctness.
     try:
         from rtfm.config import find_rtfm_root, load_config
-        from rtfm.core.sync import sync as _sync
+        from rtfm.core.sync import quick_diff
         root = find_rtfm_root()
         if root:
             cfg = load_config(root)
@@ -572,14 +575,13 @@ def cmd_status(args):
                     ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
                                for e in src["extensions"].split(",")}
                 try:
-                    dry = _sync(
+                    qd = quick_diff(
                         library=lib, root=src_path, corpus=src_corpus,
-                        extensions=ext_set, dry_run=True,
-                        generate_embeddings=False,
+                        extensions=ext_set,
                     )
-                    pending_added += dry.added
-                    pending_modified += dry.modified
-                    pending_removed += dry.removed
+                    pending_added += len(qd.added)
+                    pending_modified += len(qd.modified)
+                    pending_removed += len(qd.removed)
                 except Exception:
                     pass
 

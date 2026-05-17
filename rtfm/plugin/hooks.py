@@ -190,12 +190,13 @@ def main():
     t0 = time.time()
     try:
         from rtfm.core.library import Library
-        from rtfm.core.sync import sync
+        from rtfm.core.sync import sync, quick_diff
 
         lib = Library(str(db_path))
 
-        # 1. Dry-run pass to count what's actually new/changed across all
-        #    sources. Cheap (no parsing), lets us decide whether to announce.
+        # 1. Quick path/size diff to count what's likely new or changed.
+        #    Hash-free (cheap), used only to decide whether to announce.
+        #    The actual sync below still uses the hash-based diff.
         pending_total = 0
         for src in sources:
             src_path = Path(src.get("path", ".")).resolve()
@@ -205,15 +206,13 @@ def main():
                 ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
                            for e in src["extensions"].split(",")}
             try:
-                dry = sync(
+                qd = quick_diff(
                     library=lib,
                     root=src_path,
                     corpus=src_corpus,
                     extensions=ext_set,
-                    dry_run=True,
-                    generate_embeddings=False,
                 )
-                pending_total += dry.added + dry.modified
+                pending_total += len(qd.added) + len(qd.modified)
             except Exception:
                 pass
 
