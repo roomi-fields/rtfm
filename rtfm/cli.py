@@ -552,39 +552,15 @@ def cmd_status(args):
         else:
             print(f"  {mark} {name:<12}missing — pip install {pkg}   ({purpose})")
 
-    # Health: pending sync work + known scan suspects. Best-effort, only
-    # if a .rtfm/ config is reachable (skipped for ad-hoc db paths).
-    # Uses quick_diff (path + file_size) instead of the hash-based diff
-    # to keep status snappy on big corpora — a real `rtfm sync` will
-    # still use the hash diff for correctness.
+    # Index health. Always cheap by default — just a JSON read for known
+    # scan suspects. Pending-sync counts are opt-in via --health because
+    # stat()-ing every tracked file is fine on a local repo but can take
+    # tens of seconds per source on NTFS-via-WSL or network shares.
     try:
         from rtfm.config import find_rtfm_root, load_config
-        from rtfm.core.sync import quick_diff
         root = find_rtfm_root()
         if root:
-            cfg = load_config(root)
-            sources = cfg.get("sources") or [
-                {"path": str(root), "corpus": cfg.get("corpus", "default")}
-            ]
-            pending_added = pending_modified = pending_removed = 0
-            for src in sources:
-                src_path = Path(src.get("path", ".")).resolve()
-                src_corpus = src.get("corpus", "default")
-                ext_set = None
-                if src.get("extensions"):
-                    ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
-                               for e in src["extensions"].split(",")}
-                try:
-                    qd = quick_diff(
-                        library=lib, root=src_path, corpus=src_corpus,
-                        extensions=ext_set,
-                    )
-                    pending_added += len(qd.added)
-                    pending_modified += len(qd.modified)
-                    pending_removed += len(qd.removed)
-                except Exception:
-                    pass
-
+            health_flag = getattr(args, "health", False)
             seen_scans = []
             scans_file = root / ".rtfm" / "seen_scans.json"
             if scans_file.exists():
@@ -593,22 +569,54 @@ def cmd_status(args):
                 except Exception:
                     pass
 
-            print("\nIndex health:")
-            if pending_added or pending_modified or pending_removed:
-                if pending_added:
-                    print(f"  + {pending_added} new file(s) not yet indexed   → rtfm sync")
-                if pending_modified:
-                    print(f"  ~ {pending_modified} modified file(s) since last sync → rtfm sync")
-                if pending_removed:
-                    print(f"  - {pending_removed} file(s) in DB but missing on disk → rtfm sync")
-            else:
-                print("  ✓ index is up to date")
+            if seen_scans or health_flag:
+                print("\nIndex health:")
+
+            if health_flag:
+                from rtfm.core.sync import quick_diff
+                cfg = load_config(root)
+                sources = cfg.get("sources") or [
+                    {"path": str(root), "corpus": cfg.get("corpus", "default")}
+                ]
+                pending_added = pending_modified = pending_removed = 0
+                print("  (scanning sources, may take a moment)...")
+                for src in sources:
+                    src_path = Path(src.get("path", ".")).resolve()
+                    src_corpus = src.get("corpus", "default")
+                    ext_set = None
+                    if src.get("extensions"):
+                        ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
+                                   for e in src["extensions"].split(",")}
+                    try:
+                        qd = quick_diff(
+                            library=lib, root=src_path, corpus=src_corpus,
+                            extensions=ext_set,
+                        )
+                        pending_added += len(qd.added)
+                        pending_modified += len(qd.modified)
+                        pending_removed += len(qd.removed)
+                    except Exception:
+                        pass
+
+                if pending_added or pending_modified or pending_removed:
+                    if pending_added:
+                        print(f"  + {pending_added} new file(s) not yet indexed   → rtfm sync")
+                    if pending_modified:
+                        print(f"  ~ {pending_modified} modified file(s) since last sync → rtfm sync")
+                    if pending_removed:
+                        print(f"  - {pending_removed} file(s) in DB but missing on disk → rtfm sync")
+                else:
+                    print("  ✓ index is up to date")
+
             if seen_scans:
                 print(f"  ⚠ {len(seen_scans)} PDF(s) flagged as likely scans (0 text)")
                 for path in seen_scans[:5]:
                     print(f"      - {path}")
                 if len(seen_scans) > 5:
                     print(f"      ... +{len(seen_scans) - 5} more")
+
+            if not health_flag:
+                print("\n(Run `rtfm status --health` for pending-sync counts.)")
     except Exception:
         pass  # health section is best-effort
 
@@ -1212,6 +1220,11 @@ def main():
 
     # status
     p_status = subparsers.add_parser("status", help="Show RTFM status", parents=[db_parent])
+    p_status.add_argument(
+        "--health", action="store_true",
+        help="Also compute pending-sync counts. Can be slow on big or remote "
+             "(NTFS over WSL, network) corpora — each source is stat()-ed.",
+    )
     p_status.set_defaults(func=cmd_status)
 
     # sync

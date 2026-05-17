@@ -195,10 +195,20 @@ def main():
         lib = Library(str(db_path))
 
         # 1. Quick path/size diff to count what's likely new or changed.
-        #    Hash-free (cheap), used only to decide whether to announce.
-        #    The actual sync below still uses the hash-based diff.
+        #    Hash-free, but still stat()s every tracked file — which on
+        #    NTFS-via-WSL or network shares can be tens of seconds per
+        #    source. We bound the *total* preview time so the hook never
+        #    blocks the user's prompt waiting on remote storage: if the
+        #    budget is exhausted, we just skip the pre-sync announcement.
+        PRE_BUDGET = 2.0
+        pre_start = time.time()
         pending_total = 0
+        announce_ready = True
         for src in sources:
+            if time.time() - pre_start > PRE_BUDGET:
+                announce_ready = False
+                _log("pre-scan budget exceeded, skipping announcement")
+                break
             src_path = Path(src.get("path", ".")).resolve()
             src_corpus = src.get("corpus", default_corpus)
             ext_set = None
@@ -216,7 +226,7 @@ def main():
             except Exception:
                 pass
 
-        if pending_total >= ANNOUNCE_THRESHOLD:
+        if announce_ready and pending_total >= ANNOUNCE_THRESHOLD:
             print(f"→ RTFM: indexing {pending_total} new/modified file(s)...",
                   flush=True)
 

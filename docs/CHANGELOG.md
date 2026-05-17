@@ -7,6 +7,13 @@ description: >-
 
 # Changelog
 
+## [0.8.4] — 2026-05-17
+
+### Fixed
+- **`rtfm status` and the auto-sync hook no longer block on remote/NTFS sources.** 0.8.3 reduced the status-health diff from "hash every file" to "stat every file"; on a small local repo that's instant, but on a 1700-file Obsidian vault sitting on NTFS via WSL even `os.stat()` adds up to ~90 seconds per source. Two changes:
+  - `rtfm status` now keeps the index-health pending counts behind an opt-in `--health` flag. The default `rtfm status` runs in well under a second again, and known scan suspects (a single JSON read) are still shown unconditionally.
+  - The `UserPromptSubmit` hook bounds its pre-sync diff to a 2-second total budget. If the budget is exhausted before all sources are scanned, the "indexing N files" announcement is silently skipped and the actual sync proceeds normally — the post-sync `✓ RTFM sync` summary still fires.
+
 ## [0.8.3] — 2026-05-17
 
 ### Fixed
