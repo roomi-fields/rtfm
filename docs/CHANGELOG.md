@@ -7,6 +7,14 @@ description: >-
 
 # Changelog
 
+## [0.8.6] — 2026-05-17
+
+### Added
+- **`/rtfm:ocr` slash command.** Users who install RTFM via `/plugin install rtfm@roomi-fields` now get a Claude Code slash command that wraps `rtfm sync --ocr` — pick it from the `/` menu, the agent runs the command, summarises results, and confirms persistent OCR fallback is active. Defined in `.claude-plugin/commands/ocr.md`.
+
+### Fixed
+- **`rtfm sync --ocr` now works from any directory.** When invoked outside a `.rtfm/` project (no config to persist into), the flag still forces `ocr_fallback=True` for the current run. Previously it was silently ignored: the persistent flag could only be saved when a `.rtfm/` was reachable, and the run itself fell back to pdftext-only.
+
 ## [0.8.5] — 2026-05-17
 
 ### Added

@@ -704,11 +704,17 @@ def cmd_sync(args):
                 print("Future syncs will auto-OCR scanned PDFs.")
         args.force = True  # so already-indexed scans get re-OCR'd now
 
-    # Read persistent flags
+    # Read persistent flag (if a .rtfm/ project is reachable).
     ocr_fallback = False
     rtfm_root = find_rtfm_root()
     if rtfm_root:
         ocr_fallback = load_config(rtfm_root).get("ocr_fallback", False)
+
+    # An explicit --ocr always wins for the current run — even when
+    # we couldn't locate a .rtfm/ project to persist it into. That makes
+    # `rtfm sync --ocr <path>` work from any directory.
+    if getattr(args, "ocr", False):
+        ocr_fallback = True
 
     # Default progress heartbeat: 10 min during OCR runs, otherwise off.
     progress_interval = args.progress_every
