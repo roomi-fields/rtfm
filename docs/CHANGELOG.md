@@ -7,6 +7,11 @@ description: >-
 
 # Changelog
 
+## [0.9.2] — 2026-05-18
+
+### Fixed
+- **`move_file()` no longer crashes with `UNIQUE constraint failed: indexed_files.filepath`.** Previously the cross-corpus move pass did a plain `DELETE + INSERT` on the tracking table, which raised mid-sync as soon as the target `filepath` already had a row (typical when only the corpus name changes in `config.json` and every cross-move has `old_filepath == new_filepath`). The DELETE had already run when the INSERT threw, so the `books` row was repointed at the new corpus but its tracking entry was gone — leaving thousands of "orphan" books with no `indexed_files` mapping. Replaced with an `INSERT ... ON CONFLICT(filepath) DO UPDATE` (same pattern as `update_indexed_file`) and an explicit `DELETE old_filepath` only when it differs from `new_filepath`. 2 new regression tests in `rtfm/tests/test_cross_corpus_move.py` (`test_corpus_rename_in_place_no_unique_conflict` reproduces the user-facing scenario; `test_move_file_preexisting_target_filepath` is a belt-and-braces unit test). Full suite: 501 passed.
+
 ## [0.9.1] — 2026-05-18
 
 ### Fixed

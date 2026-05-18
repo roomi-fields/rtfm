@@ -2012,13 +2012,28 @@ class Library:
                 (new_slug, new_filepath, target_corpus, old_slug)
             )
 
-        # Replace tracking entry
-        conn.execute("DELETE FROM indexed_files WHERE filepath = ?", (old_filepath,))
+        # Upsert the new tracking row first. ``ON CONFLICT(filepath) DO UPDATE``
+        # tolerates any pre-existing row at ``new_filepath`` (e.g. when only
+        # the corpus is renamed, ``new_filepath == old_filepath``; or when an
+        # earlier sync step happened to write the same path). Without this,
+        # a plain INSERT raised ``UNIQUE constraint failed: indexed_files.filepath``
+        # mid-sync and left the DB with orphan ``books`` rows whose tracking
+        # row had already been DELETEd.
         conn.execute(
             """INSERT INTO indexed_files (filepath, file_hash, corpus, book_slug, indexed_at, file_size)
-               VALUES (?, ?, ?, ?, datetime('now'), ?)""",
+               VALUES (?, ?, ?, ?, datetime('now'), ?)
+               ON CONFLICT(filepath) DO UPDATE SET
+                   file_hash = excluded.file_hash,
+                   corpus = excluded.corpus,
+                   book_slug = excluded.book_slug,
+                   indexed_at = excluded.indexed_at,
+                   file_size = excluded.file_size""",
             (new_filepath, row["file_hash"], target_corpus, new_slug, row["file_size"])
         )
+        # Clean up the old tracking row only if it differs from the new one,
+        # otherwise the upsert above already covered it.
+        if old_filepath != new_filepath:
+            conn.execute("DELETE FROM indexed_files WHERE filepath = ?", (old_filepath,))
         conn.commit()
         return True
 
