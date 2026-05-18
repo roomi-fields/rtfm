@@ -7,6 +7,11 @@ description: >-
 
 # Changelog
 
+## [0.8.8] — 2026-05-18
+
+### Added
+- **`/rtfm.status` slash command.** Wraps `rtfm status --health` so the user can check index health from the Claude Code `/` menu without dropping to a terminal. Returns the full status (books, chunks, corpora, embeddings, last sync, parsers, extras) plus pending-sync counts and known scan suspects. Defined in `commands/rtfm.status.md`.
+
 ## [0.8.7] — 2026-05-17
 
 ### Fixed
