@@ -7,6 +7,11 @@ description: >-
 
 # Changelog
 
+## [0.9.3] — 2026-05-18
+
+### Fixed
+- **Sync no longer drops embeddings with `Model paraphrase-multilingual-MiniLM-L12-v2 is not supported in TextEmbedding`** on DBs created by older RTFM versions. Early releases stored the short, unqualified model name (`paraphrase-multilingual-MiniLM-L12-v2`) in `chunk_embeddings.model`. Recent fastembed releases only accept the fully-qualified `sentence-transformers/...` form, so reusing the DB's active model on a fresh sync threw mid-batch and silently disabled embedding generation for every new chunk. `resolve_model()` now suffix-matches a short name back to the registered fully-qualified entry, and `Library.generate_embeddings()` normalizes the DB-stored name through `resolve_model` before handing it to fastembed. 4 new tests in `rtfm/tests/test_embeddings.py::TestResolveModel`.
+
 ## [0.9.2] — 2026-05-18
 
 ### Fixed

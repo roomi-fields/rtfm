@@ -1597,7 +1597,11 @@ class Library:
 
         # Resolve alias to full HF name early so we store a single canonical name
         requested = resolve_model(model).hf_name if model else None
-        active = self.get_active_embedding_model()
+        # ``active`` may be a short name from an older DB (e.g. plain
+        # ``paraphrase-multilingual-MiniLM-L12-v2``) — normalize so we always
+        # hand fastembed the fully-qualified form it expects.
+        active_raw = self.get_active_embedding_model()
+        active = resolve_model(active_raw).hf_name if active_raw else None
 
         if requested and active and requested != active and not force:
             raise ValueError(

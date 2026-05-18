@@ -10,6 +10,42 @@ pytest.importorskip("fastembed")
 import numpy as np  # noqa: E402  — gated by importorskip above
 
 
+class TestResolveModel:
+    """Tests for ``rtfm.core.embeddings.resolve_model`` — covers alias,
+    fully-qualified HF name, and the short-name back-compat path (early
+    RTFM versions stored ``paraphrase-multilingual-MiniLM-L12-v2`` in
+    ``chunk_embeddings.model``; newer fastembed releases only accept the
+    ``sentence-transformers/...`` form, so the resolver must map back).
+    """
+
+    def test_alias_resolves_to_full_hf_name(self):
+        from rtfm.core.embeddings import resolve_model
+        info = resolve_model("fast")
+        assert info.hf_name == "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        assert info.dim == 384
+
+    def test_full_hf_name_passes_through(self):
+        from rtfm.core.embeddings import resolve_model
+        info = resolve_model("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+        assert info.hf_name == "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        assert info.dim == 384
+
+    def test_short_name_resolves_to_registered_full_name(self):
+        """Regression: legacy DBs stored the short name without the
+        ``sentence-transformers/`` prefix. ``resolve_model`` must map it
+        back to the qualified name so fastembed accepts it."""
+        from rtfm.core.embeddings import resolve_model
+        info = resolve_model("paraphrase-multilingual-MiniLM-L12-v2")
+        assert info.hf_name == "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        assert info.dim == 384
+
+    def test_unknown_name_passes_through_with_minus_one_dim(self):
+        from rtfm.core.embeddings import resolve_model
+        info = resolve_model("totally-unknown-model-xyz")
+        assert info.hf_name == "totally-unknown-model-xyz"
+        assert info.dim == -1
+
+
 class TestEmbeddingsModule:
     """Tests for the embeddings module."""
 

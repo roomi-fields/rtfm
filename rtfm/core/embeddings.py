@@ -57,12 +57,24 @@ def resolve_model(name_or_alias: str) -> ModelInfo:
 
     Unknown HF names are returned with dim/size set to -1 — used as a signal
     that the model is untracked by the registry but still loadable by FastEmbed.
+
+    Also tolerates short HF names — early versions of RTFM stored
+    ``paraphrase-multilingual-MiniLM-L12-v2`` in ``chunk_embeddings.model``
+    instead of the fully-qualified ``sentence-transformers/...`` form. Newer
+    fastembed releases only accept the qualified form, so we map back to
+    the registered entry by suffix match when the short form is passed in.
     """
     if name_or_alias in EMBEDDING_MODELS:
         return EMBEDDING_MODELS[name_or_alias]
     alias = _HF_TO_ALIAS.get(name_or_alias)
     if alias is not None:
         return EMBEDDING_MODELS[alias]
+    # Suffix match: short name (no org prefix) → fully-qualified registered name
+    if "/" not in name_or_alias:
+        suffix = "/" + name_or_alias
+        for hf_name, alias in _HF_TO_ALIAS.items():
+            if hf_name.endswith(suffix):
+                return EMBEDDING_MODELS[alias]
     return ModelInfo(hf_name=name_or_alias, dim=-1, size_mb=-1, languages="unknown")
 
 
