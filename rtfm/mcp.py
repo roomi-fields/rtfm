@@ -48,6 +48,42 @@ def _admin_tool():
     return lambda fn: fn
 
 
+# ── Param coercion (LLM-friendly) ────────────────────────────────────────
+
+def _coerce_int(value, default: int) -> int:
+    """Coerce LLM-passed values to int.
+
+    Some MCP clients/LLMs pass numeric params as JSON strings (e.g.
+    ``"limit": "5"``). Without coercion this crashes downstream in
+    comparisons like ``len(results) >= limit``. Falls back to ``default``
+    for ``None`` or unparseable values rather than raising.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):  # bool is a subclass of int — reject it
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value, default: float) -> float:
+    """Coerce LLM-passed values to float. See ``_coerce_int``."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 # ── Progressive disclosure helpers ───────────────────────────────────────
 
 def _deduplicate_by_source(results, limit: int):
@@ -330,6 +366,11 @@ def rtfm_search(
     t0 = time.time()
     lib = _get_library()
 
+    # Defensive coercion: some MCP clients pass ints as strings
+    limit = _coerce_int(limit, 5)
+    freshness_weight = _coerce_float(freshness_weight, 0.0)
+    centrality_weight = _coerce_float(centrality_weight, 0.0)
+
     # Overfetch to ensure enough unique sources after dedup
     fetch_limit = limit * 5
 
@@ -494,6 +535,8 @@ def rtfm_books(
         limit: max books per page (default 50, 0 for all)
         offset: skip N books for pagination (default 0)
     """
+    limit = _coerce_int(limit, 50)
+    offset = _coerce_int(offset, 0)
     log("books", f"corpus={corpus!r} limit={limit} offset={offset}")
     lib = _get_library()
     books = lib.list_books(corpus=corpus)
@@ -721,6 +764,8 @@ def rtfm_context(
     t0 = time.time()
     lib = _get_library()
 
+    limit = _coerce_int(limit, 5)
+
     # If subject looks like a file path and exists, try lazy indexing
     subject_path = Path(subject)
     if subject_path.exists() and subject_path.is_file():
@@ -779,6 +824,9 @@ def rtfm_expand(
     t0 = time.time()
     lib = _get_library()
     conn = lib._get_conn()
+
+    offset = _coerce_int(offset, 0)
+    count = _coerce_int(count, 1)
 
     # Resolve path → book (strict matching, no fuzzy)
     book_row = _resolve_book_by_path(conn, source)
@@ -1027,6 +1075,8 @@ def rtfm_history(
         source: Book slug or absolute file path.
         version: Version number to retrieve (optional). If omitted, lists all versions.
     """
+    if version is not None:
+        version = _coerce_int(version, 0) or None
     log("history", f"source={source!r} version={version!r}")
     lib = _get_library()
     conn = lib._get_conn()

@@ -123,6 +123,66 @@ class TestMCPSearch:
         result = rtfm_search("meditation", search_type="fts")
         assert "meditation" in result.lower() or "No results" in result
 
+    def test_search_accepts_limit_as_string(self, mcp_db):
+        """Regression: some MCP clients pass numeric params as strings
+        ('limit': '5'). Must not crash with TypeError in library.search()."""
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search("consciousness", limit="5")
+        assert "sources for" in result or "No results" in result
+
+    def test_search_accepts_weights_as_strings(self, mcp_db):
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search(
+            "consciousness",
+            limit="3",
+            freshness_weight="0.1",
+            centrality_weight="0.0",
+        )
+        assert "sources for" in result or "No results" in result
+
+    def test_search_handles_garbage_limit(self, mcp_db):
+        """Unparseable limit falls back to default rather than crashing."""
+        from rtfm.mcp import rtfm_search
+        result = rtfm_search("consciousness", limit="not-a-number")
+        assert "sources for" in result or "No results" in result
+
+
+class TestMCPCoercionHelpers:
+    def test_coerce_int_passthrough(self):
+        from rtfm.mcp import _coerce_int
+        assert _coerce_int(5, 0) == 5
+        assert _coerce_int(0, 99) == 0
+
+    def test_coerce_int_string(self):
+        from rtfm.mcp import _coerce_int
+        assert _coerce_int("5", 0) == 5
+        assert _coerce_int(" 12 ", 0) == 12
+
+    def test_coerce_int_none_returns_default(self):
+        from rtfm.mcp import _coerce_int
+        assert _coerce_int(None, 42) == 42
+
+    def test_coerce_int_garbage_returns_default(self):
+        from rtfm.mcp import _coerce_int
+        assert _coerce_int("abc", 7) == 7
+        assert _coerce_int([1, 2], 7) == 7
+        assert _coerce_int({}, 7) == 7
+
+    def test_coerce_int_rejects_bool(self):
+        """bool is a subclass of int — coercing True to 1 would silently
+        accept boolean flags as counts. Reject and use default."""
+        from rtfm.mcp import _coerce_int
+        assert _coerce_int(True, 5) == 5
+        assert _coerce_int(False, 5) == 5
+
+    def test_coerce_float_basics(self):
+        from rtfm.mcp import _coerce_float
+        assert _coerce_float(0.5, 0.0) == 0.5
+        assert _coerce_float("0.3", 0.0) == 0.3
+        assert _coerce_float(None, 0.7) == 0.7
+        assert _coerce_float("xyz", 0.9) == 0.9
+        assert _coerce_float(True, 0.4) == 0.4
+
 
 class TestMCPStats:
     def test_stats(self, mcp_db):

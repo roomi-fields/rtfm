@@ -7,6 +7,11 @@ description: >-
 
 # Changelog
 
+## [0.9.1] — 2026-05-18
+
+### Fixed
+- **MCP tools now coerce numeric params passed as strings.** Some MCP clients/LLMs emit `"limit": "5"` instead of `"limit": 5`; downstream comparisons like `len(results) >= limit` in `library.search()` then crashed with `TypeError: '>=' not supported between instances of 'int' and 'str'`. Affected `rtfm_search`, `rtfm_context`, `rtfm_books`, `rtfm_expand`, and `rtfm_history`. New `_coerce_int`/`_coerce_float` helpers in `rtfm/mcp.py` cast incoming values, fall back to the documented default on unparseable input, and reject `bool` (which is a subclass of `int` in Python). 9 new regression tests in `rtfm/tests/test_mcp.py`. Full suite: 487 passed.
+
 ## [0.9.0] — 2026-05-18
 
 ### Added
