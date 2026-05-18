@@ -173,43 +173,98 @@ def extract_with_pdftext(path: Path) -> list[dict]:
         raise PDFExtractionError(f"pdftext extraction failed: {e}")
 
 
+# Subprocess body for marker OCR. Run as a one-shot child process so
+# every PDF starts with a fresh interpreter — marker's pipeline holds
+# 3-8 GB of model state and never releases it in-process, so before
+# 0.9.5 a long OCR run accumulated RAM until WSL OOM-killed the worker
+# and froze the host. The OS reclaims everything when the child exits.
+_MARKER_SUBPROCESS_CODE = r"""
+import json, sys, traceback
+try:
+    from marker.converters.pdf import PdfConverter
+    from marker.models import create_model_dict
+except Exception as e:
+    print(json.dumps({"error": f"import: {e}"}))
+    sys.exit(2)
+try:
+    models = create_model_dict()
+    converter = PdfConverter(artifact_dict=models)
+    result = converter(sys.argv[1])
+    if hasattr(result, "markdown"):
+        md = result.markdown
+    elif isinstance(result, tuple) and result:
+        md = result[0]
+    else:
+        md = str(result)
+    print(json.dumps({"markdown": md}))
+except Exception as e:
+    print(json.dumps({"error": f"{type(e).__name__}: {e}",
+                      "trace": traceback.format_exc()}))
+    sys.exit(3)
+"""
+
+# Per-PDF wall-clock budget for the marker subprocess. 20 min covers
+# very large scanned PDFs on CPU; anything longer almost certainly
+# means the file is broken or marker is stuck — better to fail and
+# move on than to block the whole sync.
+_MARKER_TIMEOUT_S = 20 * 60
+
+
 def extract_with_marker(path: Path) -> list[dict]:
-    """
-    Extract text using marker-pdf (high quality, slower).
+    """Extract text using marker-pdf in an isolated subprocess.
+
+    Why subprocess: ``marker.models.create_model_dict()`` loads 3-8 GB
+    of ML state (layout + OCR + table + reading-order pipelines). Marker
+    caches that state at module level and never releases it, so doing
+    sequential OCR in-process accumulates RAM until the worker is
+    OOM-killed (which on WSL takes the whole VM down). A fresh Python
+    process per PDF lets the OS reclaim the full footprint on exit.
 
     Returns list of dicts with 'page' and 'text' keys.
     """
+    import json
+    import os
+    import subprocess
+    import sys
+
     try:
-        from marker.converters.pdf import PdfConverter
-        from marker.models import create_model_dict
-    except ImportError:
+        result = subprocess.run(
+            [sys.executable, "-c", _MARKER_SUBPROCESS_CODE, str(path)],
+            capture_output=True,
+            text=True,
+            timeout=_MARKER_TIMEOUT_S,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+    except subprocess.TimeoutExpired:
+        raise PDFExtractionError(
+            f"marker extraction timed out after {_MARKER_TIMEOUT_S}s on {path.name}"
+        )
+    except FileNotFoundError:
         raise PDFExtractionError(
             "\n\n  ❌ PDF marker backend requires the pdf extra.\n"
             "     Install with:  pip install rtfm-ai[pdf]\n"
         )
 
+    if result.returncode != 0:
+        # The subprocess prints structured JSON on the last stdout line
+        # even when it raises, so try that before falling back to stderr.
+        msg = result.stderr.strip() or result.stdout.strip()
+        try:
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            msg = payload.get("error", msg)
+        except (ValueError, IndexError):
+            pass
+        raise PDFExtractionError(f"marker subprocess failed: {msg}")
+
     try:
-        # Initialize converter
-        models = create_model_dict()
-        converter = PdfConverter(artifact_dict=models)
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError) as e:
+        raise PDFExtractionError(f"marker subprocess returned invalid output: {e}")
 
-        # Convert PDF
-        result = converter(str(path))
+    if "error" in payload:
+        raise PDFExtractionError(f"marker extraction failed: {payload['error']}")
 
-        # Extract markdown content
-        if hasattr(result, 'markdown'):
-            markdown = result.markdown
-        elif isinstance(result, tuple) and len(result) > 0:
-            markdown = result[0]
-        else:
-            markdown = str(result)
-
-        # Split by page markers or treat as single page
-        # Marker doesn't always provide page breaks, so we estimate
-        return [{'page': 1, 'text': markdown}]
-
-    except Exception as e:
-        raise PDFExtractionError(f"marker extraction failed: {e}")
+    return [{"page": 1, "text": payload.get("markdown", "")}]
 
 
 @ParserRegistry.register

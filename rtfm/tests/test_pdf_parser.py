@@ -38,6 +38,62 @@ class TestPDFParser:
         with pytest.raises(ValueError):
             PDFParser(backend='invalid')
 
+    def test_extract_with_marker_runs_in_subprocess(self):
+        """Regression for 0.9.5: ``extract_with_marker`` must shell out
+        to a fresh Python interpreter (so each PDF's 3-8 GB of model
+        state is reclaimed by the OS when the child exits). Without this
+        isolation, sequential OCR on WSL grows past 16 GB and freezes
+        the whole VM."""
+        from unittest.mock import patch, MagicMock
+        from pathlib import Path
+        from rtfm.parsers.pdf import extract_with_marker
+
+        fake_result = MagicMock()
+        fake_result.returncode = 0
+        fake_result.stdout = '{"markdown": "Hello world"}'
+        fake_result.stderr = ""
+
+        with patch("subprocess.run", return_value=fake_result) as run_mock:
+            pages = extract_with_marker(Path("/tmp/fake.pdf"))
+
+        assert pages == [{"page": 1, "text": "Hello world"}]
+        # Subprocess called exactly once, with a fresh -c interpreter
+        # (not the in-process marker code path).
+        run_mock.assert_called_once()
+        argv = run_mock.call_args.args[0]
+        assert argv[1] == "-c", "must invoke a fresh python -c subprocess"
+        assert "create_model_dict" in argv[2], "subprocess body must load marker"
+
+    def test_extract_with_marker_propagates_subprocess_error(self):
+        """When the marker subprocess raises, ``PDFExtractionError`` must
+        carry the inner error message (parsed from the subprocess JSON
+        output if present)."""
+        from unittest.mock import patch, MagicMock
+        from pathlib import Path
+        from rtfm.parsers.pdf import extract_with_marker, PDFExtractionError
+
+        fake_result = MagicMock()
+        fake_result.returncode = 3
+        fake_result.stdout = '{"error": "RuntimeError: cuda OOM"}'
+        fake_result.stderr = ""
+
+        with patch("subprocess.run", return_value=fake_result):
+            with pytest.raises(PDFExtractionError, match="cuda OOM"):
+                extract_with_marker(Path("/tmp/fake.pdf"))
+
+    def test_extract_with_marker_timeout_raises(self):
+        """A stuck marker subprocess must surface as PDFExtractionError,
+        not as an unhandled TimeoutExpired."""
+        import subprocess
+        from unittest.mock import patch
+        from pathlib import Path
+        from rtfm.parsers.pdf import extract_with_marker, PDFExtractionError
+
+        with patch("subprocess.run",
+                   side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1)):
+            with pytest.raises(PDFExtractionError, match="timed out"):
+                extract_with_marker(Path("/tmp/fake.pdf"))
+
     def test_slugify(self):
         """Test slugify function."""
         from rtfm.parsers.pdf import slugify

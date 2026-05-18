@@ -7,6 +7,11 @@ description: >-
 
 # Changelog
 
+## [0.9.5] — 2026-05-18
+
+### Fixed
+- **OCR no longer accumulates RAM across PDFs.** `marker.models.create_model_dict()` loads 3-8 GB of ML state (layout + OCR + table + reading-order pipelines) and caches it at module level — marker never releases it. The old in-process loop in `extract_with_marker()` re-loaded those models for every PDF without freeing the previous run, so a long `rtfm sync --ocr` on WSL (16 GB cap) climbed past the ceiling, swapped on NTFS, and froze the whole VM. Now each PDF is OCR'd in a one-shot Python subprocess (`subprocess.run`); the OS reclaims the full footprint when the child exits. Adds a 20-min per-PDF timeout (`PDFExtractionError` instead of an indefinite hang) and a structured JSON protocol between worker and host. 3 new tests in `rtfm/tests/test_pdf_parser.py`.
+
 ## [0.9.4] — 2026-05-18
 
 ### Changed
