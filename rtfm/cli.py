@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -552,6 +553,28 @@ def cmd_status(args):
         else:
             print(f"  {mark} {name:<12}missing — pip install {pkg}   ({purpose})")
 
+    # OCR daemon status (cheap: one JSON read + a kill -0 syscall).
+    # Always shown when present so the user knows a long OCR is in
+    # flight or that a previous one died.
+    try:
+        from rtfm.config import find_rtfm_root
+        from rtfm.core.ocr_daemon import (
+            read_state, pid_alive, format_progress,
+        )
+        _root_for_ocr = find_rtfm_root()
+        if _root_for_ocr is not None:
+            _ocr_state = read_state(_root_for_ocr / ".rtfm")
+            if _ocr_state is not None:
+                if _ocr_state.status == "running" and not pid_alive(_ocr_state.pid):
+                    # Daemon died without cleaning up. Promote to "crashed"
+                    # so the message is accurate without rewriting state.
+                    _ocr_state.status = "crashed"
+                print("\nOCR daemon:")
+                for line in format_progress(_ocr_state).splitlines():
+                    print(f"  {line}")
+    except Exception:
+        pass  # best-effort
+
     # Index health. Always cheap by default — just a JSON read for known
     # scan suspects. Pending-sync counts are opt-in via --health because
     # stat()-ing every tracked file is fine on a local repo but can take
@@ -623,6 +646,98 @@ def cmd_status(args):
     lib.close()
 
 
+def cmd_ocr_worker(args):
+    """Internal background worker for OCR re-indexing.
+
+    Runs incremental sync over every configured source with
+    ocr_fallback=True, while continuously updating
+    ``.rtfm/ocr_state.json`` so the user can watch progress via
+    ``rtfm status``. Designed to be invoked by ``cmd_sync(--ocr)``
+    through ``subprocess.Popen(start_new_session=True)`` — never by
+    the user directly.
+    """
+    from rtfm.config import find_rtfm_root, load_config
+    from rtfm.core.library import Library
+    from rtfm.core.sync import sync, scan_directory
+    from rtfm.core.ocr_daemon import (
+        OCRState, _now_iso, write_state, clear_state,
+    )
+
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("ocr-worker: no .rtfm/ project root in the cwd chain.")
+    rtfm_dir = rtfm_root / ".rtfm"
+    db_path = rtfm_dir / "library.db"
+
+    cfg = load_config(rtfm_root)
+    sources = cfg.get("sources") or [
+        {"path": str(rtfm_root), "corpus": cfg.get("corpus", "default")}
+    ]
+
+    # Count PDFs across all sources to give the user a meaningful total.
+    total_pdfs = 0
+    for src in sources:
+        src_path = Path(src.get("path", ".")).resolve()
+        try:
+            total_pdfs += len(scan_directory(src_path, extensions={".pdf"}))
+        except Exception:
+            pass
+
+    started = _now_iso()
+    state = OCRState(
+        pid=os.getpid(),
+        status="running",
+        total=total_pdfs,
+        done=0,
+        current_file="",
+        started_at=started,
+        last_update=started,
+    )
+    write_state(rtfm_dir, state)
+
+    try:
+        lib = Library(str(db_path))
+
+        for src in sources:
+            src_path = Path(src.get("path", ".")).resolve()
+            src_corpus = src.get("corpus", "default")
+            ext_set = None
+            if src.get("extensions"):
+                ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
+                           for e in src["extensions"].split(",")}
+
+            def _on_progress(action: str, fp: str, detail: str) -> None:
+                # Only count files that actually went through ingestion.
+                if action in ("add", "update") and fp:
+                    state.done += 1
+                    state.current_file = fp
+                    state.last_update = _now_iso()
+                    write_state(rtfm_dir, state)
+
+            sync(
+                library=lib,
+                root=src_path,
+                corpus=src_corpus,
+                extensions=ext_set,
+                ocr_fallback=True,
+                generate_embeddings=False,
+                on_progress=_on_progress,
+                progress_interval=None,
+            )
+
+        lib.close()
+        state.status = "finished"
+        state.last_update = _now_iso()
+        write_state(rtfm_dir, state)
+        clear_state(rtfm_dir)
+    except Exception as exc:
+        state.status = "crashed"
+        state.error = str(exc)
+        state.last_update = _now_iso()
+        write_state(rtfm_dir, state)
+        raise
+
+
 def _print_health_warnings(result, ocr_already_on: bool = False) -> None:
     """Surface scan/empty-file warnings after a sync."""
     if result.suspect_scans:
@@ -687,22 +802,80 @@ def cmd_sync(args):
             print(f"  {sym} {detail}")
 
     # --ocr flips the persistent ocr_fallback flag in .rtfm/config.json
-    # so every future sync (CLI and auto-sync hook) auto-OCRs scans.
-    # The first run also forces re-ingest so previously-empty scans
-    # get OCR-extracted; future syncs touch only changed files.
+    # and runs the OCR pass in a detached background daemon (otherwise
+    # a multi-hour OCR run dies with the terminal / Claude Code hook).
+    # Returns immediately to the user with the daemon's PID.
     if getattr(args, "ocr", False):
+        from rtfm.core.ocr_daemon import (
+            daemon_running, format_progress,
+        )
         rtfm_root = find_rtfm_root()
-        if rtfm_root:
-            cfg = load_config(rtfm_root)
-            already_on = cfg.get("ocr_fallback", False)
-            cfg["ocr_fallback"] = True
-            save_config(rtfm_root, cfg)
-            if already_on:
-                print("OCR fallback already enabled — re-running OCR pass.")
-            else:
-                print("OCR fallback enabled (persisted to .rtfm/config.json).")
-                print("Future syncs will auto-OCR scanned PDFs.")
-        args.force = True  # so already-indexed scans get re-OCR'd now
+        if rtfm_root is None:
+            print("rtfm sync --ocr requires a .rtfm/ project root to "
+                  "persist state. Run `rtfm init` first or `cd` into "
+                  "an indexed project.")
+            sys.exit(1)
+
+        # 1. Refuse to step on a daemon that is already running.
+        live = daemon_running(rtfm_root / ".rtfm")
+        if live is not None:
+            print(format_progress(live))
+            print("\nAn OCR daemon is already running. Wait for it to "
+                  "finish, or kill it manually before relaunching:")
+            print(f"  kill {live.pid}")
+            return
+
+        # 2. Persist the ocr_fallback flag so future syncs (manual or
+        #    via the auto-sync hook) auto-OCR new scans.
+        cfg = load_config(rtfm_root)
+        already_on = cfg.get("ocr_fallback", False)
+        cfg["ocr_fallback"] = True
+        save_config(rtfm_root, cfg)
+        if already_on:
+            print("OCR fallback already enabled — relaunching OCR pass.")
+        else:
+            print("OCR fallback enabled (persisted to .rtfm/config.json).")
+            print("Future syncs will auto-OCR scanned PDFs.")
+
+        # 3. Invalidate the file_hash of every known scan so the worker's
+        #    incremental sync sees them as modified and re-ingests them.
+        #    Resumable: files that were OCR'd in a previous run already
+        #    have a real hash and won't be touched a second time.
+        scans_file = rtfm_root / ".rtfm" / "seen_scans.json"
+        if scans_file.exists():
+            try:
+                scans = json.loads(scans_file.read_text())
+                if scans:
+                    conn = lib._get_conn()
+                    placeholders = ",".join("?" * len(scans))
+                    conn.execute(
+                        f"UPDATE indexed_files SET file_hash = '' "
+                        f"WHERE filepath IN ({placeholders})",
+                        list(scans),
+                    )
+                    conn.commit()
+            except Exception as exc:
+                print(f"warning: could not invalidate scan hashes: {exc}",
+                      file=sys.stderr)
+
+        # 4. Close the library handle BEFORE forking — the child opens
+        #    its own SQLite connection, and SQLite does not enjoy a
+        #    shared FD across a process boundary.
+        lib.close()
+
+        # 5. Fork the detached worker and return.
+        import subprocess
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "rtfm.cli", "ocr-worker"],
+            cwd=str(rtfm_root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,  # immune to parent SIGHUP / hook timeout
+        )
+        print(f"\nOCR daemon started in background (PID {proc.pid}).")
+        print("Track progress: `rtfm status` or `/rtfm.status`.")
+        return
 
     # Read persistent flag (if a .rtfm/ project is reachable).
     ocr_fallback = False
@@ -1323,6 +1496,13 @@ def main():
              "when --ocr is set, off otherwise).",
     )
     p_sync.set_defaults(func=cmd_sync)
+
+    # ocr-worker (internal — invoked by `rtfm sync --ocr` as a detached
+    # subprocess, not meant for direct use). Hidden from --help.
+    p_worker = subparsers.add_parser(
+        "ocr-worker", help=argparse.SUPPRESS, parents=[db_parent]
+    )
+    p_worker.set_defaults(func=cmd_ocr_worker)
 
     # add (register a source)
     p_add = subparsers.add_parser("add", help="Register a source directory")

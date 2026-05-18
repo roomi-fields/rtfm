@@ -7,6 +7,21 @@ description: >-
 
 # Changelog
 
+## [0.9.0] — 2026-05-18
+
+### Added
+- **`rtfm sync --ocr` runs as a detached background daemon.** Marker-based OCR takes minutes per scanned PDF, hours for a real corpus — the previous foreground implementation died with the terminal or the Claude Code hook timeout, losing the entire run. The command now: (1) refuses to relaunch if another daemon is already running (shows live progress and PID instead), (2) persists `ocr_fallback: true` in `.rtfm/config.json`, (3) invalidates the hash of every PDF in `.rtfm/seen_scans.json` so the worker's incremental sync re-ingests them, (4) forks a `subprocess.Popen(..., start_new_session=True)` worker (immune to parent SIGHUP) and exits immediately with the daemon's PID. New internal `rtfm ocr-worker` subcommand does the actual sync.
+- **Resumable**: the worker writes its live state to `.rtfm/ocr_state.json` (atomic temp+rename) with `pid`, `status`, `total`, `done`, `current_file`, `started_at`, `last_update`. If the daemon is killed mid-run, the next `rtfm sync --ocr` resumes from where the incremental sync left off — files already OCR'd have a real hash and are skipped.
+- **`rtfm status` now surfaces the OCR daemon** when one is present:
+  - Live: `OCR running (PID 12345): 23/156 PDFs (15%), 1h20m elapsed, ETA ~6h\n  current: scan_45.pdf`
+  - Dead-but-resumable: `OCR interrupted at 23/156 (...). Resume: rtfm sync --ocr`
+- `/rtfm.status` and `/rtfm.ocr` slash command prompts updated to highlight the daemon state and never wait/poll.
+- New module `rtfm/core/ocr_daemon.py` exposes the helpers (`pid_alive`, `read_state`, `write_state`, `daemon_running`, `format_progress`) and the on-disk `ocr_state.json` schema.
+- 14 new unit tests in `rtfm/tests/test_ocr_daemon.py` cover PID liveness, atomic write semantics, the running-detection logic, malformed-JSON tolerance, and the progress renderer for running/crashed states. Full suite: 475 passed.
+
+### Changed
+- `rtfm sync --ocr` no longer accepts running in the foreground. (If you really need a foreground run for debugging, invoke `rtfm ocr-worker` directly — it's hidden from `--help` but documented in `rtfm/core/ocr_daemon.py`.)
+
 ## [0.8.9] — 2026-05-18
 
 ### Added
