@@ -7,6 +7,15 @@ description: >-
 
 # Changelog
 
+## [0.9.4] — 2026-05-18
+
+### Changed
+- **Claude Code hooks: targeted per-turn sync instead of full-tree rescan.** Before 0.9.4 the `UserPromptSubmit` and `Stop` hooks both iterated every configured source (e.g. 35 sources for a multi-vault project) at every turn — ~30–60s per hook, fighting an `rtfm sync --ocr` daemon for SQLite write locks on multi-session setups and producing 100+ redundant scans per hour. The new design is event-driven:
+  - New `PostToolUse` hook (`rtfm_record_edit.py`, matcher `Write|Edit|MultiEdit|NotebookEdit`) appends each touched `file_path` to `.rtfm/touched_files.tmp` in O(1).
+  - `Stop` (`rtfm_stop_sync.py`) reads that queue, groups files by their longest-matching configured source, and runs `sync(files=[...])` only for those files. Empty queue → instant no-op.
+  - `UserPromptSubmit` (`rtfm_sync.py`) is now just a safety-net drain for orphan queues left behind by sessions abandoned before their Stop hook ran.
+- Net effect: zero-cost hooks on turns with no edits; sub-second sync on turns with 1–5 edits; never re-scans untouched sources; no more lock contention with the OCR daemon. `hooks.json` updated to register `PostToolUse`.
+
 ## [0.9.3] — 2026-05-18
 
 ### Fixed

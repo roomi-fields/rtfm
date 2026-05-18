@@ -11,6 +11,18 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/rtfm-hook rtfm_record_edit",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -28,7 +40,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/bin/rtfm-hook rtfm_stop_sync",
-            "timeout": 15
+            "timeout": 30
           }
         ]
       }
