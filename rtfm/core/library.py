@@ -1974,11 +1974,22 @@ class Library:
         conn.commit()
         return True
 
-    def move_file(self, old_filepath: str, new_filepath: str, new_slug: str) -> bool:
+    def move_file(
+        self,
+        old_filepath: str,
+        new_filepath: str,
+        new_slug: str,
+        new_corpus: str | None = None,
+    ) -> bool:
         """Update tracking for a moved file (same content, new path).
 
         Updates the indexed_files tracking and renames the book slug.
-        Chunks are linked by book_id (FK) so they follow automatically.
+        Chunks are linked by book_id (FK) so they follow automatically;
+        embeddings (FK on chunk_id) and tags (FK on chunk_id) follow too.
+
+        When *new_corpus* is provided, the file is reassigned to that
+        corpus — used for cross-corpus moves where the user reorganises
+        their tree across corpus boundaries without re-indexing.
         """
         conn = self._get_conn()
 
@@ -1992,12 +2003,13 @@ class Library:
             return False
 
         old_slug = row["book_slug"]
+        target_corpus = new_corpus if new_corpus is not None else row["corpus"]
 
-        # Update books table (slug + filename)
+        # Update books table (slug + filename + optional corpus)
         if old_slug:
             conn.execute(
-                "UPDATE books SET slug = ?, filename = ? WHERE slug = ?",
-                (new_slug, new_filepath, old_slug)
+                "UPDATE books SET slug = ?, filename = ?, corpus = ? WHERE slug = ?",
+                (new_slug, new_filepath, target_corpus, old_slug)
             )
 
         # Replace tracking entry
@@ -2005,7 +2017,7 @@ class Library:
         conn.execute(
             """INSERT INTO indexed_files (filepath, file_hash, corpus, book_slug, indexed_at, file_size)
                VALUES (?, ?, ?, ?, datetime('now'), ?)""",
-            (new_filepath, row["file_hash"], row["corpus"], new_slug, row["file_size"])
+            (new_filepath, row["file_hash"], target_corpus, new_slug, row["file_size"])
         )
         conn.commit()
         return True

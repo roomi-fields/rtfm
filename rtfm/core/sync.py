@@ -52,6 +52,10 @@ class SyncDiff:
     modified: list[Path] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
     moved: list[tuple[str, Path]] = field(default_factory=list)  # (old_rel, new_path)
+    # Cross-corpus moves: (old_rel, old_corpus, new_path)
+    # Same content_hash appears at a new location in a DIFFERENT corpus —
+    # transferred without re-ingesting so embeddings/tags survive.
+    cross_moved: list[tuple[str, str, Path]] = field(default_factory=list)
     unchanged: int = 0
 
 
@@ -232,15 +236,25 @@ def compute_diff(
     files_on_disk: list[Path],
     indexed_files: dict[str, dict],
     root: Path,
+    indexed_global: dict[str, dict] | None = None,
+    current_corpus: str | None = None,
 ) -> SyncDiff:
     """Compare the filesystem state against the DB tracking table.
 
-    Detects moves via hash matching: if a tracked file disappears and a new
-    file appears with the same MD5, it's a move (not a delete + add).
+    Detects moves via hash matching:
+    - Same corpus: if a tracked file disappears and a new file appears
+      with the same MD5, it's a move (not a delete + add).
+    - Cross-corpus (when *indexed_global* is provided): if a "new" file
+      in the current corpus matches the hash of a file tracked in
+      another corpus, it's a cross-corpus move. The book + chunks +
+      embeddings + tags are transferred without re-ingestion.
     """
     diff = SyncDiff()
     seen_paths: set[str] = set()
     added_by_hash: dict[str, list[Path]] = {}  # hash → [new paths]
+    # Cache hashes computed during the added/modified pass so we don't
+    # recompute MD5 when checking cross-corpus matches.
+    new_path_hash: dict[Path, str] = {}
 
     for fpath in files_on_disk:
         try:
@@ -254,12 +268,13 @@ def compute_diff(
         if rel not in indexed_files:
             diff.added.append(fpath)
             added_by_hash.setdefault(current_hash, []).append(fpath)
+            new_path_hash[fpath] = current_hash
         elif indexed_files[rel]["file_hash"] != current_hash:
             diff.modified.append(fpath)
         else:
             diff.unchanged += 1
 
-    # Files in DB but no longer on disk — check for moves
+    # Files in DB but no longer on disk — check for moves (same corpus)
     for db_path, info in indexed_files.items():
         if db_path not in seen_paths:
             old_hash = info["file_hash"]
@@ -273,6 +288,34 @@ def compute_diff(
                     del added_by_hash[old_hash]
             else:
                 diff.removed.append(db_path)
+
+    # Cross-corpus moves: a file that looked "added" here may actually
+    # exist in another corpus with the same hash. Transfer ownership
+    # instead of re-ingesting. We only consume one cross-match per hash
+    # to avoid silently colliding distinct corpora.
+    if indexed_global:
+        cross_by_hash: dict[str, list[tuple[str, dict]]] = {}
+        for path, info in indexed_global.items():
+            # skip entries that belong to the current corpus — handled above
+            if current_corpus is not None and info.get("corpus") == current_corpus:
+                continue
+            cross_by_hash.setdefault(info["file_hash"], []).append((path, info))
+
+        remaining_added: list[Path] = []
+        for new_path in diff.added:
+            h = new_path_hash.get(new_path)
+            if h is None:
+                remaining_added.append(new_path)
+                continue
+            candidates = cross_by_hash.get(h)
+            if not candidates:
+                remaining_added.append(new_path)
+                continue
+            old_path, old_info = candidates.pop(0)
+            diff.cross_moved.append((old_path, old_info["corpus"], new_path))
+            if not candidates:
+                del cross_by_hash[h]
+        diff.added = remaining_added
 
     return diff
 
@@ -512,6 +555,9 @@ def sync(
 
     # 2. Get DB state (scoped to corpus to support multi-directory sync)
     indexed = library.list_indexed_files(corpus=corpus)
+    # Full DB state (all corpora) — fuel for cross-corpus move detection.
+    # Cheap query, just a SELECT without parsing files.
+    indexed_global = library.list_indexed_files()
 
     # 3. Compute diff
     if force:
@@ -533,7 +579,9 @@ def sync(
             if db_path not in seen:
                 diff.removed.append(db_path)
     else:
-        diff = compute_diff(files_on_disk, indexed, root)
+        diff = compute_diff(files_on_disk, indexed, root,
+                             indexed_global=indexed_global,
+                             current_corpus=corpus)
 
     result.unchanged = diff.unchanged
 
@@ -562,6 +610,30 @@ def sync(
             if on_progress:
                 on_progress("error", old_rel, str(exc))
             print(f"[sync] error moving {old_rel}: {exc}", file=sys.stderr)
+
+    # 4b. Cross-corpus moves: same content, new corpus. Embeddings + tags
+    # follow via FK on chunk_id; only tracking + book row need updating.
+    for old_rel, old_corpus, new_path in diff.cross_moved:
+        try:
+            new_rel = str(new_path.relative_to(root))
+        except ValueError:
+            new_rel = str(new_path)
+
+        try:
+            new_slug = _path_to_slug(new_rel, corpus)
+            library.move_file(old_rel, new_rel, new_slug, new_corpus=corpus)
+            result.moved += 1
+            if on_progress:
+                on_progress(
+                    "move",
+                    f"[{old_corpus}] {old_rel} -> [{corpus}] {new_rel}",
+                    "cross-corpus (embeddings/tags preserved)",
+                )
+        except Exception as exc:
+            result.errors.append(f"cross-move {old_rel}: {exc}")
+            if on_progress:
+                on_progress("error", old_rel, str(exc))
+            print(f"[sync] error cross-moving {old_rel}: {exc}", file=sys.stderr)
 
     # 5. Process added + modified
     # When ocr_fallback is on, we build a single auto-backend PDFParser and

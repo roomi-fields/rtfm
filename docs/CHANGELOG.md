@@ -7,6 +7,13 @@ description: >-
 
 # Changelog
 
+## [0.8.9] — 2026-05-18
+
+### Added
+- **Cross-corpus move detection by content hash.** When a file is reorganised across corpus boundaries (e.g. moved from an Obsidian `Projets/` into `Publications/` when those map to different RTFM corpora), `compute_diff()` now spots the hash match against `library.list_indexed_files()` (all corpora) and transfers ownership instead of treating the file as deleted-in-A + added-in-B. The book row is updated in place, so chunks, **embeddings, and tags all survive** (they reference `chunk_id`, not the on-disk path). Critical when expensive computation has already been done — semantic embeddings, OCR output, manual tagging.
+- `library.move_file(..., new_corpus=...)` is the new entry point. The same on-disk filepath cannot belong to two corpora at once (table constraint), so this is also a safe partition guarantee.
+- 3 new tests in `rtfm/tests/test_cross_corpus_move.py` covering chunk-id preservation across the move, regression on in-corpus moves, and the "really new file" path. Full suite: 461 passed.
+
 ## [0.8.8] — 2026-05-18
 
 ### Added
