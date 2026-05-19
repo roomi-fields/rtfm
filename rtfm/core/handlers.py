@@ -7,7 +7,14 @@ P1 ingest : index a single file. Payload schema:
 P2 embed  : embed a batch of chunks. Payload schema:
     {"chunk_ids": [int, ...], "model": <optional hf or alias>}
 
-P3 OCR    : pending (Phase 3).
+P3 OCR    : re-ingest a scanned PDF with the marker backend so the
+            text layer is reconstructed from page images. Payload:
+                {"root": ..., "corpus": ..., "filepath": ...}
+            P1 auto-enqueues this when a PDF produces zero chunks
+            AND ``ocr_fallback: true`` is set in ``.rtfm/config.json``.
+            The marker run itself happens in an isolated subprocess
+            (see :mod:`rtfm.parsers.pdf`) so its 3–8 GB of model state
+            is reclaimed by the OS between PDFs.
 """
 from __future__ import annotations
 
@@ -83,7 +90,7 @@ def handle_ingest(job: Job, worker: "Worker") -> None:
                 lib.delete_book(old_slug)
 
         file_hash = _compute_hash(abs_path)
-        lib.ingest(
+        stats = lib.ingest(
             abs_path, corpus=corpus,
             metadata={"book_slug": book_slug, "source_file": rel},
         )
@@ -95,11 +102,117 @@ def handle_ingest(job: Job, worker: "Worker") -> None:
             file_size=abs_path.stat().st_size,
         )
 
+        # Health signal: a PDF that yields 0 chunks via the default
+        # backend is almost certainly a scanned image. If the project
+        # has opted into OCR fallback, enqueue a P3 job to re-ingest
+        # this same file with marker (which actually OCRs the pages).
+        # The P3 job is lower-priority than any pending P1 / P2, so
+        # a freshly-edited markdown file will always be indexed before
+        # the worker churns through a slow OCR run.
+        is_scan = (
+            stats.get("chunks", 0) == 0
+            and abs_path.suffix.lower() == ".pdf"
+        )
+        if is_scan and _ocr_enabled(worker.db_path):
+            queue = Queue(str(worker.db_path))
+            try:
+                queue.enqueue("ocr", {
+                    "root": str(root), "corpus": corpus, "filepath": rel,
+                })
+            finally:
+                queue.close()
+            return  # no P2 for a zero-chunk book — wait until P3 fills it
+
         # Enqueue follow-up P2 embed jobs for the chunks just created.
         # Splitting into fixed-size batches keeps each P2 short enough
         # that a fresh P1 (e.g. file edited mid-run) is picked up at
         # the next job boundary — that is the cooperative preemption
         # the user asked for in the worker design.
+        chunk_ids = lib.chunk_ids_for_book(book_slug)
+        if chunk_ids:
+            queue = Queue(str(worker.db_path))
+            try:
+                batches = [chunk_ids[i:i + EMBED_BATCH_SIZE]
+                           for i in range(0, len(chunk_ids), EMBED_BATCH_SIZE)]
+                queue.enqueue_many("embed",
+                                   [{"chunk_ids": b} for b in batches])
+            finally:
+                queue.close()
+    finally:
+        lib.close()
+
+
+def _ocr_enabled(db_path) -> bool:
+    """Read ``ocr_fallback`` from ``.rtfm/config.json``. False if the
+    file is missing or unreadable — we never silently OCR by default."""
+    import json as _json
+    from pathlib import Path as _Path
+    cfg = _Path(db_path).parent / "config.json"
+    if not cfg.exists():
+        return False
+    try:
+        return bool(_json.loads(cfg.read_text(encoding="utf-8"))
+                    .get("ocr_fallback", False))
+    except Exception:
+        return False
+
+
+def handle_ocr(job: Job, worker: "Worker") -> None:
+    """P3 — re-ingest a scanned PDF with the marker (OCR) backend.
+
+    Called when P1 detected a zero-chunk PDF and ``ocr_fallback`` is
+    on. Drops whatever empty book P1 left behind, then re-ingests the
+    same file forcing ``PDFParser(backend="marker")``. Marker itself
+    runs in a one-shot subprocess (rtfm/parsers/pdf.py), so its RAM
+    footprint is reclaimed between PDFs.
+
+    After a successful OCR ingest, the chunks need embeddings — we
+    enqueue P2 batches for them, same as the P1 path.
+    """
+    from rtfm.core.sync import _path_to_slug
+    from rtfm.parsers.pdf import PDFParser
+
+    payload = job.payload
+    root = Path(payload["root"]).resolve()
+    corpus = payload["corpus"]
+    rel = payload["filepath"]
+    abs_path = root / rel
+
+    if not abs_path.is_file():
+        raise FileNotFoundError(f"{abs_path} no longer on disk")
+    if abs_path.suffix.lower() != ".pdf":
+        raise ValueError(f"P3 OCR only handles .pdf — got {abs_path.suffix}")
+
+    book_slug = _path_to_slug(rel, corpus)
+    file_hash = _compute_hash(abs_path)
+
+    lib = Library(str(worker.db_path))
+    try:
+        # Drop any empty book P1 left behind for this file. Cascade
+        # cleans up chunks/embeddings/edges/file_versions.
+        lib.delete_book(book_slug)
+
+        stats = lib.ingest(
+            abs_path, corpus=corpus,
+            parser=PDFParser(backend="marker"),
+            metadata={"book_slug": book_slug, "source_file": rel},
+        )
+        lib.update_indexed_file(
+            filepath=rel, file_hash=file_hash,
+            corpus=corpus, book_slug=book_slug,
+            file_size=abs_path.stat().st_size,
+        )
+
+        # Even after OCR, marker may legitimately fail on a corrupted
+        # PDF — surface that as a job failure rather than queueing P2
+        # for a still-empty book.
+        if stats.get("chunks", 0) == 0:
+            raise RuntimeError(
+                f"marker produced 0 chunks for {rel} — file may be "
+                "corrupted or genuinely empty"
+            )
+
+        # Same P2 follow-up logic as P1.
         chunk_ids = lib.chunk_ids_for_book(book_slug)
         if chunk_ids:
             queue = Queue(str(worker.db_path))
@@ -140,4 +253,5 @@ def handle_embed(job: Job, worker: "Worker") -> None:
 HANDLERS = {
     "ingest": handle_ingest,
     "embed": handle_embed,
+    "ocr": handle_ocr,
 }

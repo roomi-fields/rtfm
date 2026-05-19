@@ -17,7 +17,8 @@ from types import SimpleNamespace
 import pytest
 
 from rtfm.core.handlers import (
-    handle_ingest, handle_embed, EMBED_BATCH_SIZE, HANDLERS,
+    handle_ingest, handle_embed, handle_ocr,
+    EMBED_BATCH_SIZE, HANDLERS,
 )
 from rtfm.core.library import Library
 from rtfm.core.queue import Queue, Job
@@ -34,11 +35,10 @@ def _make_md(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
 
 
-def test_handlers_dispatch_table_lists_ingest_and_embed():
-    """Sanity: the dispatch table the worker reads exposes both
-    job types Phase 2 ships."""
-    assert "ingest" in HANDLERS
-    assert "embed" in HANDLERS
+def test_handlers_dispatch_table_lists_ingest_embed_ocr():
+    """Sanity: the dispatch table the worker reads exposes every
+    job type phases 1-3 ship."""
+    assert set(HANDLERS) == {"ingest", "embed", "ocr"}
 
 
 def test_handle_ingest_enqueues_followup_embed_jobs(tmp_path: Path):
@@ -105,6 +105,104 @@ def test_handle_embed_skips_unknown_ids(tmp_path: Path):
               status="running", created_at="", started_at=None,
               finished_at=None, error=None, attempts=1)
     handle_embed(job, _fake_worker(db))  # must not raise
+
+
+def test_handle_ingest_enqueues_ocr_for_zero_chunk_pdf_with_fallback(
+    tmp_path: Path, monkeypatch
+):
+    """A PDF that produces 0 chunks AND ``ocr_fallback: true`` in
+    config.json must auto-enqueue a P3 OCR job (and skip the P2
+    follow-up). Regression for the "scans never get OCR'd" case."""
+    import json as _json
+    from unittest.mock import patch
+
+    root = tmp_path / "src"
+    pdf = root / "scan.pdf"
+    pdf.parent.mkdir(parents=True)
+    pdf.write_bytes(b"%PDF-1.4\nfake\n%%EOF\n")  # not a real PDF
+    db = tmp_path / ".rtfm" / "library.db"
+    db.parent.mkdir(parents=True)
+    Library(str(db)).close()
+    # ocr_fallback on
+    (tmp_path / ".rtfm" / "config.json").write_text(
+        _json.dumps({"ocr_fallback": True})
+    )
+
+    # Mock lib.ingest to return 0 chunks (=scan suspect)
+    with patch.object(Library, "ingest", return_value={"chunks": 0, "chars": 0}):
+        handle_ingest(
+            Job(id=1, type="ingest", priority=1,
+                payload={"root": str(root), "corpus": "test",
+                         "filepath": "scan.pdf"},
+                status="running", created_at="", started_at=None,
+                finished_at=None, error=None, attempts=1),
+            _fake_worker(db),
+        )
+
+    q = Queue(db)
+    try:
+        pending = q.list_pending()
+        # Exactly one P3 OCR job, no P2.
+        ocr_jobs = [j for j in pending if j.type == "ocr"]
+        embed_jobs = [j for j in pending if j.type == "embed"]
+        assert len(ocr_jobs) == 1, f"expected 1 P3, got {len(ocr_jobs)}"
+        assert ocr_jobs[0].payload["filepath"] == "scan.pdf"
+        assert not embed_jobs, "no P2 when P3 takes over"
+    finally:
+        q.close()
+
+
+def test_handle_ingest_no_ocr_when_fallback_disabled(tmp_path: Path):
+    """Same as above but with ``ocr_fallback: false`` (or absent) —
+    no P3 is enqueued. The PDF stays unindexed; the user must opt in
+    explicitly via ``rtfm sync --ocr``."""
+    import json as _json
+    from unittest.mock import patch
+
+    root = tmp_path / "src"
+    pdf = root / "scan.pdf"
+    pdf.parent.mkdir(parents=True)
+    pdf.write_bytes(b"%PDF-1.4\nfake\n%%EOF\n")
+    db = tmp_path / ".rtfm" / "library.db"
+    db.parent.mkdir(parents=True)
+    Library(str(db)).close()
+    # No config.json → ocr_fallback defaults to false
+
+    with patch.object(Library, "ingest", return_value={"chunks": 0, "chars": 0}):
+        handle_ingest(
+            Job(id=1, type="ingest", priority=1,
+                payload={"root": str(root), "corpus": "test",
+                         "filepath": "scan.pdf"},
+                status="running", created_at="", started_at=None,
+                finished_at=None, error=None, attempts=1),
+            _fake_worker(db),
+        )
+
+    q = Queue(db)
+    try:
+        pending = q.list_pending()
+        assert not [j for j in pending if j.type == "ocr"], \
+            "ocr_fallback off → never auto-enqueue P3"
+    finally:
+        q.close()
+
+
+def test_handle_ocr_rejects_non_pdf(tmp_path: Path):
+    """P3 OCR is PDF-only — non-PDF payload must raise before touching
+    marker, so the worker marks the job ``failed`` cleanly."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "foo.md").write_text("# Hello", encoding="utf-8")
+    db = tmp_path / "library.db"
+    Library(str(db)).close()
+
+    job = Job(id=1, type="ocr", priority=3,
+              payload={"root": str(src), "corpus": "test",
+                       "filepath": "foo.md"},
+              status="running", created_at="", started_at=None,
+              finished_at=None, error=None, attempts=1)
+    with pytest.raises(ValueError, match="only handles .pdf"):
+        handle_ocr(job, _fake_worker(db))
 
 
 @pytest.mark.skipif(

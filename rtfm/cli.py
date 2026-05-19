@@ -859,6 +859,110 @@ def _write_seen_scans(rtfm_root, suspects: list[str]) -> None:
         pass  # best-effort
 
 
+def _cmd_sync_ocr_enqueue(args):
+    """Queue-mode ``rtfm sync --ocr`` (0.10.2+).
+
+    Does three things and returns:
+
+    1. Persists ``ocr_fallback: true`` in ``.rtfm/config.json`` so
+       every future P1 ingest that finds a zero-chunk PDF auto-enqueues
+       a P3 OCR job for it. This is the one-shot toggle the user
+       asked for.
+    2. Enqueues a P3 job for every PDF already known to be a scan
+       (from ``.rtfm/seen_scans.json``). They wait their turn behind
+       any P1 / P2 work.
+    3. Auto-spawns the worker daemon at low CPU + idle I/O priority.
+
+    The legacy detached ``ocr-worker`` daemon (with its own state file)
+    is still reachable via ``rtfm sync --inline --ocr`` for now, but
+    will be removed once the queue path covers every case.
+    """
+    from rtfm.config import find_rtfm_root, load_config, save_config
+    from rtfm.core.queue import Queue
+    from rtfm.cli_worker import ensure_worker_running
+
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("rtfm sync --ocr requires a .rtfm/ project root. "
+                 "Run `rtfm init` first.")
+    rtfm_dir = rtfm_root / ".rtfm"
+    db_path = rtfm_dir / "library.db"
+
+    # 1. Persist the toggle. Idempotent — no-op if already on.
+    cfg = load_config(rtfm_root)
+    if not cfg.get("ocr_fallback"):
+        cfg["ocr_fallback"] = True
+        save_config(rtfm_root, cfg)
+        print("ocr_fallback: true persisted in .rtfm/config.json.")
+        print("  → from now on, every P1 ingest that finds a zero-chunk "
+              "PDF auto-enqueues a P3 OCR job for it.")
+    else:
+        print("ocr_fallback already enabled — re-queuing known scans.")
+
+    # 2. Re-enqueue every scan we already know about.
+    seen_path = rtfm_dir / "seen_scans.json"
+    known: list[str] = []
+    if seen_path.exists():
+        try:
+            known = json.loads(seen_path.read_text(encoding="utf-8"))
+        except Exception:
+            known = []
+
+    if not known:
+        print("\nNo previously-flagged scans in .rtfm/seen_scans.json.")
+        print("Run `rtfm sync` first — P1 will flag scans as it sees them, "
+              "and they'll be auto-OCR'd in the background.")
+        return
+
+    # We need to know which (root, corpus) each known scan belongs to.
+    # ``seen_scans.json`` only stores relative paths, so we map them
+    # back through the configured sources.
+    sources = cfg.get("sources") or [
+        {"path": str(rtfm_root), "corpus": cfg.get("corpus", "default")}
+    ]
+    sources_resolved = [
+        (Path(s.get("path", ".")).resolve(),
+         s.get("corpus", cfg.get("corpus", "default")))
+        for s in sources
+    ]
+
+    queue = Queue(db_path)
+    enqueued = unmatched = 0
+    try:
+        for rel in known:
+            # ``rel`` may be ``"<src_path_name>/sub/foo.pdf"`` or just
+            # ``"sub/foo.pdf"`` depending on which sync wrote it.
+            # Try each source root by prefix-match on the absolute path.
+            matched = False
+            for root, corpus in sources_resolved:
+                candidate = root / rel
+                if candidate.is_file():
+                    rel_to_root = str(candidate.relative_to(root))
+                    if queue.enqueue("ocr", {
+                        "root": str(root), "corpus": corpus,
+                        "filepath": rel_to_root,
+                    }) is not None:
+                        enqueued += 1
+                    matched = True
+                    break
+            if not matched:
+                unmatched += 1
+    finally:
+        queue.close()
+
+    print(f"\nQueued {enqueued} P3 OCR job(s)"
+          + (f", {unmatched} unmatched (file gone?)" if unmatched else "")
+          + ".")
+    pid = ensure_worker_running(rtfm_dir)
+    if pid:
+        print(f"Worker draining in background (PID {pid}). "
+              "Track: `rtfm queue stats` / `rtfm worker status`.")
+        print("Note: P3 OCR runs only when no P1 / P2 work is pending — "
+              "each PDF takes minutes (marker subprocess).")
+    else:
+        print("Worker already running — drain in progress.")
+
+
 def _cmd_sync_enqueue(args):
     """Queue-mode sync (0.10.0+).
 
@@ -969,12 +1073,23 @@ def cmd_sync(args):
     from rtfm.core.sync import sync
     from rtfm.config import find_rtfm_root, load_config, save_config
 
-    # New default: queue-based sync, unless --inline / --ocr / --files
-    # / explicit path / --no-embeddings forces the legacy path.
-    # --ocr keeps using the dedicated OCR daemon (separate state,
-    # separate semantics). --no-embeddings is a script signal (CI,
-    # tests) that the caller wants to block until the work is done —
-    # the queue mode would return immediately, breaking those flows.
+    # New default: queue-based sync, unless --inline / --files / explicit
+    # path / --no-embeddings forces the legacy path. --no-embeddings is
+    # a script signal (CI, tests) that the caller wants to block until
+    # the work is done — the queue mode would return immediately and
+    # break those flows.
+    # --ocr now goes through the unified worker too: it persists
+    # ``ocr_fallback: true`` in config (so future P1 ingests auto-
+    # detect scans and enqueue P3), enqueues a P3 job for every PDF
+    # already known to be a scan, and exits. Legacy detached
+    # ocr-worker daemon is still reachable via --inline --ocr.
+    use_queue_ocr = (
+        getattr(args, "ocr", False)
+        and not getattr(args, "inline", False)
+    )
+    if use_queue_ocr:
+        return _cmd_sync_ocr_enqueue(args)
+
     use_queue = (
         not getattr(args, "inline", False)
         and not getattr(args, "ocr", False)

@@ -7,6 +7,33 @@ description: >-
 
 # Changelog
 
+## [0.10.2] — 2026-05-19
+
+### Added — P3 OCR handler (queue phase 3)
+
+The OCR pass is now a P3 job in the unified worker. Pipeline:
+
+```
+P1 ingest (PDF, ocr_fallback=true)
+    ├─ pdftext yields ≥1 chunk → ingest OK, enqueue P2 follow-up
+    └─ pdftext yields 0 chunks → enqueue P3 OCR for this same file
+P3 ocr
+    ├─ delete the empty book P1 left behind
+    ├─ re-ingest with PDFParser(backend="marker") — marker runs in
+    │   an isolated subprocess (0.9.5) so its 3-8 GB of model RAM
+    │   is reclaimed between PDFs
+    └─ enqueue P2 follow-up for the freshly OCR'd chunks
+```
+
+P3 sits below P1 / P2 in the queue, so a freshly-edited markdown file is always indexed before the worker burns CPU on a slow OCR run.
+
+- `handlers.handle_ocr` — P3 handler. Drops any empty book P1 left behind, re-ingests with the marker backend, updates `indexed_files`, then enqueues P2 follow-up so the OCR'd chunks reach the embedding column on their own.
+- `handlers.handle_ingest` (existing) now detects zero-chunk PDFs and auto-enqueues a P3 job *iff* `ocr_fallback: true` is set in `.rtfm/config.json`. Skips the P2 follow-up in that case (no point embedding an empty book).
+- **`rtfm sync --ocr` is queue-based by default**: persists `ocr_fallback: true` (idempotent), enqueues a P3 for every previously-flagged scan from `.rtfm/seen_scans.json`, auto-spawns the worker. The legacy detached `ocr-worker` daemon is still reachable via `rtfm sync --inline --ocr` and will be removed in 0.11.
+- 3 new tests in `rtfm/tests/test_handlers.py` (auto-enqueue P3 with fallback on; no P3 with fallback off; reject non-PDF payloads).
+
+Phase 3 closes the queue redesign the user asked for: one process, three priorities (ingest > embed > OCR), per-file granularity for responsive preemption, bounded resources (`nice 19` + `ionice -c 3` + marker subprocess isolation).
+
 ## [0.10.1] — 2026-05-19
 
 ### Added — P2 embed handler (queue phase 2)
