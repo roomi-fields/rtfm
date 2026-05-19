@@ -40,6 +40,12 @@ from rtfm.core.queue import Queue, Job
 # costs nothing.
 IDLE_POLL_SECONDS = 5.0
 
+# How often, while idle, to also re-scan the filesystem for new or
+# moved files (cf. the old watcher.py poller — now folded in). 30 s
+# matches the user-visible expectation: a file you save lands in the
+# queue within ~30 s, automatically.
+SCAN_INTERVAL_SECONDS = 30.0
+
 # Status snapshot lives next to the DB so ``rtfm status`` can find it
 # without re-reading config.
 STATE_FILENAME = "worker_state.json"
@@ -130,17 +136,27 @@ def worker_running(rtfm_dir: Path) -> Optional[WorkerState]:
 
 
 class Worker:
-    """The actual loop. Construct, ``run()``."""
+    """The actual loop. Construct, ``run()``.
+
+    Single consumer process: drains the priority queue *and* periodically
+    re-scans configured sources to enqueue P1 ingest jobs (the old
+    standalone watcher's job, folded in here per the 0.10.4 redesign).
+    Scanning only happens while the queue is empty — a long ingest /
+    OCR run is never interrupted to scan.
+    """
 
     def __init__(self, rtfm_dir: Path, db_path: Path,
                  handlers: dict[str, Callable[[Job, "Worker"], None]],
+                 scan_interval: float = SCAN_INTERVAL_SECONDS,
                  log: Optional[Callable[[str], None]] = None):
         self.rtfm_dir = rtfm_dir
         self.db_path = db_path
         self.handlers = handlers
+        self.scan_interval = scan_interval
         self._stop = False
         self._jobs_done = 0
         self._jobs_failed = 0
+        self._last_scan_at = 0.0  # monotonic, 0 = scan ASAP on first idle
         self._log = log or (lambda msg: None)
         self._queue = Queue(db_path)
         self._started_at = _now_iso()
@@ -151,11 +167,14 @@ class Worker:
         """Main loop. Blocks until SIGTERM/SIGINT or no-work-forever."""
         self._install_signal_handlers()
         self._snapshot("idle", None)
-        self._log(f"worker started pid={os.getpid()}")
+        self._log(f"worker started pid={os.getpid()} "
+                  f"scan_interval={self.scan_interval}s")
         try:
             while not self._stop:
                 job = self._queue.dequeue()
                 if job is None:
+                    # Idle: opportunity to fold-in the watcher tick.
+                    self._maybe_scan()
                     self._snapshot("idle", None)
                     self._sleep(IDLE_POLL_SECONDS)
                     continue
@@ -167,6 +186,114 @@ class Worker:
             clear_state(self.rtfm_dir)
 
     # ── Internals ───────────────────────────────────────────────────────
+
+    def _maybe_scan(self) -> None:
+        """Run a full-corpus scan if enough idle time has elapsed since
+        the last one. No-op otherwise.
+
+        Uses :func:`rtfm.core.sync.compute_diff` (MD5) so it can detect
+        cross-corpus moves and skip mtime false-positives that bit
+        the legacy ``quick_diff`` poller. Cross-corpus moves are
+        applied inline via :meth:`Library.move_file` (preserving
+        chunks + embeddings + tags). The rest goes to the queue.
+        """
+        import time as _t
+        now = _t.monotonic()
+        if now - self._last_scan_at < self.scan_interval:
+            return
+        self._last_scan_at = now
+
+        try:
+            self._scan_once()
+        except Exception as exc:
+            # A scan failure must never bring the worker down — the
+            # priority drain is more important.
+            self._log(f"scan error: {exc}")
+
+    def _scan_once(self) -> int:
+        """One pass over every configured source. Returns the count of
+        files enqueued (P1 ingest). Cross-corpus moves are applied
+        inline, not counted here.
+        """
+        from rtfm.config import load_config
+        from rtfm.core.library import Library
+        from rtfm.core.sync import compute_diff, scan_directory, _path_to_slug
+
+        try:
+            cfg = load_config(self.rtfm_dir.parent)
+        except Exception:
+            cfg = {}
+        sources = cfg.get("sources") or [
+            {"path": str(self.rtfm_dir.parent),
+             "corpus": cfg.get("corpus", "default")}
+        ]
+
+        enqueued = 0
+        moved = 0
+        lib = Library(str(self.db_path))
+        try:
+            indexed_global = lib.list_indexed_files()
+            for src in sources:
+                if self._stop:
+                    break
+                src_path = Path(src.get("path", ".")).resolve()
+                if not src_path.is_dir():
+                    continue
+                src_corpus = src.get("corpus", cfg.get("corpus", "default"))
+                ext_set = None
+                if src.get("extensions"):
+                    ext_set = {
+                        e.strip() if e.strip().startswith(".") else f".{e.strip()}"
+                        for e in src["extensions"].split(",")
+                    }
+                try:
+                    files_on_disk = scan_directory(src_path, ext_set)
+                    indexed = lib.list_indexed_files(corpus=src_corpus)
+                    lib.set_sync_root(src_corpus, str(src_path))
+                    diff = compute_diff(
+                        files_on_disk, indexed, src_path,
+                        indexed_global=indexed_global,
+                        current_corpus=src_corpus,
+                    )
+                except Exception as exc:
+                    self._log(f"scan error [{src_corpus}] {src_path}: {exc}")
+                    continue
+
+                # Cross-corpus move: in place, no re-ingest.
+                for old_rel, _old_corpus, new_path in diff.cross_moved:
+                    try:
+                        new_rel = str(new_path.relative_to(src_path))
+                    except ValueError:
+                        new_rel = str(new_path)
+                    try:
+                        new_slug = _path_to_slug(new_rel, src_corpus)
+                        if lib.move_file(old_rel, new_rel, new_slug,
+                                         new_corpus=src_corpus):
+                            moved += 1
+                    except Exception as exc:
+                        self._log(f"cross-move error {old_rel}: {exc}")
+
+                # Genuinely new/modified files → P1.
+                payloads = []
+                for fpath in diff.added + diff.modified:
+                    try:
+                        rel = str(fpath.relative_to(src_path))
+                    except ValueError:
+                        rel = str(fpath)
+                    payloads.append({
+                        "root": str(src_path),
+                        "corpus": src_corpus,
+                        "filepath": rel,
+                    })
+                if payloads:
+                    inserted, _ = self._queue.enqueue_many("ingest", payloads)
+                    enqueued += inserted
+        finally:
+            lib.close()
+
+        if enqueued or moved:
+            self._log(f"scan: +{enqueued} queued, {moved} cross-corpus moved")
+        return enqueued
 
     def _handle(self, job: Job) -> None:
         self._snapshot("busy", job)

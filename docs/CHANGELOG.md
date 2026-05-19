@@ -7,6 +7,25 @@ description: >-
 
 # Changelog
 
+## [0.10.4] — 2026-05-19
+
+### Changed — single consumer process + MD5 enqueue
+
+Two corrections to the 0.10.3 design after a real-world run on the user's musicology-phd project.
+
+- **`rtfm sync` enqueue now uses `compute_diff` (MD5)**, not `quick_diff` (size + mtime). On a 4400-job sample the previous quick-diff path was ~14 % waste: ~10 % cross-corpus duplicates (a file already in the DB under another corpus with the same MD5) and ~4 % mtime false-positives (NTFS-via-WSL re-touching files without content change). Quick-diff missed the cross-corpus case entirely.
+- **Cross-corpus moves are now applied inline** during `rtfm sync`, before any enqueue, via `Library.move_file(new_corpus=...)`. The book row's corpus is updated and its chunks / embeddings / tags follow (FK on chunk_id, not on the on-disk path). This is the work-preservation guarantee the user asked for: a file moved between configured corpora keeps the embeddings already paid for.
+
+### Changed — one process, no more watcher
+
+`rtfm/core/watcher.py` and `rtfm/tests/test_watcher.py` are gone. The periodic scan is folded into the worker idle loop: when the priority queue is empty, the worker runs the same MD5-based scan + cross-corpus move logic itself, then sleeps. One project = one process, exactly as the user originally specified.
+
+- New `--scan-interval SECONDS` option on `rtfm worker start` (default 30 s). The worker reads it via `rtfm worker-daemon --scan-interval`.
+- `rtfm watch [start|stop|status]` and `watch-daemon` are removed.
+- `rtfm status` keeps showing the `Worker / Queue:` section unchanged — it was already worker-only.
+
+The 0.10.3 watcher made sense in isolation but doubled the daemon footprint for no benefit: scanning is cheap (`quick_diff` had been ~ms per file; `compute_diff` is the new cost and only runs while the queue is empty, so a long ingest or OCR run is never paused to scan).
+
 ## [0.10.3] — 2026-05-19
 
 ### Added — filesystem watcher + enriched status (queue phase 4)

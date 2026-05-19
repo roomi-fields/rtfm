@@ -1021,22 +1021,36 @@ def _cmd_sync_ocr_enqueue(args):
 
 
 def _cmd_sync_enqueue(args):
-    """Queue-mode sync (0.10.0+).
+    """Queue-mode sync (0.10.4+).
 
-    For every configured source: scan the filesystem, compute the diff
-    against ``indexed_files``, enqueue one P1 ingest job per
-    new/modified file, then auto-spawn the worker daemon if none is
-    running. Returns immediately. The user follows progress via
-    ``rtfm queue stats`` and ``rtfm worker status``.
+    For every configured source:
 
-    Removed files (in DB but no longer on disk) are not handled here
-    yet — they will get a P1 ``remove`` job in a follow-up patch. For
-    now they simply linger until the user runs ``rtfm sync --inline``
-    or clears them by hand.
+      1. Walk the filesystem and compute a *real* MD5-based diff
+         (``compute_diff`` — not the size+mtime quick_diff). On a
+         60-source corpus this is the dominant cost of ``rtfm sync``,
+         but it is what makes the queue avoid two failure modes that
+         silently waste work:
+           - ``same-corpus same-hash``: ``quick_diff`` flagged these
+             as ``modified`` on NTFS-via-WSL whenever the mtime moved
+             without the content moving, then the worker re-ingested
+             for nothing (~4% of the queue in measurements).
+           - ``cross-corpus same-hash``: a file that already exists
+             in another corpus with the same MD5 must be **moved**
+             via :meth:`Library.move_file`, not re-ingested — that
+             preserves chunks + embeddings + tags. Quick-diff missed
+             this entirely (~10% of the queue).
+      2. Apply cross-corpus moves **inline**, before any enqueue, so
+         the work survives immediately even if the worker crashes
+         before draining anything.
+      3. Enqueue one P1 ingest job per genuinely new/modified file.
+      4. Auto-spawn the worker daemon if none is running.
+
+    Removed files (in DB but no longer on disk) are still not handled
+    in queue mode and remain a follow-up.
     """
     from rtfm.config import find_rtfm_root, load_config
     from rtfm.core.queue import Queue
-    from rtfm.core.sync import quick_diff
+    from rtfm.core.sync import compute_diff, _path_to_slug
     from rtfm.cli_worker import ensure_worker_running
 
     rtfm_root = find_rtfm_root()
@@ -1054,10 +1068,18 @@ def _cmd_sync_enqueue(args):
     queue = Queue(db_path)
     total_enqueued = 0
     total_deduped = 0
+    total_cross_moved = 0
+    total_cross_move_errors = 0
     try:
         from rtfm.core.library import Library
+        from rtfm.core.sync import scan_directory
         lib = Library(str(db_path))
         try:
+            # Cross-corpus moves consult ``indexed_files`` across every
+            # corpus, so we load it once and pass it down — no
+            # per-source N+1 query.
+            indexed_global = lib.list_indexed_files()
+
             for src in sources:
                 src_path = Path(src.get("path", ".")).resolve()
                 src_corpus = src.get("corpus", cfg.get("corpus", "default"))
@@ -1070,9 +1092,40 @@ def _cmd_sync_enqueue(args):
                         e.strip() if e.strip().startswith(".") else f".{e.strip()}"
                         for e in src["extensions"].split(",")
                     }
-                diff = quick_diff(lib, src_path, src_corpus,
-                                  extensions=ext_set)
+                files_on_disk = scan_directory(src_path, ext_set)
+                indexed = lib.list_indexed_files(corpus=src_corpus)
+                # Hash-based diff (slower than quick_diff, but the only
+                # way to detect cross-corpus moves and skip mtime FPs).
+                # Remember the sync root so MCP path resolution still
+                # works on the new corpus.
+                lib.set_sync_root(src_corpus, str(src_path))
+                diff = compute_diff(
+                    files_on_disk, indexed, src_path,
+                    indexed_global=indexed_global,
+                    current_corpus=src_corpus,
+                )
 
+                # 1. Apply cross-corpus moves **inline** — preserves
+                #    chunks, embeddings, tags. Done before any enqueue
+                #    so a worker crash mid-flight can't undo it.
+                moved = 0
+                for old_rel, old_corpus, new_path in diff.cross_moved:
+                    try:
+                        new_rel = str(new_path.relative_to(src_path))
+                    except ValueError:
+                        new_rel = str(new_path)
+                    try:
+                        new_slug = _path_to_slug(new_rel, src_corpus)
+                        if lib.move_file(old_rel, new_rel, new_slug,
+                                         new_corpus=src_corpus):
+                            moved += 1
+                    except Exception as exc:
+                        total_cross_move_errors += 1
+                        print(f"    ! cross-move [{old_corpus}]{old_rel} "
+                              f"-> [{src_corpus}]{new_rel}: {exc}")
+                total_cross_moved += moved
+
+                # 2. Enqueue P1 for what is genuinely new/modified.
                 payloads = []
                 for fpath in diff.added + diff.modified:
                     try:
@@ -1084,26 +1137,42 @@ def _cmd_sync_enqueue(args):
                         "corpus": src_corpus,
                         "filepath": rel,
                     })
-                if not payloads:
+                if not payloads and not moved:
                     print(f"  [{src_corpus}] {src_path.name}: up to date "
                           f"({diff.unchanged} unchanged)")
                     continue
-                inserted, deduped = queue.enqueue_many("ingest", payloads)
-                total_enqueued += inserted
-                total_deduped += deduped
-                print(f"  [{src_corpus}] {src_path.name}: "
-                      f"+{inserted} queued"
-                      + (f" ({deduped} already pending)" if deduped else "")
-                      + f", {diff.unchanged} unchanged")
+                if payloads:
+                    inserted, deduped = queue.enqueue_many("ingest", payloads)
+                    total_enqueued += inserted
+                    total_deduped += deduped
+                else:
+                    inserted = deduped = 0
+                msg = f"  [{src_corpus}] {src_path.name}:"
+                parts = []
+                if inserted:
+                    parts.append(f"+{inserted} queued")
+                if deduped:
+                    parts.append(f"{deduped} already pending")
+                if moved:
+                    parts.append(f"{moved} moved")
+                if diff.unchanged:
+                    parts.append(f"{diff.unchanged} unchanged")
+                print(msg + " " + ", ".join(parts))
         finally:
             lib.close()
     finally:
         queue.close()
 
     print()
-    print(f"Total: {total_enqueued} job(s) queued"
-          + (f", {total_deduped} dedup'd" if total_deduped else "")
-          + ".")
+    summary = [f"{total_enqueued} job(s) queued"]
+    if total_deduped:
+        summary.append(f"{total_deduped} dedup'd")
+    if total_cross_moved:
+        summary.append(f"{total_cross_moved} cross-corpus moved in place "
+                       "(embeddings preserved)")
+    if total_cross_move_errors:
+        summary.append(f"{total_cross_move_errors} move error(s)")
+    print("Total: " + ", ".join(summary) + ".")
 
     if total_enqueued > 0:
         pid = ensure_worker_running(rtfm_dir)
@@ -1886,15 +1955,16 @@ def main():
     )
     p_worker.set_defaults(func=cmd_ocr_worker)
 
-    # worker — the new priority-queue daemon (0.10.0+).
-    # Producers (rtfm sync, hooks) enqueue jobs; this worker drains them.
-    from rtfm.cli_worker import (
-        cmd_worker, cmd_worker_daemon, cmd_queue,
-        cmd_watch, cmd_watch_daemon,
-    )
+    # worker — the priority-queue daemon (0.10.0+).
+    # Producers (rtfm sync, hooks) enqueue jobs; this single process
+    # drains them AND, while idle, periodically re-scans configured
+    # sources to enqueue P1 ingest jobs (the old standalone watcher's
+    # job, folded in at 0.10.4 per the "one consumer process" rule).
+    from rtfm.cli_worker import cmd_worker, cmd_worker_daemon, cmd_queue
     p_w = subparsers.add_parser(
         "worker",
-        help="Start/stop/inspect the RTFM background worker (priority queue)",
+        help="Start/stop/inspect the RTFM background worker "
+             "(priority queue + idle scan)",
     )
     p_w.add_argument(
         "action", nargs="?", choices=["start", "stop", "status"],
@@ -1902,32 +1972,17 @@ def main():
         help="start: spawn a detached worker. stop: SIGTERM the worker. "
              "status (default): report on the running worker.",
     )
+    p_w.add_argument(
+        "--scan-interval", type=float, default=None, metavar="SECONDS",
+        help="How often (idle) the worker re-scans sources for new files. "
+             "Default 30s.",
+    )
     p_w.set_defaults(func=cmd_worker)
 
     # worker-daemon (hidden — invoked by ensure_worker_running()).
     p_wd = subparsers.add_parser("worker-daemon", help=argparse.SUPPRESS)
+    p_wd.add_argument("--scan-interval", type=float, default=None)
     p_wd.set_defaults(func=cmd_worker_daemon)
-
-    # watch — periodic filesystem poller (0.10.3+).
-    p_watch = subparsers.add_parser(
-        "watch",
-        help="Start/stop/inspect the filesystem watcher (auto-enqueue P1 on changes)",
-    )
-    p_watch.add_argument(
-        "action", nargs="?", choices=["start", "stop", "status"],
-        default="status",
-        help="start: spawn the watcher. stop: SIGTERM it. status (default).",
-    )
-    p_watch.add_argument(
-        "--poll", type=float, default=None, metavar="SECONDS",
-        help="Poll interval (default 30s). Smaller = more reactive, more CPU.",
-    )
-    p_watch.set_defaults(func=cmd_watch)
-
-    # watch-daemon (hidden — invoked by ensure_watcher_running()).
-    p_watch_d = subparsers.add_parser("watch-daemon", help=argparse.SUPPRESS)
-    p_watch_d.add_argument("--poll", type=float, default=None)
-    p_watch_d.set_defaults(func=cmd_watch_daemon)
 
     # queue — inspect / manage the work queue.
     p_q = subparsers.add_parser(

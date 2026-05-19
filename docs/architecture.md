@@ -12,7 +12,7 @@ description: >-
 
 ```
 File on disk
-  → Watcher / hook / CLI            (producer: detects change)
+  → hook / CLI / worker idle scan   (producer: detects change)
     → work_queue                    (SQLite, priority + dedup)
       → Worker daemon               (1 process, nice 19, ionice idle)
         ├─ P1 ingest                Parser → chunks → books table
@@ -105,18 +105,27 @@ touching the DB. SIGTERM/SIGINT → finish current job → exit.
   itself runs in a one-shot subprocess (see `rtfm/parsers/pdf.py`) so
   its 3–8 GB of model state is reclaimed by the OS between PDFs.
 
-### `rtfm/core/watcher.py` — Periodic poller
+### Idle scan inside the worker (no separate watcher daemon)
 
-`Watcher` reads `.rtfm/config.json` on every tick (so config edits are
-picked up without restart), runs `quick_diff` per source, enqueues P1
-for added / modified files, and auto-spawns the worker after a scan
-that found something. Lock + state-file pattern matches the worker.
+There is no standalone watcher process. The worker, when its priority
+queue is empty, runs the periodic source scan itself every
+`SCAN_INTERVAL_SECONDS` (default 30 s). One project = one consumer
+process, which is the explicit design rule.
 
-**Why polling and not inotify**: RTFM frequently indexes Obsidian
-vaults on `/mnt/d/…` (NTFS via WSL). Inotify events do not propagate
-across that boundary, so a pure-inotify watcher would silently miss
-every change there. A 30 s poll with `quick_diff` (size + mtime) is
-cheap enough and works identically on ext4.
+The idle scan uses **`compute_diff` (MD5)**, not `quick_diff`. This
+costs more I/O than the size+mtime check but is the only way to:
+
+- detect **cross-corpus moves** (same MD5, different corpus) and
+  transfer them inline via `Library.move_file(new_corpus=...)` —
+  chunks, embeddings, tags survive untouched;
+- skip **mtime false-positives** that bite on NTFS-via-WSL whenever
+  a file is touched without its content changing.
+
+**Why polling, not inotify**: RTFM frequently indexes Obsidian vaults
+on `/mnt/d/…` (NTFS via WSL). Inotify events do not propagate across
+that boundary, so a pure-inotify scheme would silently miss every
+change there. The poll runs only while the queue is empty, so a long
+ingest or OCR run is never paused to scan.
 
 ### `rtfm/core/embeddings.py` — Semantic search
 
@@ -197,8 +206,7 @@ generation kicks off the first time semantic search is requested.
 | `rtfm sync --ocr` | enqueue P3 | persists `ocr_fallback: true`, enqueues a P3 for every flagged scan, returns |
 | `rtfm embed` | enqueue (default) | scans for chunks without embedding, enqueues P2 batches |
 | `rtfm embed --force` / `--inline` | legacy blocking | re-embed everything, or a one-shot run |
-| `rtfm worker [start \| stop \| status]` | manage daemon | usually auto-started by `rtfm sync` / `rtfm embed` / watcher |
-| `rtfm watch [start \| stop \| status] [--poll S]` | poller daemon | edits → P1 in ~poll seconds |
+| `rtfm worker [start \| stop \| status] [--scan-interval S]` | manage daemon | one process per project; idle scan folded in (no separate watcher) |
 | `rtfm queue [stats \| list \| failed \| clear-done \| retry-failed]` | inspect / manage queue | |
 | `rtfm status` | health report | now includes `Worker / Queue:` section |
 
@@ -238,13 +246,12 @@ Used for: hub detection, orphan detection, centrality-based reranking.
 
 A single project run as a whole obeys:
 
-- **At most one worker process** (project-scoped `flock` on
-  `.rtfm/worker.lock`).
-- **At most one watcher process** (project-scoped `flock` on
-  `.rtfm/watcher.lock`).
-- Both inherit `nice 19` and `ionice -c 3` (idle I/O class) when those
-  binaries are available, so they never steal CPU or disk from the
-  user's foreground work.
+- **At most one worker process per project** (`flock` on
+  `.rtfm/worker.lock`). The same process drains the queue and runs
+  the idle scan — no separate watcher daemon.
+- The worker inherits `nice 19` and `ionice -c 3` (idle I/O class)
+  when those binaries are available, so it never steals CPU or disk
+  from the user's foreground work.
 - The OCR (marker) backend runs in a **one-shot subprocess per PDF**;
   the OS reclaims its 3–8 GB of model state on exit. No leak across
   the run.
