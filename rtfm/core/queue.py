@@ -121,7 +121,11 @@ class Queue:
                                    check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=10000")  # 10s — survive contention
+            # 60s. The original 10s was breaking on multi-session Claude
+            # Code setups where ~3 MCP servers + the worker + a CLI
+            # ``rtfm sync`` all touch the same DB. WAL allows N readers
+            # + 1 writer but only one can hold the write lock at a time.
+            conn.execute("PRAGMA busy_timeout=60000")
             self._conn = conn
         return self._conn
 
@@ -157,23 +161,54 @@ class Queue:
     def enqueue_many(self, type: JobType,
                      payloads: Iterable[dict[str, Any]],
                      priority: Optional[int] = None) -> tuple[int, int]:
-        """Bulk enqueue. Returns ``(inserted, deduped)``."""
+        """Bulk enqueue. Returns ``(inserted, deduped)``.
+
+        Wraps the batch in a single ``BEGIN IMMEDIATE`` transaction so
+        the writer takes the lock once instead of N times, and so the
+        batch is atomic — either all rows land or none. On a transient
+        ``database is locked`` (the busy_timeout already buys us 60 s,
+        so this only fires under sustained extreme contention) we
+        retry the whole batch a few times before giving up.
+        """
         if priority is None:
             priority = {"ingest": P_INGEST, "embed": P_EMBED,
                         "ocr": P_OCR}[type]
-        inserted = deduped = 0
+        payloads = list(payloads)  # we need to iterate twice on retry
         conn = self._get_conn()
-        for payload in payloads:
-            body = json.dumps(payload, sort_keys=True)
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):
+            inserted = deduped = 0
             try:
-                conn.execute(
-                    "INSERT INTO work_queue (type, priority, payload) VALUES (?, ?, ?)",
-                    (type, priority, body),
-                )
-                inserted += 1
-            except sqlite3.IntegrityError:
-                deduped += 1
-        return inserted, deduped
+                conn.execute("BEGIN IMMEDIATE")
+                for payload in payloads:
+                    body = json.dumps(payload, sort_keys=True)
+                    try:
+                        conn.execute(
+                            "INSERT INTO work_queue (type, priority, payload) "
+                            "VALUES (?, ?, ?)",
+                            (type, priority, body),
+                        )
+                        inserted += 1
+                    except sqlite3.IntegrityError:
+                        deduped += 1
+                conn.execute("COMMIT")
+                return inserted, deduped
+            except sqlite3.OperationalError as exc:
+                # Roll back if the transaction is still open
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                last_exc = exc
+                import time as _t
+                _t.sleep(0.5 * (attempt + 1))
+        # All retries exhausted
+        if last_exc is not None:
+            raise last_exc
+        return 0, 0
 
     # ── Consumer ─────────────────────────────────────────────────────────
 

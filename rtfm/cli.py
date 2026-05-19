@@ -1142,6 +1142,16 @@ def _cmd_sync_enqueue(args):
                           f"({diff.unchanged} unchanged)")
                     continue
                 if payloads:
+                    # Force-commit the Library connection so it does
+                    # not hold an implicit transaction when the Queue
+                    # tries to ``BEGIN IMMEDIATE`` on its own
+                    # connection. Two connections to the same SQLite
+                    # DB from the same process otherwise see each
+                    # other as locked even in WAL mode.
+                    try:
+                        lib._get_conn().commit()
+                    except Exception:
+                        pass
                     inserted, deduped = queue.enqueue_many("ingest", payloads)
                     total_enqueued += inserted
                     total_deduped += deduped

@@ -7,6 +7,16 @@ description: >-
 
 # Changelog
 
+## [0.10.6] — 2026-05-19
+
+### Fixed
+- `rtfm sync` no longer crashes with `database is locked` when the Library connection has an open implicit transaction at the moment the Queue tries `BEGIN IMMEDIATE`. Two connections to the same SQLite DB **from the same Python process** see each other as locked even in WAL mode — `busy_timeout` doesn't help in that intra-process case. `_cmd_sync_enqueue` now commits the Library connection right before every batch enqueue.
+
+## [0.10.5] — 2026-05-19
+
+### Fixed
+- `Queue.enqueue_many` wraps each batch in a single `BEGIN IMMEDIATE` transaction (was N individual auto-commits) and retries up to 3× on transient `database is locked`. `busy_timeout` bumped from 10 s → 60 s for multi-MCP-server setups (3+ Claude Code sessions on the same project).
+
 ## [0.10.4] — 2026-05-19
 
 ### Changed — single consumer process + MD5 enqueue
