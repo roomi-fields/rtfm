@@ -7,6 +7,26 @@ description: >-
 
 # Changelog
 
+## [0.10.0] — 2026-05-19
+
+### Added — priority-queue worker (MVP / phase 1)
+
+The work model moves from "every command blocks on a full-tree sync" to a single in-project background daemon that drains a priority queue. Producers (CLI, hooks, MCP tools) enqueue per-file jobs; the worker picks them up by priority. Ingestion (P1) preempts embeddings (P2) which preempts OCR (P3), so a file you just edited is indexed before any embedding/OCR backlog. Granularity is one file per job, so preemption is responsive (next-job boundary).
+
+- New `work_queue` table in `.rtfm/library.db` with priority + status + dedup index on `(type, payload) WHERE status='pending'` — multiple producers can safely enqueue concurrently.
+- `rtfm.core.queue.Queue` — atomic `enqueue` / `dequeue` (single-statement `UPDATE ... RETURNING`), `mark_done` / `mark_failed`, `stats` / `list_pending` / `list_failed`, `retry_failed`, `clear_done`. 13 unit tests.
+- `rtfm.core.worker.Worker` — single-threaded loop, dispatch by job type, atomic state snapshot to `.rtfm/worker_state.json`, exclusive `flock` on `.rtfm/worker.lock` so at most one worker drains a project at a time.
+- `rtfm.core.handlers.handle_ingest` — P1 worker handler. Equivalent to the per-file path of the legacy inline sync (parse → ingest → upsert tracking), but isolated to a single file.
+- **`rtfm sync` is now queue-based by default**: scans configured sources, enqueues P1 jobs for new/modified files, auto-spawns the worker daemon (at `nice 19` + `ionice -c 3` when available), returns immediately. `--inline` keeps the legacy blocking sync for CI / scripted use; `--ocr`, `--no-embeddings`, `--files`, explicit path, `--dry-run`, `--force` also stay on the legacy path.
+- **New CLI commands**:
+  - `rtfm worker [start|stop|status]` — manage the daemon directly.
+  - `rtfm worker-daemon` — hidden; the actual loop, invoked by `ensure_worker_running()`.
+  - `rtfm queue [stats|list|failed|clear-done|retry-failed]` — inspect & manage the queue (`--limit`, `--keep`).
+
+### Coming
+
+Phase 2 (P2 embed handler — chunks-without-embeddings as scheduled jobs) and Phase 3 (P3 OCR handler — folds the existing OCR daemon into the unified worker) will land in 0.10.1 / 0.10.2.
+
 ## [0.9.5] — 2026-05-18
 
 ### Fixed

@@ -784,10 +784,133 @@ def _write_seen_scans(rtfm_root, suspects: list[str]) -> None:
         pass  # best-effort
 
 
+def _cmd_sync_enqueue(args):
+    """Queue-mode sync (0.10.0+).
+
+    For every configured source: scan the filesystem, compute the diff
+    against ``indexed_files``, enqueue one P1 ingest job per
+    new/modified file, then auto-spawn the worker daemon if none is
+    running. Returns immediately. The user follows progress via
+    ``rtfm queue stats`` and ``rtfm worker status``.
+
+    Removed files (in DB but no longer on disk) are not handled here
+    yet — they will get a P1 ``remove`` job in a follow-up patch. For
+    now they simply linger until the user runs ``rtfm sync --inline``
+    or clears them by hand.
+    """
+    from rtfm.config import find_rtfm_root, load_config
+    from rtfm.core.queue import Queue
+    from rtfm.core.sync import quick_diff
+    from rtfm.cli_worker import ensure_worker_running
+
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("rtfm sync: no .rtfm/ project root in the cwd chain. "
+                 "Run `rtfm init` first, or use `rtfm sync --inline <path>`.")
+    rtfm_dir = rtfm_root / ".rtfm"
+    db_path = rtfm_dir / "library.db"
+
+    cfg = load_config(rtfm_root)
+    sources = cfg.get("sources") or [
+        {"path": str(rtfm_root), "corpus": cfg.get("corpus", "default")}
+    ]
+
+    queue = Queue(db_path)
+    total_enqueued = 0
+    total_deduped = 0
+    try:
+        from rtfm.core.library import Library
+        lib = Library(str(db_path))
+        try:
+            for src in sources:
+                src_path = Path(src.get("path", ".")).resolve()
+                src_corpus = src.get("corpus", cfg.get("corpus", "default"))
+                if not src_path.is_dir():
+                    print(f"  ! [{src_corpus}] {src_path} (path missing — skipped)")
+                    continue
+                ext_set = None
+                if src.get("extensions"):
+                    ext_set = {
+                        e.strip() if e.strip().startswith(".") else f".{e.strip()}"
+                        for e in src["extensions"].split(",")
+                    }
+                diff = quick_diff(lib, src_path, src_corpus,
+                                  extensions=ext_set)
+
+                payloads = []
+                for fpath in diff.added + diff.modified:
+                    try:
+                        rel = str(fpath.relative_to(src_path))
+                    except ValueError:
+                        rel = str(fpath)
+                    payloads.append({
+                        "root": str(src_path),
+                        "corpus": src_corpus,
+                        "filepath": rel,
+                    })
+                if not payloads:
+                    print(f"  [{src_corpus}] {src_path.name}: up to date "
+                          f"({diff.unchanged} unchanged)")
+                    continue
+                inserted, deduped = queue.enqueue_many("ingest", payloads)
+                total_enqueued += inserted
+                total_deduped += deduped
+                print(f"  [{src_corpus}] {src_path.name}: "
+                      f"+{inserted} queued"
+                      + (f" ({deduped} already pending)" if deduped else "")
+                      + f", {diff.unchanged} unchanged")
+        finally:
+            lib.close()
+    finally:
+        queue.close()
+
+    print()
+    print(f"Total: {total_enqueued} job(s) queued"
+          + (f", {total_deduped} dedup'd" if total_deduped else "")
+          + ".")
+
+    if total_enqueued > 0:
+        pid = ensure_worker_running(rtfm_dir)
+        if pid:
+            print(f"Worker draining queue in background (PID {pid}). "
+                  "Track: `rtfm worker status` / `rtfm queue stats`.")
+        else:
+            print("Worker already running — drain in progress.")
+    else:
+        print("Nothing to do.")
+
+
 def cmd_sync(args):
-    """Sync files into the library."""
+    """Sync files into the library.
+
+    Default mode (0.10.0+): scan configured sources, enqueue P1 ingest
+    jobs for new/modified files, auto-spawn the worker daemon if needed,
+    return immediately. Progress is observable via ``rtfm queue stats``
+    and ``rtfm worker status``.
+
+    Legacy mode (--inline): run the full sync in-process, blocking
+    until done. Useful for CI, tests, and one-shot scripted runs.
+    """
     from rtfm.core.sync import sync
     from rtfm.config import find_rtfm_root, load_config, save_config
+
+    # New default: queue-based sync, unless --inline / --ocr / --files
+    # / explicit path / --no-embeddings forces the legacy path.
+    # --ocr keeps using the dedicated OCR daemon (separate state,
+    # separate semantics). --no-embeddings is a script signal (CI,
+    # tests) that the caller wants to block until the work is done —
+    # the queue mode would return immediately, breaking those flows.
+    use_queue = (
+        not getattr(args, "inline", False)
+        and not getattr(args, "ocr", False)
+        and not getattr(args, "files", None)
+        and not getattr(args, "path", None)
+        and not getattr(args, "dry_run", False)
+        and not getattr(args, "force", False)
+        and not getattr(args, "no_embeddings", False)
+    )
+    if use_queue:
+        return _cmd_sync_enqueue(args)
 
     lib = _get_lib(args)
 
@@ -1495,6 +1618,12 @@ def main():
         help="Print a progress line every N seconds (default: auto — 600s "
              "when --ocr is set, off otherwise).",
     )
+    p_sync.add_argument(
+        "--inline", action="store_true",
+        help="Run the sync in-process and block until done (legacy 0.9.x "
+             "behaviour). The default is to enqueue per-file ingest jobs "
+             "and let the worker daemon drain them in the background.",
+    )
     p_sync.set_defaults(func=cmd_sync)
 
     # ocr-worker (internal — invoked by `rtfm sync --ocr` as a detached
@@ -1503,6 +1632,42 @@ def main():
         "ocr-worker", help=argparse.SUPPRESS, parents=[db_parent]
     )
     p_worker.set_defaults(func=cmd_ocr_worker)
+
+    # worker — the new priority-queue daemon (0.10.0+).
+    # Producers (rtfm sync, hooks) enqueue jobs; this worker drains them.
+    from rtfm.cli_worker import cmd_worker, cmd_worker_daemon, cmd_queue
+    p_w = subparsers.add_parser(
+        "worker",
+        help="Start/stop/inspect the RTFM background worker (priority queue)",
+    )
+    p_w.add_argument(
+        "action", nargs="?", choices=["start", "stop", "status"],
+        default="status",
+        help="start: spawn a detached worker. stop: SIGTERM the worker. "
+             "status (default): report on the running worker.",
+    )
+    p_w.set_defaults(func=cmd_worker)
+
+    # worker-daemon (hidden — invoked by ensure_worker_running()).
+    p_wd = subparsers.add_parser("worker-daemon", help=argparse.SUPPRESS)
+    p_wd.set_defaults(func=cmd_worker_daemon)
+
+    # queue — inspect / manage the work queue.
+    p_q = subparsers.add_parser(
+        "queue",
+        help="Inspect or manage the work queue (stats / list / failed / "
+             "clear-done / retry-failed)",
+    )
+    p_q.add_argument(
+        "action", nargs="?",
+        choices=["stats", "list", "failed", "clear-done", "retry-failed"],
+        default="stats",
+    )
+    p_q.add_argument("--limit", type=int, default=20,
+                     help="Max rows for list/failed (default 20).")
+    p_q.add_argument("--keep", type=int, default=100,
+                     help="Rows to keep when clear-done (default 100).")
+    p_q.set_defaults(func=cmd_queue)
 
     # add (register a source)
     p_add = subparsers.add_parser("add", help="Register a source directory")
