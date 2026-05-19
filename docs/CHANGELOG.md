@@ -7,6 +7,30 @@ description: >-
 
 # Changelog
 
+## [0.10.1] — 2026-05-19
+
+### Added — P2 embed handler (queue phase 2)
+
+The priority-queue worker now drains P2 embed jobs in addition to P1 ingest. The full pipeline is:
+
+```
+producer ─► P1 ingest job ─► worker ─► parse + index + upsert tracking
+                                   ─► enqueue N P2 jobs (chunks of the new book,
+                                       split at EMBED_BATCH_SIZE=64)
+producer ─► P2 embed job  ─► worker ─► fastembed batch → chunk_embeddings
+```
+
+- `Library.embed_chunks_by_id(chunk_ids, model=None)` — embed a specific list of chunk ids. Skips chunks that already carry an embedding for the active model (idempotent retry). The 500-id chunked filter dodges SQLite's parameter limit even for huge backfills.
+- `Library.chunk_ids_for_book(slug)` and `Library.chunk_ids_without_embedding(corpus=None)` — small helpers used by the P1 follow-up enqueue and by `rtfm embed` in queue mode.
+- `handlers.handle_embed` — P2 handler: load `chunk_ids` from payload, call `embed_chunks_by_id`. Empty payload is a no-op (so a malformed enqueue doesn't fail the job).
+- `handlers.handle_ingest` (existing) now enqueues a P2 batch per `EMBED_BATCH_SIZE=64` chunks of the newly-created book — chunks reach the embedding column on their own, no manual `rtfm embed` needed.
+- **`rtfm embed` is queue-based by default**: scans for chunks missing an embedding, splits at `EMBED_BATCH_SIZE`, enqueues P2 jobs, auto-spawns the worker, returns immediately. `--inline` and `--force` keep the legacy blocking path (CI / re-embedding the whole DB).
+- 5 new tests in `rtfm/tests/test_handlers.py`. Fixed an `INSERT … ON CONFLICT(chunk_id, model)` clause to match the table's actual `UNIQUE(chunk_id)` constraint.
+
+### Coming
+
+Phase 3 (P3 OCR handler — folds the existing OCR daemon into the unified worker) lands in 0.10.2.
+
 ## [0.10.0] — 2026-05-19
 
 ### Added — priority-queue worker (MVP / phase 1)

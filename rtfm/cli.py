@@ -264,8 +264,29 @@ def cmd_compare_versions(args):
 
 
 def cmd_embed(args):
-    """Generate embeddings for chunks."""
+    """Generate embeddings for chunks.
+
+    Default mode (0.10.0+): scan the DB for chunks without an embedding
+    (optionally scoped to ``--corpus``), split into P2 batches, enqueue
+    them, auto-spawn the worker. Returns immediately. The worker drains
+    in the background, preempted by any incoming P1 ingest.
+
+    Legacy mode (--inline): run embedding in-process and block. Useful
+    for one-shot CI / scripted runs and for ``--force`` (re-embedding
+    everything).
+    """
     from rtfm.core.embeddings import resolve_model, warn_if_heavy
+
+    # --force keeps the legacy path: re-embedding *every* chunk doesn't
+    # fit the dedup-on-pending model of the queue (we'd want a separate
+    # "wipe + queue everything" semantic). For now, force is inline.
+    use_queue = (
+        not getattr(args, "inline", False)
+        and not getattr(args, "force", False)
+    )
+
+    if use_queue:
+        return _cmd_embed_enqueue(args)
 
     lib = _get_lib(args)
 
@@ -296,6 +317,60 @@ def cmd_embed(args):
 
     print(f"Embedded: {stats['embedded']} chunks")
     lib.close()
+
+
+def _cmd_embed_enqueue(args):
+    """Queue-mode embed (0.10.0+).
+
+    Finds every chunk without an embedding for the active model
+    (optionally narrowed by ``--corpus``), batches them at
+    ``EMBED_BATCH_SIZE``, enqueues P2 jobs, then auto-spawns the
+    worker. Returns immediately.
+    """
+    from rtfm.config import find_rtfm_root
+    from rtfm.core.handlers import EMBED_BATCH_SIZE
+    from rtfm.core.library import Library
+    from rtfm.core.queue import Queue
+    from rtfm.cli_worker import ensure_worker_running
+
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("rtfm embed: no .rtfm/ project root in the cwd chain. "
+                 "Use `rtfm embed --inline` for a one-shot blocking run.")
+    rtfm_dir = rtfm_root / ".rtfm"
+    db_path = rtfm_dir / "library.db"
+
+    lib = Library(str(db_path))
+    try:
+        chunk_ids = lib.chunk_ids_without_embedding(corpus=args.corpus)
+    finally:
+        lib.close()
+
+    if not chunk_ids:
+        scope = f" in corpus={args.corpus!r}" if args.corpus else ""
+        print(f"rtfm embed: nothing to do{scope} — every chunk already embedded.")
+        return
+
+    queue = Queue(db_path)
+    try:
+        batches = [chunk_ids[i:i + EMBED_BATCH_SIZE]
+                   for i in range(0, len(chunk_ids), EMBED_BATCH_SIZE)]
+        inserted, deduped = queue.enqueue_many(
+            "embed", [{"chunk_ids": b} for b in batches])
+    finally:
+        queue.close()
+
+    scope = f" in {args.corpus!r}" if args.corpus else ""
+    print(f"rtfm embed: {len(chunk_ids)} chunk(s){scope} queued as "
+          f"{inserted} batch(es) of up to {EMBED_BATCH_SIZE}"
+          + (f" ({deduped} dedup'd)" if deduped else "") + ".")
+
+    pid = ensure_worker_running(rtfm_dir)
+    if pid:
+        print(f"Worker draining in background (PID {pid}). "
+              "Track: `rtfm queue stats` / `rtfm worker status`.")
+    else:
+        print("Worker already running — drain in progress.")
 
 
 def cmd_embed_stats(args):
@@ -1545,7 +1620,13 @@ def main():
     p_embed = subparsers.add_parser("embed", help="Generate embeddings for chunks", parents=[db_parent])
     p_embed.add_argument("--corpus", "-c", help="Only embed chunks in this corpus")
     p_embed.add_argument("--batch-size", type=int, default=32, help="Batch size")
-    p_embed.add_argument("--force", action="store_true", help="Re-generate all embeddings")
+    p_embed.add_argument("--force", action="store_true", help="Re-generate all embeddings (implies --inline)")
+    p_embed.add_argument(
+        "--inline", action="store_true",
+        help="Run embedding in-process and block until done (legacy "
+             "0.9.x behaviour). The default is to enqueue P2 batches "
+             "and let the worker daemon drain them in the background.",
+    )
     p_embed.add_argument("--embed-model", dest="embed_model", metavar="ALIAS|HF_NAME",
                          help="Embedding model: alias (fast/balanced/quality) or full HF name. "
                               "Defaults to the DB's active model or 'fast'.")

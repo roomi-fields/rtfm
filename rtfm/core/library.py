@@ -1698,6 +1698,106 @@ class Library:
 
         return {"embedded": embedded, "total": total}
 
+    def embed_chunks_by_id(
+        self,
+        chunk_ids: list[int],
+        model: Optional[str] = None,
+    ) -> dict:
+        """Generate embeddings for a specific list of chunk ids.
+
+        Used by the priority-queue worker (P2 handler) so a batch of
+        chunks created by a P1 ingest can be embedded as a self-contained
+        unit. Skips chunks that already have an embedding for the active
+        model — idempotent on retry.
+        """
+        from rtfm.core.embeddings import (
+            embed_texts, embedding_to_bytes, DEFAULT_MODEL, resolve_model
+        )
+
+        if not chunk_ids:
+            return {"embedded": 0, "skipped": 0}
+
+        requested = resolve_model(model).hf_name if model else None
+        active_raw = self.get_active_embedding_model()
+        active = resolve_model(active_raw).hf_name if active_raw else None
+        model_name = requested or active or DEFAULT_MODEL
+
+        conn = self._get_conn()
+        # Filter: only chunks that exist AND don't already have an
+        # embedding for this model. Use parameter-binding with
+        # ``executemany``-style chunking to dodge SQLite's parameter
+        # limit if a P2 batch ever grows beyond 999 ids.
+        to_embed: list[tuple[int, str]] = []
+        for batch in (chunk_ids[i:i + 500] for i in range(0, len(chunk_ids), 500)):
+            placeholders = ",".join(["?"] * len(batch))
+            rows = conn.execute(
+                f"""SELECT c.id, c.content FROM chunks c
+                    LEFT JOIN chunk_embeddings e
+                      ON c.id = e.chunk_id AND e.model = ?
+                    WHERE c.id IN ({placeholders}) AND e.id IS NULL""",
+                (model_name, *batch),
+            ).fetchall()
+            to_embed.extend((r["id"], r["content"]) for r in rows)
+
+        skipped = len(chunk_ids) - len(to_embed)
+        if not to_embed:
+            return {"embedded": 0, "skipped": skipped}
+
+        # Run fastembed in one shot — the caller is expected to slice
+        # ``chunk_ids`` into reasonable batches (32-128) before calling.
+        texts = [c for _, c in to_embed]
+        ids = [i for i, _ in to_embed]
+        embeddings = embed_texts(texts, model_name, batch_size=len(texts))
+        for chunk_id, emb in zip(ids, embeddings):
+            conn.execute(
+                """INSERT INTO chunk_embeddings (chunk_id, model, embedding)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(chunk_id) DO UPDATE SET
+                       model = excluded.model,
+                       embedding = excluded.embedding""",
+                (chunk_id, model_name, embedding_to_bytes(emb)),
+            )
+        conn.commit()
+        return {"embedded": len(ids), "skipped": skipped}
+
+    def chunk_ids_for_book(self, book_slug: str) -> list[int]:
+        """Return the chunk ids of a book, in stable order. Used by the
+        P1 ingest handler to enqueue follow-up P2 embed jobs."""
+        rows = self._get_conn().execute(
+            """SELECT c.id FROM chunks c
+               JOIN books b ON c.book_id = b.id
+               WHERE b.slug = ?
+               ORDER BY c.id ASC""",
+            (book_slug,),
+        ).fetchall()
+        return [r["id"] for r in rows]
+
+    def chunk_ids_without_embedding(self, corpus: Optional[str] = None,
+                                    limit: Optional[int] = None) -> list[int]:
+        """Return chunk ids that don't yet have an embedding for the
+        active (or default) model. Used by ``rtfm embed`` to enqueue a
+        backfill across the whole DB."""
+        from rtfm.core.embeddings import DEFAULT_MODEL, resolve_model
+        active_raw = self.get_active_embedding_model()
+        model_name = (resolve_model(active_raw).hf_name if active_raw
+                      else DEFAULT_MODEL)
+
+        sql = """SELECT c.id FROM chunks c
+                 LEFT JOIN chunk_embeddings e
+                   ON c.id = e.chunk_id AND e.model = ?
+                 LEFT JOIN books b ON c.book_id = b.id
+                 WHERE e.id IS NULL"""
+        params: list = [model_name]
+        if corpus:
+            sql += " AND b.corpus = ?"
+            params.append(corpus)
+        sql += " ORDER BY c.id ASC"
+        if limit:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return [r["id"] for r in
+                self._get_conn().execute(sql, params).fetchall()]
+
     def get_embedding_stats(self) -> dict:
         """Get statistics about embeddings."""
         conn = self._get_conn()

@@ -2,10 +2,12 @@
 
 P1 ingest : index a single file. Payload schema:
     {"root": <abs source path>, "corpus": <name>,
-     "filepath": <relative path>, "extensions": <comma list or null>}
+     "filepath": <relative path>}
 
-Phase 1 of the queue/worker redesign ships P1 only. Embed (P2) and
-OCR (P3) handlers will be added incrementally.
+P2 embed  : embed a batch of chunks. Payload schema:
+    {"chunk_ids": [int, ...], "model": <optional hf or alias>}
+
+P3 OCR    : pending (Phase 3).
 """
 from __future__ import annotations
 
@@ -14,10 +16,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rtfm.core.library import Library
-from rtfm.core.queue import Job
+from rtfm.core.queue import Queue, Job
 
 if TYPE_CHECKING:
     from rtfm.core.worker import Worker
+
+
+# How many chunks fit into a single P2 embed job. Tuned so a batch
+# runs in seconds (responsive preemption by an incoming P1) while
+# still amortising the fastembed startup cost.
+EMBED_BATCH_SIZE = 64
 
 
 def _compute_hash(path: Path) -> str:
@@ -86,6 +94,44 @@ def handle_ingest(job: Job, worker: "Worker") -> None:
             book_slug=book_slug,
             file_size=abs_path.stat().st_size,
         )
+
+        # Enqueue follow-up P2 embed jobs for the chunks just created.
+        # Splitting into fixed-size batches keeps each P2 short enough
+        # that a fresh P1 (e.g. file edited mid-run) is picked up at
+        # the next job boundary — that is the cooperative preemption
+        # the user asked for in the worker design.
+        chunk_ids = lib.chunk_ids_for_book(book_slug)
+        if chunk_ids:
+            queue = Queue(str(worker.db_path))
+            try:
+                batches = [chunk_ids[i:i + EMBED_BATCH_SIZE]
+                           for i in range(0, len(chunk_ids), EMBED_BATCH_SIZE)]
+                queue.enqueue_many("embed",
+                                   [{"chunk_ids": b} for b in batches])
+            finally:
+                queue.close()
+    finally:
+        lib.close()
+
+
+def handle_embed(job: Job, worker: "Worker") -> None:
+    """P2 — embed a batch of chunks identified by id.
+
+    The batch size is bounded by :data:`EMBED_BATCH_SIZE` at enqueue
+    time, so this handler runs in seconds rather than minutes. The
+    library skips chunks that already carry an embedding for the active
+    model, so retries are idempotent.
+    """
+    payload = job.payload
+    chunk_ids = payload.get("chunk_ids") or []
+    model = payload.get("model")  # None → DB-active or DEFAULT
+
+    if not chunk_ids:
+        return  # Nothing to do; job is recorded as done.
+
+    lib = Library(str(worker.db_path))
+    try:
+        lib.embed_chunks_by_id(chunk_ids, model=model)
     finally:
         lib.close()
 
@@ -93,4 +139,5 @@ def handle_ingest(job: Job, worker: "Worker") -> None:
 # Dispatch table consumed by :func:`rtfm.core.worker.Worker`.
 HANDLERS = {
     "ingest": handle_ingest,
+    "embed": handle_embed,
 }
