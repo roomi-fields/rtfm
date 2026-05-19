@@ -650,6 +650,63 @@ def cmd_status(args):
     except Exception:
         pass  # best-effort
 
+    # Priority-queue worker (0.10.0+). Shown only when relevant: a worker
+    # is running OR there are pending/failed jobs OR the queue table
+    # exists with rows. Stays silent on a vanilla project that never
+    # used the queue path.
+    try:
+        from rtfm.config import find_rtfm_root as _frr
+        from rtfm.core.worker import worker_running as _wr
+        from rtfm.core.queue import Queue as _Q
+        _root_for_worker = _frr()
+        if _root_for_worker is not None:
+            _rtfm_dir = _root_for_worker / ".rtfm"
+            _wstate = _wr(_rtfm_dir)
+            # Queue stats (cheap; reads from the same library.db)
+            _q = _Q(str(_rtfm_dir / "library.db"))
+            try:
+                _qstats = _q.stats()
+            finally:
+                _q.close()
+
+            _has_active = _wstate is not None
+            _has_pending = any(
+                _qstats.get(t, {}).get("pending", 0) for t in ("ingest", "embed", "ocr")
+            )
+            _has_failed = any(
+                _qstats.get(t, {}).get("failed", 0) for t in ("ingest", "embed", "ocr")
+            )
+
+            if _has_active or _has_pending or _has_failed:
+                print("\nWorker / Queue:")
+                if _wstate:
+                    line = f"  worker:  running (PID {_wstate.pid}, {_wstate.status})"
+                    print(line)
+                    if _wstate.current_job_id is not None:
+                        _payload = _wstate.current_job_payload or {}
+                        _fp = _payload.get("filepath") or _payload.get("chunk_ids")
+                        _detail = f" — {_fp}" if _fp else ""
+                        if isinstance(_fp, list):
+                            _detail = f" — {len(_fp)} chunk(s)"
+                        print(f"           job #{_wstate.current_job_id} "
+                              f"[{_wstate.current_job_type}]{_detail}")
+                    print(f"           {_wstate.jobs_done} done, "
+                          f"{_wstate.jobs_failed} failed since "
+                          f"{_wstate.started_at}")
+                else:
+                    print("  worker:  not running"
+                          + (" — run `rtfm worker start` (or any `rtfm sync`)"
+                             if _has_pending else ""))
+                # Compact per-type breakdown (only types with rows)
+                for _t in ("ingest", "embed", "ocr"):
+                    _b = _qstats.get(_t)
+                    if not _b:
+                        continue
+                    _parts = [f"{s}={n}" for s, n in sorted(_b.items())]
+                    print(f"  {_t:<8} {' '.join(_parts)}")
+    except Exception:
+        pass  # best-effort
+
     # Index health. Always cheap by default — just a JSON read for known
     # scan suspects. Pending-sync counts are opt-in via --health because
     # stat()-ing every tracked file is fine on a local repo but can take
@@ -1831,7 +1888,10 @@ def main():
 
     # worker — the new priority-queue daemon (0.10.0+).
     # Producers (rtfm sync, hooks) enqueue jobs; this worker drains them.
-    from rtfm.cli_worker import cmd_worker, cmd_worker_daemon, cmd_queue
+    from rtfm.cli_worker import (
+        cmd_worker, cmd_worker_daemon, cmd_queue,
+        cmd_watch, cmd_watch_daemon,
+    )
     p_w = subparsers.add_parser(
         "worker",
         help="Start/stop/inspect the RTFM background worker (priority queue)",
@@ -1847,6 +1907,27 @@ def main():
     # worker-daemon (hidden — invoked by ensure_worker_running()).
     p_wd = subparsers.add_parser("worker-daemon", help=argparse.SUPPRESS)
     p_wd.set_defaults(func=cmd_worker_daemon)
+
+    # watch — periodic filesystem poller (0.10.3+).
+    p_watch = subparsers.add_parser(
+        "watch",
+        help="Start/stop/inspect the filesystem watcher (auto-enqueue P1 on changes)",
+    )
+    p_watch.add_argument(
+        "action", nargs="?", choices=["start", "stop", "status"],
+        default="status",
+        help="start: spawn the watcher. stop: SIGTERM it. status (default).",
+    )
+    p_watch.add_argument(
+        "--poll", type=float, default=None, metavar="SECONDS",
+        help="Poll interval (default 30s). Smaller = more reactive, more CPU.",
+    )
+    p_watch.set_defaults(func=cmd_watch)
+
+    # watch-daemon (hidden — invoked by ensure_watcher_running()).
+    p_watch_d = subparsers.add_parser("watch-daemon", help=argparse.SUPPRESS)
+    p_watch_d.add_argument("--poll", type=float, default=None)
+    p_watch_d.set_defaults(func=cmd_watch_daemon)
 
     # queue — inspect / manage the work queue.
     p_q = subparsers.add_parser(

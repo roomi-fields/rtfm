@@ -16,6 +16,12 @@ from pathlib import Path
 
 from rtfm.config import find_rtfm_root
 from rtfm.core.queue import Queue
+from rtfm.core.watcher import (
+    Watcher, WatcherLock, WatcherLockHeld,
+    POLL_INTERVAL_SECONDS,
+    read_state as read_watcher_state,
+    watcher_running, clear_state as clear_watcher_state,
+)
 from rtfm.core.worker import (
     Worker, WorkerLock, WorkerLockHeld,
     pid_alive, read_state, worker_running, clear_state,
@@ -71,6 +77,39 @@ def _which(binname: str) -> str | None:
     return which(binname)
 
 
+def ensure_watcher_running(rtfm_dir: Path,
+                           poll_interval: float | None = None) -> int | None:
+    """Spawn a watcher daemon if none is alive. Returns the PID.
+
+    Idempotent: a second call while a watcher is healthy returns the
+    existing PID instead of forking a duplicate.
+    """
+    state = watcher_running(rtfm_dir)
+    if state:
+        return state.pid
+
+    stale = read_watcher_state(rtfm_dir)
+    if stale and not pid_alive(stale.pid):
+        clear_watcher_state(rtfm_dir)
+
+    cmd = [sys.executable, "-m", "rtfm.cli", "watch-daemon"]
+    if poll_interval is not None:
+        cmd += ["--poll", str(poll_interval)]
+    wrappers = []
+    for binname, flags in (("ionice", ["-c", "3"]), ("nice", ["-n", "19"])):
+        if _which(binname):
+            wrappers += [binname, *flags]
+    proc = subprocess.Popen(
+        wrappers + cmd,
+        cwd=str(rtfm_dir.parent),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return proc.pid
+
+
 # ── ``rtfm worker-daemon`` (hidden) ─────────────────────────────────────
 
 def cmd_worker_daemon(args):
@@ -100,6 +139,97 @@ def cmd_worker_daemon(args):
         # we just exit silently. The caller (``ensure_worker_running``)
         # has already confirmed the live worker.
         return
+
+
+def cmd_watch_daemon(args):
+    """Long-running filesystem poller. Hidden from --help.
+
+    Holds ``flock`` on ``.rtfm/watcher.lock`` so a duplicate invocation
+    exits silently. Scans configured sources every ``--poll`` seconds
+    (default :data:`POLL_INTERVAL_SECONDS`) and enqueues P1 jobs for
+    new/modified files, then spawns the worker daemon if needed.
+    """
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("watch-daemon: no .rtfm/ project root in the cwd chain.")
+    rtfm_dir = rtfm_root / ".rtfm"
+    interval = getattr(args, "poll", None) or POLL_INTERVAL_SECONDS
+
+    try:
+        with WatcherLock(rtfm_dir):
+            _log(rtfm_dir, f"watch-daemon starting pid={os.getpid()} poll={interval}s")
+            Watcher(rtfm_dir=rtfm_dir, poll_interval=interval,
+                    log=lambda m: _log(rtfm_dir, m)).run()
+    except WatcherLockHeld:
+        return
+
+
+def cmd_watch(args):
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("watch: no .rtfm/ project root in the cwd chain.")
+    rtfm_dir = rtfm_root / ".rtfm"
+    action = getattr(args, "action", "status") or "status"
+
+    if action == "status":
+        state = watcher_running(rtfm_dir)
+        if not state:
+            print("watcher: not running.")
+            stale = read_watcher_state(rtfm_dir)
+            if stale and not pid_alive(stale.pid):
+                print(f"  (stale state file from dead PID {stale.pid} — will be cleaned on next spawn)")
+            return
+        print(f"watcher: running (PID {state.pid}, host {state.host})")
+        print(f"  status:        {state.status}")
+        print(f"  sources:       {state.sources_count}")
+        print(f"  last scan:     {state.last_scan_at or '—'}")
+        print(f"  last enqueued: {state.last_enqueued}")
+        print(f"  totals:        {state.total_scans} scan(s), "
+              f"{state.total_enqueued} file(s) enqueued")
+        print(f"  started:       {state.started_at}")
+        return
+
+    if action == "start":
+        interval = getattr(args, "poll", None)
+        pid = ensure_watcher_running(rtfm_dir, poll_interval=interval)
+        if pid is None:
+            print("watcher: could not start (another watcher won the race).")
+            return
+        for _ in range(20):
+            time.sleep(0.1)
+            if watcher_running(rtfm_dir):
+                break
+        state = watcher_running(rtfm_dir)
+        if state:
+            print(f"watcher: started (PID {state.pid}, poll={interval or POLL_INTERVAL_SECONDS}s).")
+        else:
+            print(f"watcher: spawned (PID {pid}) — waiting on state file...")
+        return
+
+    if action == "stop":
+        state = watcher_running(rtfm_dir)
+        if not state:
+            print("watcher: not running.")
+            return
+        try:
+            import signal
+            os.kill(state.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            print("watcher: process already gone.")
+            clear_watcher_state(rtfm_dir)
+            return
+        for _ in range(50):
+            time.sleep(0.1)
+            if not pid_alive(state.pid):
+                break
+        if pid_alive(state.pid):
+            print(f"watcher: SIGTERM sent to PID {state.pid} — still running, will exit after current scan.")
+        else:
+            print(f"watcher: stopped (PID {state.pid}).")
+            clear_watcher_state(rtfm_dir)
+        return
+
+    sys.exit(f"watch: unknown action {action!r}. Use start | stop | status.")
 
 
 # ── ``rtfm worker [start|stop|status]`` ─────────────────────────────────

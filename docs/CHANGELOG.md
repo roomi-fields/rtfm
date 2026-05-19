@@ -7,6 +7,17 @@ description: >-
 
 # Changelog
 
+## [0.10.3] — 2026-05-19
+
+### Added — filesystem watcher + enriched status (queue phase 4)
+
+- **`rtfm watch [start|stop|status]`** — a polling daemon that scans every configured source every 30 s (configurable via `--poll`) and enqueues P1 ingest jobs for new/modified files. Auto-spawns the worker after each scan that found something. Held by an exclusive `flock` on `.rtfm/watcher.lock` (one watcher per project), with `.rtfm/watcher_state.json` for status. Combined with the worker, a file you save now lands in the index within ~30 s, automatically, without any manual `rtfm sync`.
+- Polling (not inotify) chosen on purpose: RTFM frequently indexes Obsidian vaults on `/mnt/d/…` (NTFS via WSL), where inotify does not propagate events. The poll uses `quick_diff` (size + mtime, no MD5), so a 30 s tick is cheap even on huge corpora.
+- **`rtfm status` shows a new `Worker / Queue:` section** when relevant: worker status (running/idle/busy), current job preview, per-type counts (`ingest`, `embed`, `ocr`) with `pending/running/done/failed` breakdown. Silent on projects that never used the queue path.
+- New module `rtfm/core/watcher.py` (`Watcher`, `WatcherLock`, `watcher_running`, state primitives). `cli_worker.ensure_watcher_running()` mirrors `ensure_worker_running()`. 10 new unit tests in `rtfm/tests/test_watcher.py`.
+
+Phase 4 closes the queue redesign loop: producers (CLI, hooks, **watcher**) → priority queue → worker (one process, three priorities, bounded resources). From here on the user can edit a file and the index catches up on its own.
+
 ## [0.10.2] — 2026-05-19
 
 ### Added — P3 OCR handler (queue phase 3)
