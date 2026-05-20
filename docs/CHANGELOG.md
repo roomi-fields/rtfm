@@ -7,6 +7,18 @@ description: >-
 
 # Changelog
 
+## [0.11.2] — 2026-05-20
+
+### Changed — PDF health scan hardened for unattended corpus runs
+
+A cross-team freeze post-mortem (a sibling tool ran two poppler-based PDF scanners in parallel on a DrvFs/9p mount; corrupt files wedged `pdfinfo` in uninterruptible D-state, full-document `pdftotext` on big healthy PDFs saturated I/O) drove three hardening changes so RTFM can scan an entire corpus in the background without freezing WSL:
+
+- **Page sampling**: `measure_pdf_text(path, sample_pages=10)` now text-extracts only the first ~10 pages. The scan signal (≈0 chars/page) is unambiguous there; extracting a 700-page book in full was pure I/O waste. Verdict unchanged, ~10× faster per large file (Narmour 499p: 0.5 s vs seconds).
+- **Buffer read**: the file bytes are read in Python (`path.read_bytes()`, an interruptible syscall we own) and handed to pypdfium2 as a buffer, instead of letting pdfium open the path and block on the slow mount. RTFM was already subprocess-free (pypdfium2 in-process), so it never had the D-state child problem in the first place.
+- **No two scanners at once**: `rtfm doctor` refuses to run while the worker is `busy` (use `--force` to override, or stop the worker). One PDF scanner per mount.
+
+`measure_pdf_text` now also returns `sampled_pages`. `backfill-pages` no longer overwrites `total_chars` (the sampled count isn't the document total) — it writes `page_count` and bases the scan verdict on the freshly-sampled real text.
+
 ## [0.11.1] — 2026-05-20
 
 ### Fixed — scan detection reads the file, not the DB

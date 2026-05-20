@@ -648,17 +648,21 @@ def cmd_backfill_pages(args):
         if cat == "wrong-format":
             wrong_format += 1
             continue
-        # ok or scan → we have a real page count + char count
+        # ok or scan → we have the true page count. (We do NOT overwrite
+        # total_chars: measure_pdf_text only samples the first pages, so
+        # its char count is a scan probe, not the document total. The
+        # scan verdict already came from the real sampled text, which is
+        # the bug we set out to fix.)
         conn.execute(
-            "UPDATE books SET page_count = ?, total_chars = ? WHERE id = ?",
-            (info["pages"], info["chars"], b["id"]),
+            "UPDATE books SET page_count = ? WHERE id = ?",
+            (info["pages"], b["id"]),
         )
         updated += 1
         if cat == "scan":
             scans.append((b["corpus"], b["filename"], info["pages"], info["cpp"]))
     conn.commit()
 
-    print(f"  page_count + real chars written: {updated}")
+    print(f"  page_count written: {updated}")
     print(f"  unreadable/missing: {unreadable}")
     print(f"  wrong-format (not really PDF): {wrong_format}")
     print(f"\nProvable scans (< {SCAN_CHARS_PER_PAGE} chars/page, readable): {len(scans)}")
@@ -715,7 +719,26 @@ def cmd_doctor(args):
     rtfm_root = find_rtfm_root()
     if rtfm_root is None:
         sys.exit("doctor: no .rtfm/ project root in the cwd chain.")
-    db_path = rtfm_root / ".rtfm" / "library.db"
+    rtfm_dir = rtfm_root / ".rtfm"
+    db_path = rtfm_dir / "library.db"
+
+    # Never run two PDF scanners in parallel on the same (often DrvFs)
+    # mount — that concurrency is what saturated I/O and swap in the
+    # field. If the worker is actively draining jobs, refuse unless
+    # forced. (A worker that's idle is fine — doctor is read-only and
+    # the worker yields between jobs.)
+    if not getattr(args, "force", False):
+        from rtfm.core.worker import worker_running
+        ws = worker_running(rtfm_dir)
+        if ws is not None and ws.status == "busy":
+            sys.exit(
+                f"doctor: worker is busy (PID {ws.pid}, job "
+                f"{ws.current_job_type}). Running a full PDF scan now would "
+                "fight it for I/O on the same mount and can freeze WSL.\n"
+                "  → wait for the worker to go idle (rtfm worker status),\n"
+                "    or `rtfm worker stop` first,\n"
+                "    or pass --force if you accept the contention."
+            )
 
     import sqlite3
     conn = sqlite3.connect(str(db_path))
@@ -2298,6 +2321,9 @@ def main():
     p_doc.add_argument("--fix-extensions", action="store_true",
                        help="Rename mislabeled files (e.g. .pdf that is an EPUB) "
                             "to their true extension on disk.")
+    p_doc.add_argument("--force", action="store_true",
+                       help="Run even if the worker is busy (accepts I/O "
+                            "contention on the same mount).")
     p_doc.set_defaults(func=cmd_doctor)
 
     # add (register a source)

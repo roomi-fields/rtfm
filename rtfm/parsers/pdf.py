@@ -134,54 +134,76 @@ class PDFExtractionError(Exception):
     pass
 
 
-def measure_pdf_text(path: Path) -> dict:
-    """Measure a PDF's real text density, deterministically.
+# How many leading pages to sample when measuring text density. The
+# scan signal (chars/page near 0) is unambiguous on the first handful
+# of pages, so there is no need to extract a 700-page book in full —
+# that was a big part of what saturated I/O during the cross-team
+# freeze. A born-digital PDF shows hundreds of chars on page 1.
+SCAN_SAMPLE_PAGES = 10
 
-    Opens the file with pypdfium2 and extracts the actual text of every
-    page — never trusting a stale ``books.total_chars`` from the DB
-    (which may come from a different file revision or a prior OCR run).
 
-    Returns a dict:
-        {"pages": int, "chars": int, "chars_per_page": float,
-         "error": None}
-    or, when the file cannot be opened by pdfium:
-        {"pages": 0, "chars": 0, "chars_per_page": 0.0,
-         "error": "<reason>"}
+def measure_pdf_text(path: Path, sample_pages: int = SCAN_SAMPLE_PAGES) -> dict:
+    """Measure a PDF's real text density, deterministically and *cheaply*.
 
-    The scan threshold lives in the caller (``handlers.SCAN_CHARS_PER_PAGE``)
-    — this function only reports facts. A non-None ``error`` is a third
-    state distinct from scan vs. text: a file pdfium can't open can't be
-    OCR'd by marker either (same backend), so it needs re-acquisition,
-    not OCR.
+    Reads the actual file (never the DB's possibly-stale total_chars)
+    but is hardened for huge corpora on slow DrvFs/9p (NTFS-via-WSL)
+    mounts, per the freeze post-mortem:
+
+    * **Buffer read** — the file bytes are read in Python
+      (``open().read()``, an interruptible syscall we own) and handed to
+      pypdfium2 as a buffer, instead of letting pdfium open the path and
+      do the blocking I/O itself.
+    * **Page sampling** — only the first ``sample_pages`` pages are
+      text-extracted. The scan signal is unambiguous there; extracting a
+      700-page book in full was pure I/O waste.
+    * **In-process** — pypdfium2 means no ``pdfinfo``/``pdftotext``
+      subprocess that could wedge in uninterruptible D-state on DrvFs.
+
+    Returns ``{pages, sampled_pages, chars, chars_per_page, error}``.
+    ``pages`` is the true total; ``chars_per_page`` is over the sampled
+    pages. A non-None ``error`` is the third "unreadable" state — such a
+    file can't be OCR'd by marker either (same backend).
     """
     try:
         import pypdfium2 as pdfium
     except ImportError:
-        return {"pages": 0, "chars": 0, "chars_per_page": 0.0,
-                "error": "pypdfium2 not installed"}
+        return {"pages": 0, "sampled_pages": 0, "chars": 0,
+                "chars_per_page": 0.0, "error": "pypdfium2 not installed"}
+
+    # Read bytes ourselves — interruptible, and keeps pdfium off the
+    # raw DrvFs path syscall.
+    try:
+        data = path.read_bytes()
+    except OSError as e:
+        return {"pages": 0, "sampled_pages": 0, "chars": 0,
+                "chars_per_page": 0.0, "error": f"read failed: {e}"}
+    if not data:
+        return {"pages": 0, "sampled_pages": 0, "chars": 0,
+                "chars_per_page": 0.0, "error": "empty file"}
 
     import warnings
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            doc = pdfium.PdfDocument(str(path))
+            doc = pdfium.PdfDocument(data)
             try:
                 n = len(doc)
                 if n <= 0:
-                    return {"pages": 0, "chars": 0, "chars_per_page": 0.0,
-                            "error": "zero pages"}
+                    return {"pages": 0, "sampled_pages": 0, "chars": 0,
+                            "chars_per_page": 0.0, "error": "zero pages"}
+                sampled = min(sample_pages, n)
                 total = 0
-                for i in range(n):
+                for i in range(sampled):
                     tp = doc[i].get_textpage()
                     total += len(tp.get_text_bounded().strip())
             finally:
                 doc.close()
     except Exception as e:
-        return {"pages": 0, "chars": 0, "chars_per_page": 0.0,
-                "error": f"{type(e).__name__}: {e}"}
+        return {"pages": 0, "sampled_pages": 0, "chars": 0,
+                "chars_per_page": 0.0, "error": f"{type(e).__name__}: {e}"}
 
-    return {"pages": n, "chars": total, "chars_per_page": total / n,
-            "error": None}
+    return {"pages": n, "sampled_pages": sampled, "chars": total,
+            "chars_per_page": total / sampled, "error": None}
 
 
 def extract_with_pdftext(path: Path) -> list[dict]:
