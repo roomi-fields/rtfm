@@ -556,16 +556,57 @@ def cmd_files(args):
         print(f"  [{corpus}] {fp}  ({size_str} bytes)")
 
 
-def cmd_backfill_pages(args):
-    """Backfill books.page_count for already-indexed PDFs.
+def _classify_pdf(abs_path: Path) -> dict:
+    """Classify a PDF file deterministically into one of:
 
-    Older RTFM versions never stored a PDF's page count, so the
-    deterministic chars-per-page scan signal couldn't be computed for
-    existing books. This walks every PDF book with a NULL/0 page_count,
-    re-reads just the page count via pypdfium2 (cheap — no text
-    extraction), and writes it back. Then, with ``--enqueue-ocr`` and
-    ``ocr_fallback: true``, it enqueues P3 OCR jobs for the PDFs that
-    are now provably scans (chars/page < threshold).
+        'missing'      — not on disk
+        'wrong-format' — magic bytes say it's not a PDF (epub/zip/html…)
+        'unreadable'   — pdfium can't open it (Data format error etc.)
+        'scan'         — opens, but < SCAN_CHARS_PER_PAGE chars/page
+        'ok'           — opens, has a real text layer
+
+    Returns ``{category, pages, chars, cpp, real_format, error}``.
+    Reads the file (magic bytes + real text via pypdfium2) — never the
+    DB's possibly-stale total_chars.
+    """
+    from rtfm.core.handlers import SCAN_CHARS_PER_PAGE
+    from rtfm.core.sniff import detect_real_format
+    from rtfm.parsers.pdf import measure_pdf_text
+
+    out = {"category": None, "pages": 0, "chars": 0, "cpp": 0.0,
+           "real_format": None, "error": None}
+    if not abs_path.is_file():
+        out["category"] = "missing"
+        return out
+
+    fmt = detect_real_format(abs_path)
+    out["real_format"] = fmt
+    if fmt not in ("pdf", None):
+        # A .pdf that is really an epub/zip/html/etc.
+        out["category"] = "wrong-format"
+        return out
+
+    m = measure_pdf_text(abs_path)
+    out["pages"], out["chars"] = m["pages"], m["chars"]
+    out["cpp"], out["error"] = m["chars_per_page"], m["error"]
+    if m["error"] is not None:
+        out["category"] = "unreadable"
+    elif m["chars_per_page"] < SCAN_CHARS_PER_PAGE:
+        out["category"] = "scan"
+    else:
+        out["category"] = "ok"
+    return out
+
+
+def cmd_backfill_pages(args):
+    """Backfill books.page_count + corrected total_chars for indexed PDFs.
+
+    Re-reads each PDF's real text via pypdfium2 (not the possibly-stale
+    books.total_chars) to compute a deterministic chars-per-page scan
+    signal, and writes back both page_count and the freshly-measured
+    char count. With ``--enqueue-ocr`` + ``ocr_fallback``, enqueues P3
+    OCR for the PDFs that are provably scans (and *readable* — a file
+    pdfium can't open can't be OCR'd either, so it is skipped).
     """
     from rtfm.config import find_rtfm_root, load_config
     from rtfm.core.handlers import SCAN_CHARS_PER_PAGE
@@ -574,12 +615,6 @@ def cmd_backfill_pages(args):
     if rtfm_root is None:
         sys.exit("backfill-pages: no .rtfm/ project root in the cwd chain.")
     db_path = rtfm_root / ".rtfm" / "library.db"
-
-    try:
-        import pypdfium2 as pdfium
-    except ImportError:
-        sys.exit("backfill-pages: pypdfium2 not available "
-                 "(install the pdf extra: pip install rtfm-ai[pdf]).")
 
     import sqlite3
     conn = sqlite3.connect(str(db_path))
@@ -591,44 +626,42 @@ def cmd_backfill_pages(args):
              for r in conn.execute("SELECT corpus, root_path FROM sync_roots")}
 
     pdfs = conn.execute(
-        """SELECT id, corpus, filename, total_chars, chunk_count
+        """SELECT id, corpus, filename
            FROM books
            WHERE (filename LIKE '%.pdf' OR filename LIKE '%.PDF')
              AND (page_count IS NULL OR page_count = 0)"""
     ).fetchall()
     print(f"PDFs missing page_count: {len(pdfs)}")
 
-    updated = unreadable = 0
+    updated = unreadable = wrong_format = 0
     scans: list[tuple] = []
     for b in pdfs:
         root = roots.get(b["corpus"])
         if not root:
             unreadable += 1
             continue
-        p = Path(root) / b["filename"]
-        if not p.is_file():
+        info = _classify_pdf(Path(root) / b["filename"])
+        cat = info["category"]
+        if cat in ("missing", "unreadable"):
             unreadable += 1
             continue
-        try:
-            doc = pdfium.PdfDocument(str(p))
-            n = len(doc)
-            doc.close()
-        except Exception:
-            unreadable += 1
+        if cat == "wrong-format":
+            wrong_format += 1
             continue
-        if n <= 0:
-            unreadable += 1
-            continue
-        conn.execute("UPDATE books SET page_count = ? WHERE id = ?", (n, b["id"]))
+        # ok or scan → we have a real page count + char count
+        conn.execute(
+            "UPDATE books SET page_count = ?, total_chars = ? WHERE id = ?",
+            (info["pages"], info["chars"], b["id"]),
+        )
         updated += 1
-        cpp = (b["total_chars"] or 0) / n
-        if cpp < SCAN_CHARS_PER_PAGE:
-            scans.append((b["corpus"], b["filename"], n, cpp))
+        if cat == "scan":
+            scans.append((b["corpus"], b["filename"], info["pages"], info["cpp"]))
     conn.commit()
 
-    print(f"  page_count written: {updated}")
+    print(f"  page_count + real chars written: {updated}")
     print(f"  unreadable/missing: {unreadable}")
-    print(f"\nProvable scans (< {SCAN_CHARS_PER_PAGE} chars/page): {len(scans)}")
+    print(f"  wrong-format (not really PDF): {wrong_format}")
+    print(f"\nProvable scans (< {SCAN_CHARS_PER_PAGE} chars/page, readable): {len(scans)}")
     for corpus, fn, n, cpp in sorted(scans)[:40]:
         print(f"  [{corpus:<18}] {cpp:5.1f} c/p  {n:4}p  {fn[:50]}")
     if len(scans) > 40:
@@ -659,6 +692,128 @@ def cmd_backfill_pages(args):
             print(f"Worker draining in background (PID {pid}).")
     else:
         print("\n(Use --enqueue-ocr to queue P3 OCR jobs for these scans.)")
+    conn.close()
+
+
+def cmd_doctor(args):
+    """Diagnose every indexed PDF: ok / scan / unreadable / wrong-format.
+
+    Reads each file (magic bytes + real text via pypdfium2), never the
+    DB's stale total_chars. Produces an actionable report and, with
+    flags, fixes what it can:
+
+      --enqueue-ocr     queue P3 OCR for readable scans (enables
+                        ocr_fallback if needed)
+      --fix-extensions  rename mislabeled files (e.g. a .pdf that is
+                        really an EPUB) to their true extension on disk,
+                        so a future sync routes them to the right parser
+    """
+    from rtfm.config import find_rtfm_root, load_config
+    from rtfm.core.handlers import SCAN_CHARS_PER_PAGE
+    from rtfm.core.sniff import FORMAT_TO_EXTENSION
+
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("doctor: no .rtfm/ project root in the cwd chain.")
+    db_path = rtfm_root / ".rtfm" / "library.db"
+
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=60000")
+    roots = {r["corpus"]: r["root_path"]
+             for r in conn.execute("SELECT corpus, root_path FROM sync_roots")}
+
+    pdfs = conn.execute(
+        """SELECT corpus, filename FROM books
+           WHERE filename LIKE '%.pdf' OR filename LIKE '%.PDF'
+           ORDER BY corpus, filename"""
+    ).fetchall()
+    print(f"Diagnosing {len(pdfs)} indexed PDFs (reading real text)...\n")
+
+    cats: dict[str, list] = {"ok": [], "scan": [], "unreadable": [],
+                             "wrong-format": [], "missing": []}
+    for b in pdfs:
+        root = roots.get(b["corpus"])
+        if not root:
+            cats["missing"].append((b["corpus"], b["filename"], None))
+            continue
+        info = _classify_pdf(Path(root) / b["filename"])
+        cats[info["category"]].append((b["corpus"], b["filename"], info))
+
+    print("=== Summary ===")
+    print(f"  ok (has text layer) : {len(cats['ok'])}")
+    print(f"  scan (need OCR)     : {len(cats['scan'])}")
+    print(f"  unreadable (corrupt): {len(cats['unreadable'])}")
+    print(f"  wrong-format        : {len(cats['wrong-format'])}")
+    print(f"  missing on disk     : {len(cats['missing'])}")
+
+    if cats["wrong-format"]:
+        print("\n=== Wrong-format (not really PDF — OCR won't help) ===")
+        for corpus, fn, info in cats["wrong-format"][:30]:
+            print(f"  [{corpus:<16}] {info['real_format']:<6} {fn[:55]}")
+
+    if cats["unreadable"]:
+        print("\n=== Unreadable (pdfium can't open — re-acquire source) ===")
+        for corpus, fn, info in cats["unreadable"][:30]:
+            print(f"  [{corpus:<16}] {fn[:60]}")
+
+    if cats["scan"]:
+        print(f"\n=== Scans needing OCR (< {SCAN_CHARS_PER_PAGE} c/p, readable) ===")
+        for corpus, fn, info in sorted(cats["scan"], key=lambda x: x[2]["cpp"])[:40]:
+            print(f"  [{corpus:<16}] {info['cpp']:4.1f}c/p {info['pages']:4}p  {fn[:48]}")
+        if len(cats["scan"]) > 40:
+            print(f"  ... +{len(cats['scan']) - 40} more")
+
+    # --- Actions ---
+    if getattr(args, "fix_extensions", False) and cats["wrong-format"]:
+        print("\n--- Fixing extensions ---")
+        fixed = 0
+        for corpus, fn, info in cats["wrong-format"]:
+            new_ext = FORMAT_TO_EXTENSION.get(info["real_format"])
+            if not new_ext:
+                continue
+            root = roots.get(corpus)
+            src = Path(root) / fn
+            dst = src.with_suffix(new_ext)
+            if dst.exists():
+                print(f"  skip (target exists): {dst.name}")
+                continue
+            try:
+                src.rename(dst)
+                print(f"  {src.name}  →  {dst.name}")
+                fixed += 1
+            except OSError as e:
+                print(f"  ! {src.name}: {e}")
+        print(f"Renamed {fixed} file(s). Run `rtfm sync` to re-ingest them "
+              "through the correct parser.")
+
+    if getattr(args, "enqueue_ocr", False) and cats["scan"]:
+        cfg = load_config(rtfm_root)
+        if not cfg.get("ocr_fallback"):
+            cfg["ocr_fallback"] = True
+            from rtfm.config import save_config
+            save_config(rtfm_root, cfg)
+            print("\n(ocr_fallback enabled in config.json)")
+        from rtfm.core.queue import Queue
+        from rtfm.cli_worker import ensure_worker_running
+        q = Queue(str(db_path))
+        enq = 0
+        try:
+            for corpus, fn, info in cats["scan"]:
+                root = roots.get(corpus)
+                if q.enqueue("ocr", {"root": root, "corpus": corpus,
+                                     "filepath": fn}) is not None:
+                    enq += 1
+        finally:
+            q.close()
+        print(f"\nEnqueued {enq} P3 OCR job(s).")
+        pid = ensure_worker_running(rtfm_root / ".rtfm")
+        if pid:
+            print(f"Worker draining in background (PID {pid}).")
+    elif not getattr(args, "enqueue_ocr", False):
+        print("\n(Use --enqueue-ocr to queue OCR for the scans, "
+              "--fix-extensions to rename mislabeled files.)")
     conn.close()
 
 
@@ -2131,6 +2286,19 @@ def main():
              "ocr_fallback in config if needed.",
     )
     p_bp.set_defaults(func=cmd_backfill_pages)
+
+    # doctor — full PDF health diagnosis (ok/scan/unreadable/wrong-format)
+    p_doc = subparsers.add_parser(
+        "doctor",
+        help="Diagnose indexed PDFs (scan/corrupt/mislabeled) and optionally "
+             "fix: queue OCR for scans, rename mislabeled files.",
+    )
+    p_doc.add_argument("--enqueue-ocr", action="store_true",
+                       help="Queue P3 OCR for readable scans.")
+    p_doc.add_argument("--fix-extensions", action="store_true",
+                       help="Rename mislabeled files (e.g. .pdf that is an EPUB) "
+                            "to their true extension on disk.")
+    p_doc.set_defaults(func=cmd_doctor)
 
     # add (register a source)
     p_add = subparsers.add_parser("add", help="Register a source directory")

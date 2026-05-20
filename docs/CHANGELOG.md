@@ -7,6 +7,22 @@ description: >-
 
 # Changelog
 
+## [0.11.1] — 2026-05-20
+
+### Fixed — scan detection reads the file, not the DB
+
+A cross-check against a hand-curated 28-PDF list exposed a flaw: scan detection (and `backfill-pages`) computed chars/page from the **stored** `books.total_chars`, which can be stale (different file revision, prior OCR run). It made a genuine 0-char scan (Chomsky 1957) look like text. Now the density is measured from the real file every time.
+
+- `parsers.pdf.measure_pdf_text(path)` — opens via pypdfium2, extracts the real text of every page, returns `{pages, chars, chars_per_page, error}`. A non-None `error` is a distinct "unreadable" state (pdfium "Data format error" on corrupt files) — such files can't be OCR'd by marker either (same backend), so they need re-acquisition, not OCR.
+- `backfill-pages` rewrites both `page_count` **and** a freshly-measured `total_chars`, and only flags readable scans.
+
+### Added — format sniffing + `rtfm doctor`
+
+- `core.sniff.detect_real_format(path)` — magic-byte detection (pdf / zip / epub / docx / xlsx / pptx / html / rtf / gzip / empty). Catches files saved with a lying extension (e.g. an EPUB named `.pdf`).
+- The P1 ingest handler no longer queues OCR for a `.pdf` that isn't really a PDF (marker would fail too).
+- **New `rtfm doctor`** — diagnoses every indexed PDF into ok / scan / unreadable / wrong-format / missing by reading the real file. Flags: `--enqueue-ocr` (queue P3 for readable scans), `--fix-extensions` (rename mislabeled files on disk so a re-sync routes them to the right parser).
+- 11 new tests in `test_sniff.py`.
+
 ## [0.11.0] — 2026-05-20
 
 ### Added — deterministic scanned-PDF detection

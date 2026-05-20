@@ -134,6 +134,56 @@ class PDFExtractionError(Exception):
     pass
 
 
+def measure_pdf_text(path: Path) -> dict:
+    """Measure a PDF's real text density, deterministically.
+
+    Opens the file with pypdfium2 and extracts the actual text of every
+    page — never trusting a stale ``books.total_chars`` from the DB
+    (which may come from a different file revision or a prior OCR run).
+
+    Returns a dict:
+        {"pages": int, "chars": int, "chars_per_page": float,
+         "error": None}
+    or, when the file cannot be opened by pdfium:
+        {"pages": 0, "chars": 0, "chars_per_page": 0.0,
+         "error": "<reason>"}
+
+    The scan threshold lives in the caller (``handlers.SCAN_CHARS_PER_PAGE``)
+    — this function only reports facts. A non-None ``error`` is a third
+    state distinct from scan vs. text: a file pdfium can't open can't be
+    OCR'd by marker either (same backend), so it needs re-acquisition,
+    not OCR.
+    """
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        return {"pages": 0, "chars": 0, "chars_per_page": 0.0,
+                "error": "pypdfium2 not installed"}
+
+    import warnings
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            doc = pdfium.PdfDocument(str(path))
+            try:
+                n = len(doc)
+                if n <= 0:
+                    return {"pages": 0, "chars": 0, "chars_per_page": 0.0,
+                            "error": "zero pages"}
+                total = 0
+                for i in range(n):
+                    tp = doc[i].get_textpage()
+                    total += len(tp.get_text_bounded().strip())
+            finally:
+                doc.close()
+    except Exception as e:
+        return {"pages": 0, "chars": 0, "chars_per_page": 0.0,
+                "error": f"{type(e).__name__}: {e}"}
+
+    return {"pages": n, "chars": total, "chars_per_page": total / n,
+            "error": None}
+
+
 def extract_with_pdftext(path: Path) -> list[dict]:
     """
     Extract text using pdftext (fast, basic).

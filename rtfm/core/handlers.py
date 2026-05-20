@@ -119,6 +119,11 @@ def handle_ingest(job: Job, worker: "Worker") -> None:
         is_scan = (
             abs_path.suffix.lower() == ".pdf"
             and _pdf_is_scan(stats)
+            # Don't queue OCR for a .pdf that isn't really a PDF (e.g. an
+            # EPUB/zip saved with the wrong extension) — marker uses the
+            # same pdfium backend and would fail too. `rtfm doctor
+            # --fix-extensions` is the right tool for those.
+            and _is_real_pdf(abs_path)
         )
         if is_scan and _ocr_enabled(worker.db_path):
             queue = Queue(str(worker.db_path))
@@ -163,6 +168,16 @@ def _pdf_is_scan(stats: dict) -> bool:
         return (chars / pages) < SCAN_CHARS_PER_PAGE
     # No page count → can only tell a totally-empty extraction.
     return stats.get("chunks", 0) == 0
+
+
+def _is_real_pdf(path: Path) -> bool:
+    """True if the file's magic bytes say it really is a PDF. Guards
+    against OCR-queuing a mislabeled EPUB/zip/html."""
+    try:
+        from rtfm.core.sniff import detect_real_format
+        return detect_real_format(path) == "pdf"
+    except Exception:
+        return True  # on any sniff failure, don't block the normal path
 
 
 def _ocr_enabled(db_path) -> bool:
