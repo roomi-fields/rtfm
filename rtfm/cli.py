@@ -556,6 +556,112 @@ def cmd_files(args):
         print(f"  [{corpus}] {fp}  ({size_str} bytes)")
 
 
+def cmd_backfill_pages(args):
+    """Backfill books.page_count for already-indexed PDFs.
+
+    Older RTFM versions never stored a PDF's page count, so the
+    deterministic chars-per-page scan signal couldn't be computed for
+    existing books. This walks every PDF book with a NULL/0 page_count,
+    re-reads just the page count via pypdfium2 (cheap — no text
+    extraction), and writes it back. Then, with ``--enqueue-ocr`` and
+    ``ocr_fallback: true``, it enqueues P3 OCR jobs for the PDFs that
+    are now provably scans (chars/page < threshold).
+    """
+    from rtfm.config import find_rtfm_root, load_config
+    from rtfm.core.handlers import SCAN_CHARS_PER_PAGE
+
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("backfill-pages: no .rtfm/ project root in the cwd chain.")
+    db_path = rtfm_root / ".rtfm" / "library.db"
+
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        sys.exit("backfill-pages: pypdfium2 not available "
+                 "(install the pdf extra: pip install rtfm-ai[pdf]).")
+
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=60000")
+
+    cfg = load_config(rtfm_root)
+    roots = {r["corpus"]: r["root_path"]
+             for r in conn.execute("SELECT corpus, root_path FROM sync_roots")}
+
+    pdfs = conn.execute(
+        """SELECT id, corpus, filename, total_chars, chunk_count
+           FROM books
+           WHERE (filename LIKE '%.pdf' OR filename LIKE '%.PDF')
+             AND (page_count IS NULL OR page_count = 0)"""
+    ).fetchall()
+    print(f"PDFs missing page_count: {len(pdfs)}")
+
+    updated = unreadable = 0
+    scans: list[tuple] = []
+    for b in pdfs:
+        root = roots.get(b["corpus"])
+        if not root:
+            unreadable += 1
+            continue
+        p = Path(root) / b["filename"]
+        if not p.is_file():
+            unreadable += 1
+            continue
+        try:
+            doc = pdfium.PdfDocument(str(p))
+            n = len(doc)
+            doc.close()
+        except Exception:
+            unreadable += 1
+            continue
+        if n <= 0:
+            unreadable += 1
+            continue
+        conn.execute("UPDATE books SET page_count = ? WHERE id = ?", (n, b["id"]))
+        updated += 1
+        cpp = (b["total_chars"] or 0) / n
+        if cpp < SCAN_CHARS_PER_PAGE:
+            scans.append((b["corpus"], b["filename"], n, cpp))
+    conn.commit()
+
+    print(f"  page_count written: {updated}")
+    print(f"  unreadable/missing: {unreadable}")
+    print(f"\nProvable scans (< {SCAN_CHARS_PER_PAGE} chars/page): {len(scans)}")
+    for corpus, fn, n, cpp in sorted(scans)[:40]:
+        print(f"  [{corpus:<18}] {cpp:5.1f} c/p  {n:4}p  {fn[:50]}")
+    if len(scans) > 40:
+        print(f"  ... +{len(scans) - 40} more")
+
+    if getattr(args, "enqueue_ocr", False):
+        if not cfg.get("ocr_fallback"):
+            print("\n⚠ ocr_fallback is false in config.json — enabling it so "
+                  "the worker will run these P3 jobs.")
+            cfg["ocr_fallback"] = True
+            from rtfm.config import save_config
+            save_config(rtfm_root, cfg)
+        from rtfm.core.queue import Queue
+        from rtfm.cli_worker import ensure_worker_running
+        q = Queue(str(db_path))
+        enq = 0
+        try:
+            for corpus, fn, n, cpp in scans:
+                root = roots.get(corpus)
+                if q.enqueue("ocr", {"root": root, "corpus": corpus,
+                                     "filepath": fn}) is not None:
+                    enq += 1
+        finally:
+            q.close()
+        print(f"\nEnqueued {enq} P3 OCR job(s).")
+        pid = ensure_worker_running(rtfm_root / ".rtfm")
+        if pid:
+            print(f"Worker draining in background (PID {pid}).")
+    else:
+        print("\n(Use --enqueue-ocr to queue P3 OCR jobs for these scans.)")
+    conn.close()
+
+
 def cmd_status(args):
     """Show detailed RTFM status."""
     db = resolve_db(args.db)
@@ -2010,6 +2116,21 @@ def main():
     p_q.add_argument("--keep", type=int, default=100,
                      help="Rows to keep when clear-done (default 100).")
     p_q.set_defaults(func=cmd_queue)
+
+    # backfill-pages — fill books.page_count for old PDFs + optionally
+    # enqueue OCR for the ones that are provably scans.
+    p_bp = subparsers.add_parser(
+        "backfill-pages",
+        help="Fill page_count for already-indexed PDFs (deterministic "
+             "scan detection); optionally enqueue OCR for scans.",
+    )
+    p_bp.add_argument(
+        "--enqueue-ocr", action="store_true",
+        help="After backfill, enqueue P3 OCR jobs for PDFs that are "
+             "provably scans (chars/page below threshold). Enables "
+             "ocr_fallback in config if needed.",
+    )
+    p_bp.set_defaults(func=cmd_backfill_pages)
 
     # add (register a source)
     p_add = subparsers.add_parser("add", help="Register a source directory")

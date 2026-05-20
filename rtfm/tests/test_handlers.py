@@ -187,6 +187,27 @@ def test_handle_ingest_no_ocr_when_fallback_disabled(tmp_path: Path):
         q.close()
 
 
+def test_pdf_is_scan_uses_chars_per_page():
+    """Deterministic scan test: chars/page below threshold = scan."""
+    from rtfm.core.handlers import _pdf_is_scan, SCAN_CHARS_PER_PAGE
+    # 499-page textbook scan, ~2 chars/page → scan
+    assert _pdf_is_scan({"chars": 950, "pages": 499, "chunks": 1}) is True
+    # born-digital paper, ~2000 chars/page → not a scan
+    assert _pdf_is_scan({"chars": 40000, "pages": 20, "chunks": 30}) is False
+    # exactly at threshold is not a scan (strict <)
+    assert _pdf_is_scan({"chars": SCAN_CHARS_PER_PAGE * 10,
+                         "pages": 10, "chunks": 5}) is False
+
+
+def test_pdf_is_scan_falls_back_to_zero_chunks_without_pages():
+    """When page_count is unknown (old DB / parser), fall back to the
+    zero-chunk signal."""
+    from rtfm.core.handlers import _pdf_is_scan
+    assert _pdf_is_scan({"chars": 0, "pages": None, "chunks": 0}) is True
+    assert _pdf_is_scan({"chars": 500, "pages": None, "chunks": 3}) is False
+    assert _pdf_is_scan({"chars": 0, "pages": 0, "chunks": 0}) is True
+
+
 def test_handle_ocr_rejects_non_pdf(tmp_path: Path):
     """P3 OCR is PDF-only — non-PDF payload must raise before touching
     marker, so the worker marks the job ``failed`` cleanly."""

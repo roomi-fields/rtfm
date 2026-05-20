@@ -34,6 +34,13 @@ if TYPE_CHECKING:
 # still amortising the fastembed startup cost.
 EMBED_BATCH_SIZE = 64
 
+# Deterministic scan threshold: a PDF whose extractable text density is
+# below this many characters per page is treated as a scanned image
+# (needs OCR). Born-digital PDFs run into the hundreds/thousands of
+# chars per page; scans yield ~0. This replaces the old "0 chunks"
+# heuristic, which missed scans that produced 1-2 junk chunks.
+SCAN_CHARS_PER_PAGE = 20
+
 
 def _compute_hash(path: Path) -> str:
     h = hashlib.md5()
@@ -102,16 +109,16 @@ def handle_ingest(job: Job, worker: "Worker") -> None:
             file_size=abs_path.stat().st_size,
         )
 
-        # Health signal: a PDF that yields 0 chunks via the default
-        # backend is almost certainly a scanned image. If the project
-        # has opted into OCR fallback, enqueue a P3 job to re-ingest
-        # this same file with marker (which actually OCRs the pages).
-        # The P3 job is lower-priority than any pending P1 / P2, so
-        # a freshly-edited markdown file will always be indexed before
-        # the worker churns through a slow OCR run.
+        # Health signal: detect scanned-image PDFs deterministically by
+        # text density (chars per page). Born-digital PDFs run into the
+        # hundreds/thousands of chars/page; a scan yields ~0. This
+        # catches scans that produced 1-2 junk chunks (which the old
+        # ``chunks == 0`` test missed). When OCR fallback is on, enqueue
+        # a lower-priority P3 to re-ingest with marker. P3 sits below
+        # any pending P1/P2 so editing a note is never blocked by OCR.
         is_scan = (
-            stats.get("chunks", 0) == 0
-            and abs_path.suffix.lower() == ".pdf"
+            abs_path.suffix.lower() == ".pdf"
+            and _pdf_is_scan(stats)
         )
         if is_scan and _ocr_enabled(worker.db_path):
             queue = Queue(str(worker.db_path))
@@ -140,6 +147,22 @@ def handle_ingest(job: Job, worker: "Worker") -> None:
                 queue.close()
     finally:
         lib.close()
+
+
+def _pdf_is_scan(stats: dict) -> bool:
+    """Deterministic scan test from ingest stats.
+
+    Uses chars-per-page when the parser reported a page count
+    (``stats["pages"]``); otherwise falls back to the old
+    zero-chunk signal. A PDF below :data:`SCAN_CHARS_PER_PAGE`
+    chars/page is treated as a scanned image needing OCR.
+    """
+    chars = stats.get("chars", 0)
+    pages = stats.get("pages")
+    if pages and pages > 0:
+        return (chars / pages) < SCAN_CHARS_PER_PAGE
+    # No page count → can only tell a totally-empty extraction.
+    return stats.get("chunks", 0) == 0
 
 
 def _ocr_enabled(db_path) -> bool:

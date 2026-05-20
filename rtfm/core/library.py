@@ -587,7 +587,12 @@ class Library:
 
         # Track chapters
         chapters = {}  # chapter_num -> chapter_id
-        stats = {"chunks": 0, "chars": 0}
+        # page_count comes from the parser (e.g. PDFParser writes the real
+        # pypdfium2 page count into metadata). Kept in stats so callers
+        # like the worker's ingest handler can compute a deterministic
+        # chars-per-page scan signal.
+        page_count = metadata.get("page_count")
+        stats = {"chunks": 0, "chars": 0, "pages": page_count}
 
         for chunk in chunks:
             # Get or create chapter
@@ -633,11 +638,13 @@ class Library:
             stats["chunks"] += 1
             stats["chars"] += chunk.content_chars
 
-        # Update book stats
+        # Update book stats (incl. page_count when the parser provided it).
         conn.execute(
-            """UPDATE books SET chunk_count = ?, total_chars = ?, indexed_at = ?
+            """UPDATE books SET chunk_count = ?, total_chars = ?,
+               page_count = COALESCE(?, page_count), indexed_at = ?
                WHERE id = ?""",
-            (stats["chunks"], stats["chars"], datetime.now().isoformat(), book_id)
+            (stats["chunks"], stats["chars"], page_count,
+             datetime.now().isoformat(), book_id)
         )
 
         conn.commit()

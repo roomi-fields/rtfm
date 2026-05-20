@@ -7,6 +7,18 @@ description: >-
 
 # Changelog
 
+## [0.11.0] — 2026-05-20
+
+### Added — deterministic scanned-PDF detection
+
+The "is this PDF a scan that needs OCR?" decision is now based on **text density (chars per page)**, not the chunk count. On a real corpus the chunk-count heuristic was badly wrong: of 143 low-chunk PDF candidates, only **4 were actual scans** — the other ~113 had plenty of text that the chunker had merged into 1-2 large chunks. Conversely, scans that produced 1-2 junk chunks slipped past the old `chunks == 0` test entirely.
+
+- `PDFParser.parse()` writes the real `pypdfium2` page count into the shared metadata dict, so `Library._index_chunks` persists it to the new use of `books.page_count`.
+- `Library._index_chunks` returns `pages` in its stats and stores `page_count` (via `COALESCE`, so a re-ingest never nulls it).
+- `handlers._pdf_is_scan(stats)` — deterministic test: `chars / pages < SCAN_CHARS_PER_PAGE` (20). Falls back to the zero-chunk signal only when no page count is available. The P1 ingest handler uses it to decide whether to enqueue a P3 OCR job.
+- **New `rtfm backfill-pages [--enqueue-ocr]`** — fills `books.page_count` for already-indexed PDFs (cheap: pypdfium2 page count, no text extraction), reports which are provably scans, and optionally enqueues P3 OCR jobs for them (enabling `ocr_fallback` if needed).
+- 4 new tests in `rtfm/tests/test_handlers.py`.
+
 ## [0.10.6] — 2026-05-19
 
 ### Fixed

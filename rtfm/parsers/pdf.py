@@ -326,6 +326,12 @@ class PDFParser(BaseParser):
         if not pages:
             return
 
+        # Surface the real page count so the indexer can store it and
+        # compute a deterministic chars-per-page scan signal. ``metadata``
+        # is the same dict ``Library.ingest`` passes to ``_index_chunks``,
+        # so this write is visible there.
+        metadata['page_count'] = len(pages)
+
         # Document metadata
         book_title = metadata.get('title') or extract_title_from_filename(path.stem)
         book_slug = metadata.get('book_slug') or slugify(book_title)
