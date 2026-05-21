@@ -699,6 +699,114 @@ def cmd_backfill_pages(args):
     conn.close()
 
 
+def cmd_reindex(args):
+    """Targeted re-ingestion after a parser change — by extension,
+    corpus, or parser name.
+
+    Why this exists: when a parser is improved (e.g. CSV went from
+    "sample 8 rows" to "index everything" in 0.12.0), the affected
+    files must be re-ingested — but their content hash hasn't changed,
+    so a normal `rtfm sync` skips them, and `--force` would re-ingest
+    *everything* (including a thousand PDFs mid-embed). This enqueues
+    P1 ingest jobs **only** for the matching files, leaving the rest of
+    the queue (and your in-flight PDF embeddings) untouched.
+
+    Examples:
+        rtfm reindex --ext csv,tsv,xlsx,sqlite,db   # after a tabular parser fix
+        rtfm reindex --parser csv                   # same, by parser name
+        rtfm reindex --ext pdf --corpus icm-bibliography
+    """
+    from rtfm.config import find_rtfm_root
+    from rtfm.core.queue import Queue
+    from rtfm.cli_worker import ensure_worker_running
+
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("reindex: no .rtfm/ project root in the cwd chain.")
+    rtfm_dir = rtfm_root / ".rtfm"
+    db_path = rtfm_dir / "library.db"
+
+    # Resolve the set of extensions to match.
+    exts: set[str] = set()
+    if getattr(args, "ext", None):
+        for e in args.ext.split(","):
+            e = e.strip().lower()
+            if e:
+                exts.add(e if e.startswith(".") else f".{e}")
+    if getattr(args, "parser", None):
+        # Map a parser name → its registered extensions.
+        from rtfm.parsers.base import ParserRegistry
+        pname = args.parser.strip().lower()
+        for parser_cls in set(ParserRegistry.list_parsers().values()):
+            if getattr(parser_cls, "name", "").lower() == pname:
+                for e in getattr(parser_cls, "extensions", []):
+                    exts.add(e.lower() if e.startswith(".") else f".{e.lower()}")
+    if not exts and not getattr(args, "corpus", None):
+        sys.exit("reindex: specify at least --ext, --parser, or --corpus.")
+
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=60000")
+    roots = {r["corpus"]: r["root_path"]
+             for r in conn.execute("SELECT corpus, root_path FROM sync_roots")}
+
+    # Build the query: books whose filename ends with a target extension,
+    # optionally scoped to a corpus.
+    where = []
+    params: list = []
+    if exts:
+        ors = " OR ".join("LOWER(filename) LIKE ?" for _ in exts)
+        where.append(f"({ors})")
+        params.extend(f"%{e}" for e in exts)
+    if getattr(args, "corpus", None):
+        where.append("corpus = ?")
+        params.append(args.corpus)
+    sql = "SELECT corpus, filename FROM books"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    books = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    if not books:
+        print("reindex: no matching indexed files.")
+        return
+
+    queue = Queue(str(db_path))
+    payloads = []
+    skipped_no_root = 0
+    for b in books:
+        root = roots.get(b["corpus"])
+        if not root:
+            skipped_no_root += 1
+            continue
+        payloads.append({"root": root, "corpus": b["corpus"],
+                         "filepath": b["filename"]})
+    try:
+        inserted, deduped = queue.enqueue_many("ingest", payloads)
+    finally:
+        queue.close()
+
+    scope = []
+    if exts:
+        scope.append("ext " + ",".join(sorted(e.lstrip(".") for e in exts)))
+    if getattr(args, "corpus", None):
+        scope.append(f"corpus {args.corpus}")
+    print(f"reindex ({'; '.join(scope)}): {len(books)} matching file(s), "
+          f"{inserted} queued for re-ingest"
+          + (f", {deduped} already pending" if deduped else "")
+          + (f", {skipped_no_root} skipped (no sync root)" if skipped_no_root else "")
+          + ".")
+    if inserted:
+        pid = ensure_worker_running(rtfm_dir)
+        if pid:
+            print(f"Worker draining in background (PID {pid}). "
+                  "P1 ingest preempts any pending embed/OCR, so these "
+                  "refresh first.")
+        else:
+            print("Worker already running — refresh in progress.")
+
+
 def cmd_doctor(args):
     """Diagnose every indexed PDF: ok / scan / unreadable / wrong-format.
 
@@ -2325,6 +2433,18 @@ def main():
                        help="Run even if the worker is busy (accepts I/O "
                             "contention on the same mount).")
     p_doc.set_defaults(func=cmd_doctor)
+
+    # reindex — targeted re-ingestion after a parser change.
+    p_re = subparsers.add_parser(
+        "reindex",
+        help="Re-ingest only files of a given category (extension / parser / "
+             "corpus) — e.g. after a parser improvement. Leaves everything "
+             "else (and in-flight embeds) untouched.",
+    )
+    p_re.add_argument("--ext", help="Comma-separated extensions, e.g. csv,tsv,xlsx,sqlite,db")
+    p_re.add_argument("--parser", help="Re-ingest files handled by this parser (e.g. csv)")
+    p_re.add_argument("--corpus", "-c", help="Limit to this corpus")
+    p_re.set_defaults(func=cmd_reindex)
 
     # add (register a source)
     p_add = subparsers.add_parser("add", help="Register a source directory")

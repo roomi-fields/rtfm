@@ -373,3 +373,21 @@ def test_sync_emits_progress_callback_at_interval(library, tmp_path, monkeypatch
     )
     assert len(progress_events) >= 1
     assert "files" in progress_events[0]
+
+
+def test_default_extensions_cover_all_registered_parsers():
+    """Regression: DEFAULT_EXTENSIONS used to be a hand-maintained list
+    of 27 that omitted csv/tsv/xlsx/sqlite/epub/docx/ipynb… so those
+    files were never scanned. It must now equal the parser registry."""
+    import rtfm.parsers  # noqa: F401 — register all
+    from rtfm.parsers.base import ParserRegistry
+    from rtfm.core.sync import default_extensions
+
+    reg = {e.lower() for e in ParserRegistry.list_extensions()}
+    defaults = default_extensions()
+    # Every registered extension is scanned.
+    assert reg <= defaults
+    # The formerly-missing formats are now present.
+    for e in (".csv", ".tsv", ".xlsx", ".sqlite", ".db",
+              ".epub", ".docx", ".odt", ".rtf", ".ipynb", ".fb2"):
+        assert e in defaults, f"{e} must be scanned by default"

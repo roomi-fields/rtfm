@@ -26,7 +26,10 @@ if TYPE_CHECKING:
 
 # ── defaults ──────────────────────────────────────────────────────────────
 
-DEFAULT_EXTENSIONS: set[str] = {
+# Fallback used only if the parser registry can't be queried (it always
+# can in practice). The real default is every extension that has a
+# registered parser — see ``default_extensions()``.
+_FALLBACK_EXTENSIONS: set[str] = {
     ".md", ".txt", ".pdf", ".html", ".xml",
     ".py", ".js", ".ts", ".jsx", ".tsx",
     ".rs", ".go", ".java",
@@ -35,6 +38,30 @@ DEFAULT_EXTENSIONS: set[str] = {
     ".c", ".cpp", ".h", ".rb", ".php",
     ".json", ".tex", ".latex",
 }
+
+
+def default_extensions() -> set[str]:
+    """Every extension RTFM has a parser for.
+
+    Derived from the parser registry so a newly-added parser is scanned
+    automatically — no more silently-ignored formats. Previously this
+    was a hand-maintained list of 27 extensions that omitted half the
+    supported formats (csv, tsv, xlsx, sqlite, epub, docx, ipynb, …),
+    so those files were never indexed unless a source declared them
+    explicitly.
+    """
+    try:
+        import rtfm.parsers  # noqa: F401 — ensure all parsers register
+        from rtfm.parsers.base import ParserRegistry
+        exts = {e.lower() for e in ParserRegistry.list_extensions()}
+        return exts or set(_FALLBACK_EXTENSIONS)
+    except Exception:
+        return set(_FALLBACK_EXTENSIONS)
+
+
+# Back-compat alias. Callers that imported the constant still work, but
+# it's now the full registry-derived set computed at import time.
+DEFAULT_EXTENSIONS: set[str] = default_extensions()
 
 DEFAULT_EXCLUDE_DIRS: set[str] = {
     ".git", ".venv", "venv", "__pycache__", "node_modules",

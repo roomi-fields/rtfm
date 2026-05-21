@@ -7,6 +7,24 @@ description: >-
 
 # Changelog
 
+## [0.13.0] — 2026-05-21
+
+### Fixed — half the supported formats were never scanned
+
+`DEFAULT_EXTENSIONS` was a hand-maintained list of 27 extensions that omitted **27 formats RTFM has a parser for**: csv, tsv, xlsx, sqlite, sqlite3, db, epub, mobi, azw, azw3, docx, odt, rtf, fb2, djvu, ipynb, sql, and several languages (kotlin, swift, lua, r, perl, scala, …). Those files were silently ignored unless a source declared `extensions` explicitly. `DEFAULT_EXTENSIONS` is now **derived from the parser registry** (`default_extensions()`), so every format with a parser is scanned — 56 extensions, and any newly-added parser is picked up automatically.
+
+### Added — `rtfm reindex` (targeted refresh after a parser change)
+
+When a parser is improved (e.g. the 0.12.0 tabular fix), the affected files need re-ingesting — but their content hash is unchanged, so `rtfm sync` skips them and `--force` would re-ingest *everything* (including a thousand PDFs mid-embed). `rtfm reindex` enqueues P1 ingest jobs **only** for a chosen category, leaving the rest of the queue and in-flight embeddings untouched:
+
+```
+rtfm reindex --ext csv,tsv,xlsx,sqlite,db   # after a tabular parser fix
+rtfm reindex --parser csv                   # by parser name
+rtfm reindex --ext pdf --corpus icm-bibliography
+```
+
+P1 jobs preempt pending P2/P3, so the refresh runs first. This is the "nominal" way to roll out a parser change to an existing index.
+
 ## [0.12.0] — 2026-05-21
 
 ### Changed — tabular parsers index the **whole** file, not a sample
