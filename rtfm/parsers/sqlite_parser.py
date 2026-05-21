@@ -1,13 +1,18 @@
-"""SQLite parser — index a .db file by reading its schema + samples.
+"""SQLite parser — index a .db file: schema + all rows, streaming.
 
-A SQLite database is binary. We don't dump everything (a single table can
-be huge); instead we produce a small, useful set of chunks:
+A SQLite database is binary. We emit:
 
   - 1 overview chunk: list of tables / views / indexes with row counts
   - per table: schema chunk (CREATE TABLE + columns + foreign keys)
-  - per table: sample chunk (a few rows, BLOBs/long values truncated)
+  - per table: data chunks covering **every row** (size-bounded,
+    streamed via fetchmany so a huge table doesn't load fully)
   - per view/trigger: 1 chunk with its SQL
   - foreign keys are emitted as EdgeCandidate (table → table)
+
+Previously only the first 5 rows per table were indexed; now the full
+table is searchable. BLOB columns are binary and not text-searchable,
+so they keep a `<blob NB>` placeholder; text/numeric values are kept
+in full.
 
 The DB is opened **read-only** via URI so we never mutate the file and
 don't fight with another process holding a write lock.
@@ -21,9 +26,8 @@ from typing import Any, Iterator, Optional
 from rtfm.core.models import Chunk, EdgeCandidate
 from rtfm.parsers.base import BaseParser, ParserRegistry
 
-SAMPLE_ROWS = 5
-MAX_CELL_CHARS = 120
 MAX_CHUNK_CHARS = 4000
+FETCH_BATCH = 500  # rows pulled per fetchmany() — bounds memory
 SQLITE_MAGIC = b"SQLite format 3\x00"
 
 
@@ -50,11 +54,14 @@ def _format_cell(value: Any) -> str:
     if value is None:
         return "NULL"
     if isinstance(value, (bytes, memoryview)):
+        # Binary — not text-searchable, keep a size placeholder.
         return f"<blob {len(bytes(value))}B>"
-    text = str(value).replace("\n", " ").replace("\r", " ")
-    if len(text) > MAX_CELL_CHARS:
-        text = text[:MAX_CELL_CHARS] + "…"
-    return text
+    # Text/numeric kept in full (newlines flattened for one-line rows).
+    return str(value).replace("\n", " ").replace("\r", " ")
+
+
+def _format_row(cols: list[str], row: sqlite3.Row) -> str:
+    return " | ".join(f"{c}={_format_cell(row[c])}" for c in cols)
 
 
 def _is_internal(name: str) -> bool:
@@ -91,35 +98,6 @@ def _columns(conn: sqlite3.Connection, table: str) -> list[sqlite3.Row]:
 def _foreign_keys(conn: sqlite3.Connection, table: str) -> list[sqlite3.Row]:
     cur = conn.execute(f'PRAGMA foreign_key_list("{table}")')
     return cur.fetchall()
-
-
-def _sample_rows(conn: sqlite3.Connection, table: str, limit: int) -> tuple[list[str], list[list[str]]]:
-    try:
-        cur = conn.execute(f'SELECT * FROM "{table}" LIMIT {int(limit)}')
-        rows = cur.fetchall()
-    except sqlite3.DatabaseError:
-        return [], []
-    if not rows:
-        return [], []
-    cols = list(rows[0].keys())
-    formatted = [[_format_cell(row[c]) for c in cols] for row in rows]
-    return cols, formatted
-
-
-def _render_table(headers: list[str], rows: list[list[str]]) -> str:
-    if not headers:
-        return "(empty)"
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            if len(cell) > widths[i]:
-                widths[i] = len(cell)
-    sep = " | "
-    out = [sep.join(h.ljust(widths[i]) for i, h in enumerate(headers))]
-    out.append("-+-".join("-" * w for w in widths))
-    for row in rows:
-        out.append(sep.join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
-    return "\n".join(out)
 
 
 def _truncate(text: str, limit: int = MAX_CHUNK_CHARS) -> str:
@@ -249,16 +227,41 @@ class SQLiteParser(BaseParser):
 
             yield _new_chunk(f"table: {tname} (schema)", _truncate("\n".join(schema_parts)))
 
-            headers, rows = _sample_rows(conn, tname, SAMPLE_ROWS)
-            if rows:
-                sample = [
-                    f"# Sample rows from `{tname}` (first {len(rows)})",
-                    "",
-                    "```",
-                    _render_table(headers, rows),
-                    "```",
-                ]
-                yield _new_chunk(f"table: {tname} (sample)", _truncate("\n".join(sample)))
+            # Stream every row into size-bounded data chunks.
+            try:
+                cur = conn.execute(f'SELECT * FROM "{tname}"')
+            except sqlite3.DatabaseError:
+                continue
+            col_names: list[str] = []
+            header_line = ""
+            buf: list[str] = []
+            buf_chars = 0
+            row_start = 1
+            row_num = 0
+            while True:
+                try:
+                    batch = cur.fetchmany(FETCH_BATCH)
+                except sqlite3.DatabaseError:
+                    break
+                if not batch:
+                    break
+                if not col_names:
+                    col_names = list(batch[0].keys())
+                    header_line = f"table={tname} | columns: " + ", ".join(col_names)
+                for row in batch:
+                    row_num += 1
+                    line = _format_row(col_names, row)
+                    if buf and buf_chars + len(line) + 1 > MAX_CHUNK_CHARS:
+                        body = header_line + "\n" + "\n".join(buf)
+                        yield _new_chunk(f"table: {tname} rows {row_start}–{row_num-1}", body)
+                        buf = []
+                        buf_chars = 0
+                        row_start = row_num
+                    buf.append(line)
+                    buf_chars += len(line) + 1
+            if buf:
+                body = header_line + "\n" + "\n".join(buf)
+                yield _new_chunk(f"table: {tname} rows {row_start}–{row_num}", body)
 
         # ── Views / triggers ────────────────────────────────────────────
         for v in views:

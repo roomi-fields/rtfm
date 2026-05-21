@@ -101,13 +101,11 @@ class TestSQLiteParser:
     def test_parse_produces_chunks(self, sample_db):
         parser = SQLiteParser()
         chunks = list(parser.parse(sample_db))
-        # overview + (schema + sample) × 2 tables + 1 view = 6
-        assert len(chunks) == 6
-
         titles = [c.chapter_title for c in chunks]
         assert "overview" in titles
         assert "table: authors (schema)" in titles
-        assert "table: books (sample)" in titles
+        assert "table: books (schema)" in titles
+        assert any(t.startswith("table: books rows ") for t in titles)
         assert "view: recent_books" in titles
 
     def test_overview_lists_tables_with_counts(self, sample_db):
@@ -125,11 +123,27 @@ class TestSQLiteParser:
         assert "Foreign Keys" in chunk.content
         assert "authors" in chunk.content
 
-    def test_sample_rows_rendered(self, sample_db):
+    def test_all_rows_indexed_with_column_context(self, sample_db):
         parser = SQLiteParser()
-        chunk = next(c for c in parser.parse(sample_db) if c.chapter_title == "table: books (sample)")
-        assert "Ficciones" in chunk.content
-        assert "Invisible Cities" in chunk.content
+        data = "\n".join(c.content for c in parser.parse(sample_db)
+                         if "rows " in c.chapter_title)
+        assert "Ficciones" in data
+        assert "Invisible Cities" in data
+        # col=value context preserved
+        assert "title=Ficciones" in data
+
+    def test_large_table_fully_indexed(self, tmp_path):
+        import sqlite3 as _sq
+        db = tmp_path / "big.sqlite"
+        conn = _sq.connect(db)
+        conn.execute("CREATE TABLE t (id INTEGER, label TEXT)")
+        conn.executemany("INSERT INTO t VALUES (?, ?)",
+                         [(i, f"val_{i}") for i in range(1500)])
+        conn.commit(); conn.close()
+        data = "\n".join(c.content for c in SQLiteParser().parse(db)
+                         if "rows " in c.chapter_title)
+        assert "label=val_0" in data
+        assert "label=val_1499" in data
 
     def test_extract_edges_returns_foreign_keys(self, sample_db):
         parser = SQLiteParser()
@@ -427,10 +441,11 @@ class TestCSVParser:
         )
         return path
 
-    def test_parse_emits_overview_and_sample(self, sample_csv):
+    def test_emits_overview_then_data(self, sample_csv):
         chunks = list(CSVParser().parse(sample_csv))
         titles = [c.chapter_title for c in chunks]
-        assert titles == ["overview", "sample"]
+        assert titles[0] == "overview"
+        assert any(t.startswith("rows ") for t in titles[1:])
 
     def test_overview_has_column_types(self, sample_csv):
         overview = next(c for c in CSVParser().parse(sample_csv)
@@ -439,19 +454,52 @@ class TestCSVParser:
         assert "`age` *(int)*" in overview.content
         assert "`active` *(bool)*" in overview.content
         assert "`score` *(float)*" in overview.content
-        assert "3 data rows" in overview.content
 
-    def test_sample_renders_data(self, sample_csv):
-        sample = next(c for c in CSVParser().parse(sample_csv)
-                      if c.chapter_title == "sample")
-        assert "Alice" in sample.content
-        assert "Carol" in sample.content
+    def test_all_rows_indexed_not_just_sample(self, tmp_path):
+        """Regression: the parser used to index only the first 8 rows.
+        Every row must now appear in the data chunks."""
+        path = tmp_path / "big.csv"
+        rows = ["id,label"] + [f"{i},row_value_{i}" for i in range(500)]
+        path.write_text("\n".join(rows) + "\n")
+        chunks = list(CSVParser().parse(path))
+        data = "\n".join(c.content for c in chunks if c.chapter_title != "overview")
+        # First, middle, and last rows must all be searchable.
+        assert "row_value_0" in data
+        assert "row_value_250" in data
+        assert "row_value_499" in data
+
+    def test_value_not_truncated(self, tmp_path):
+        """Long cell values must be kept whole (no 80-char cutoff)."""
+        long_val = "X" * 300
+        path = tmp_path / "long.csv"
+        path.write_text(f"name,note\nAlice,{long_val}\n")
+        data = "\n".join(c.content for c in CSVParser().parse(path))
+        assert long_val in data
+
+    def test_rows_chunked_by_size(self, tmp_path):
+        """A large table is split into multiple bounded data chunks."""
+        path = tmp_path / "many.csv"
+        rows = ["c1,c2,c3"] + [f"{i},{i*2},payload_{i}" for i in range(2000)]
+        path.write_text("\n".join(rows) + "\n")
+        data_chunks = [c for c in CSVParser().parse(path)
+                       if c.chapter_title != "overview"]
+        assert len(data_chunks) > 1
+        # Each data chunk carries the header for column context.
+        assert all("columns:" in c.content for c in data_chunks)
+
+    def test_cell_keeps_column_context(self, sample_csv):
+        data = "\n".join(c.content for c in CSVParser().parse(sample_csv)
+                         if c.chapter_title != "overview")
+        # col=value format ties each value to its column.
+        assert "name=Alice" in data
+        assert "age=30" in data
 
     def test_tsv_routed_correctly(self, tmp_path):
         path = tmp_path / "data.tsv"
         path.write_text("a\tb\n1\t2\n3\t4\n")
-        chunks = list(CSVParser().parse(path))
-        assert len(chunks) == 2
+        titles = [c.chapter_title for c in CSVParser().parse(path)]
+        assert titles[0] == "overview"
+        assert any(t.startswith("rows ") for t in titles)
 
     def test_empty_file_yields_nothing(self, tmp_path):
         path = tmp_path / "empty.csv"
@@ -479,31 +527,44 @@ class TestXLSXParser:
         wb.save(path)
         return path
 
-    def test_parse_emits_overview_and_per_sheet(self, sample_xlsx):
+    def test_parse_emits_overview_schema_and_data(self, sample_xlsx):
         chunks = list(XLSXParser().parse(sample_xlsx))
         titles = [c.chapter_title for c in chunks]
-        # 1 overview + (schema + sample) × 2 sheets
         assert "overview" in titles
         assert "sheet: sales (schema)" in titles
-        assert "sheet: sales (sample)" in titles
         assert "sheet: inventory (schema)" in titles
-        assert "sheet: inventory (sample)" in titles
+        assert any(t.startswith("sheet: sales rows ") for t in titles)
+        assert any(t.startswith("sheet: inventory rows ") for t in titles)
 
-    def test_overview_lists_sheets_with_dimensions(self, sample_xlsx):
+    def test_overview_lists_sheets(self, sample_xlsx):
         overview = next(c for c in XLSXParser().parse(sample_xlsx)
                         if c.chapter_title == "overview")
         assert "`sales`" in overview.content
         assert "`inventory`" in overview.content
-        assert "2 rows × 3 cols" in overview.content
 
-    def test_sample_includes_data(self, sample_xlsx):
-        sample = next(c for c in XLSXParser().parse(sample_xlsx)
-                      if c.chapter_title == "sheet: sales (sample)")
-        assert "Apple" in sample.content
-        assert "Bread" in sample.content
+    def test_data_includes_all_rows(self, sample_xlsx):
+        data = "\n".join(c.content for c in XLSXParser().parse(sample_xlsx)
+                         if "rows " in c.chapter_title)
+        assert "product=Apple" in data
+        assert "product=Bread" in data
+        assert "sku=A001" in data
+
+    def test_all_rows_indexed_large_sheet(self, tmp_path):
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "big"
+        ws.append(["id", "label"])
+        for i in range(300):
+            ws.append([i, f"val_{i}"])
+        path = tmp_path / "big.xlsx"
+        wb.save(path)
+        data = "\n".join(c.content for c in XLSXParser().parse(path)
+                         if "rows " in c.chapter_title)
+        assert "label=val_0" in data
+        assert "label=val_299" in data
 
     def test_corrupt_xlsx_handled(self, tmp_path):
         bad = tmp_path / "bad.xlsx"
         bad.write_bytes(b"not a real xlsx")
-        # Doesn't raise — yields nothing
         assert list(XLSXParser().parse(bad)) == []

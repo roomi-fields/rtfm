@@ -7,6 +7,18 @@ description: >-
 
 # Changelog
 
+## [0.12.0] — 2026-05-21
+
+### Changed — tabular parsers index the **whole** file, not a sample
+
+CSV/TSV, XLSX and SQLite were *samplers*, not parsers: they indexed only the header + a handful of rows (CSV 8, XLSX 6, SQLite 5). A value on row 5000 was invisible to search. They now index **every row**, so the full table is searchable.
+
+- **CSV/TSV** (`csv_parser.py`): overview chunk (columns + inferred types) then **all rows** in size-bounded data chunks. Each row rendered as `col=value | col=value` (every value tied to its column for FTS/semantic match), full values (no more 80-char cell truncation), header repeated per chunk. Streamed — memory stays bounded on million-row files.
+- **XLSX** (`xlsx.py`): same treatment per sheet — schema chunk + all-rows data chunks, via `read_only` `iter_rows`.
+- **SQLite** (`sqlite_parser.py`): per table, schema chunk + all rows streamed with `fetchmany(500)`. BLOB columns keep a `<blob NB>` placeholder (binary, not text-searchable); text/numeric values kept in full. FK edges unchanged.
+
+Type inference still samples the first ~50 rows (it doesn't need the whole file). Trade-off: indexing a large table produces many more chunks → bigger index and more embeddings, which is the cost of "everything searchable". Tests updated/added across all three parsers (full-content, column-context, large-file, no-truncation).
+
 ## [0.11.2] — 2026-05-20
 
 ### Changed — PDF health scan hardened for unattended corpus runs

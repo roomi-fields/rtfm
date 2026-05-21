@@ -36,10 +36,10 @@ rtfm/
 │   ├── pdf.py          # PDF (pdftext/marker)
 │   ├── xml_legifrance.py  # Legifrance XML
 │   ├── html_bofip.py   # BOFiP HTML
-│   ├── sqlite_parser.py   # SQLite DB (schema + samples; FK edges)
+│   ├── sqlite_parser.py   # SQLite DB (schema + ALL rows, streamed; FK edges)
 │   ├── jupyter.py      # Jupyter .ipynb (cells grouped by heading)
-│   ├── csv_parser.py   # CSV/TSV (overview + sample with type inference)
-│   ├── xlsx.py         # XLSX (per-sheet schema + sample, openpyxl)
+│   ├── csv_parser.py   # CSV/TSV (full table indexed, streamed; type inference)
+│   ├── xlsx.py         # XLSX (per-sheet schema + ALL rows, streamed; openpyxl)
 │   ├── epub.py         # EPUB ebook (ebooklib + bs4)
 │   ├── mobi_parser.py  # MOBI/AZW/AZW3 ebook (mobi + bs4, DRM-free only)
 │   ├── fb2.py          # FictionBook (XML, stdlib only)

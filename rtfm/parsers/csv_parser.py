@@ -1,15 +1,19 @@
-"""CSV/TSV parser — index a tabular file by header + sample.
+"""CSV/TSV parser — index the full table, streaming.
 
-Tabular files can be huge (millions of rows). We don't dump everything;
-we produce two compact chunks:
+Earlier this was a *sampler*: it only indexed the header + 8 rows, so
+searching for a value on row 5000 found nothing. Now it indexes **every
+row**, in size-bounded chunks, so the whole table is searchable.
 
-  - overview: file path, dialect, column names with inferred types,
-              total row count (best-effort)
-  - sample : the first N rows, formatted as an aligned table
+Output:
+  - overview chunk: column names with inferred types (+ row count)
+  - data chunks   : every row, grouped into chunks of up to
+                    MAX_CHUNK_CHARS, each prefixed with the header so a
+                    matched value keeps its column context.
 
-If the file is misshapen (no header, inconsistent columns), we degrade
-to plaintext-style chunking handled elsewhere — the parser yields nothing
-and the registry never re-routes (plaintext catch-all picks it up).
+Streaming: rows are read lazily and chunks are yielded as they fill, so
+memory stays bounded even on million-row files. Cell values are kept in
+full (newlines flattened to spaces for table readability) — nothing is
+truncated, that was the whole point of the fix.
 """
 
 import csv
@@ -20,8 +24,10 @@ from typing import Iterator, Optional
 from rtfm.core.models import Chunk
 from rtfm.parsers.base import BaseParser, ParserRegistry
 
-SAMPLE_ROWS = 8
-MAX_CELL_CHARS = 80
+# Rows scanned up-front purely to infer column types for the overview.
+TYPE_SAMPLE_ROWS = 50
+# Soft cap on a data chunk. A single row larger than this still becomes
+# one (oversized) chunk rather than being split mid-row or truncated.
 MAX_CHUNK_CHARS = 4000
 SNIFF_BYTES = 8192
 
@@ -30,19 +36,17 @@ def _content_hash(text: str) -> str:
     return hashlib.md5(text.encode()).hexdigest()[:12]
 
 
-def _format_cell(value: str) -> str:
-    text = (value or "").replace("\n", " ").replace("\r", " ")
-    if len(text) > MAX_CELL_CHARS:
-        text = text[:MAX_CELL_CHARS] + "…"
-    return text
+def _flatten_cell(value: str) -> str:
+    """Flatten newlines so a cell stays on one table line — but keep the
+    full value (no truncation)."""
+    return (value or "").replace("\n", " ").replace("\r", " ")
 
 
 def _infer_type(values: list[str]) -> str:
     """Cheap type inference over a sample of cell values."""
-    seen_int = seen_float = seen_bool = seen_empty = 0
+    seen_int = seen_float = seen_bool = 0
     for v in values:
         if v == "" or v is None:
-            seen_empty += 1
             continue
         s = v.strip()
         if s.lower() in {"true", "false"}:
@@ -61,8 +65,7 @@ def _infer_type(values: list[str]) -> str:
         except ValueError:
             pass
         return "text"
-    total = seen_int + seen_float + seen_bool
-    if total == 0:
+    if seen_int + seen_float + seen_bool == 0:
         return "empty"
     if seen_bool and not seen_int and not seen_float:
         return "bool"
@@ -73,30 +76,19 @@ def _infer_type(values: list[str]) -> str:
     return "text"
 
 
-def _render_table(headers: list[str], rows: list[list[str]]) -> str:
-    if not headers:
-        return "(empty)"
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            if i < len(widths) and len(cell) > widths[i]:
-                widths[i] = len(cell)
-    sep = " | "
-    out = [sep.join(h.ljust(widths[i]) for i, h in enumerate(headers))]
-    out.append("-+-".join("-" * w for w in widths))
-    for row in rows:
-        cells = [
-            (row[i] if i < len(row) else "").ljust(widths[i])
-            for i in range(len(headers))
-        ]
-        out.append(sep.join(cells))
-    return "\n".join(out)
-
-
-def _truncate(text: str, limit: int = MAX_CHUNK_CHARS) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "\n… (truncated)"
+def _format_row(headers: list[str], row: list[str]) -> str:
+    """One row rendered as `col=value | col=value`, full values. This
+    keeps every cell tied to its column name so FTS/semantic search
+    matches with context, and avoids the unreadable wide-column
+    alignment problem on big tables."""
+    parts = []
+    for i, h in enumerate(headers):
+        val = _flatten_cell(row[i]) if i < len(row) else ""
+        parts.append(f"{h}={val}")
+    # Trailing extra cells (ragged row) — keep them, don't drop data.
+    for j in range(len(headers), len(row)):
+        parts.append(f"col{j}={_flatten_cell(row[j])}")
+    return " | ".join(parts)
 
 
 def _open_with_dialect(path: Path):
@@ -110,7 +102,6 @@ def _open_with_dialect(path: Path):
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
     except csv.Error:
-        # Fall back to extension hint
         dialect = csv.excel_tab if path.suffix.lower() == ".tsv" else csv.excel
     reader = csv.reader(f, dialect=dialect)
     return f, reader
@@ -118,7 +109,7 @@ def _open_with_dialect(path: Path):
 
 @ParserRegistry.register
 class CSVParser(BaseParser):
-    """Parser for CSV / TSV tabular files."""
+    """Parser for CSV / TSV tabular files. Indexes the whole table."""
 
     extensions = [".csv", ".tsv"]
     name = "csv"
@@ -134,30 +125,6 @@ class CSVParser(BaseParser):
         if f is None or reader is None:
             return
 
-        try:
-            try:
-                headers = next(reader)
-            except StopIteration:
-                return
-
-            sample_rows: list[list[str]] = []
-            total_rows = 0
-            for row in reader:
-                total_rows += 1
-                if len(sample_rows) < SAMPLE_ROWS:
-                    sample_rows.append([_format_cell(c) for c in row])
-        finally:
-            f.close()
-
-        if not headers:
-            return
-
-        # Infer types from the sample.
-        types: list[str] = []
-        for col_idx in range(len(headers)):
-            col_values = [row[col_idx] for row in sample_rows if col_idx < len(row)]
-            types.append(_infer_type(col_values))
-
         book_title = metadata.get("title", path.name)
         book_slug = metadata.get("book_slug", self._path_to_slug(path))
         book_file = metadata.get("source_file", str(path))
@@ -165,7 +132,8 @@ class CSVParser(BaseParser):
 
         idx = 0
 
-        def _new_chunk(chapter_title: str, content: str) -> Chunk:
+        def _new_chunk(chapter_title: str, content: str,
+                       row_start: int, row_end: int) -> Chunk:
             nonlocal idx
             idx += 1
             return Chunk(
@@ -176,32 +144,78 @@ class CSVParser(BaseParser):
                 book_file=book_file,
                 chapter_title=chapter_title,
                 chapter_num=idx,
-                page_start=1,
-                page_end=1,
+                page_start=row_start,
+                page_end=row_end,
                 paragraph=1,
                 content_chars=len(content),
                 content_hash=_content_hash(content),
                 metadata=ext_meta,
             )
 
-        overview = [f"# Tabular file: {path.name}", ""]
-        overview.append(f"- {len(headers)} columns")
-        overview.append(f"- {total_rows:,} data rows")
-        overview.append("")
-        overview.append("## Columns")
-        for h, t in zip(headers, types):
-            overview.append(f"- `{h}` *({t})*")
-        yield _new_chunk("overview", _truncate("\n".join(overview)))
+        try:
+            try:
+                headers = next(reader)
+            except StopIteration:
+                return
+            if not headers:
+                return
+            headers = [_flatten_cell(h) for h in headers]
 
-        if sample_rows:
-            sample = [
-                f"# Sample rows from `{path.name}` (first {len(sample_rows)})",
-                "",
-                "```",
-                _render_table([_format_cell(h) for h in headers], sample_rows),
-                "```",
-            ]
-            yield _new_chunk("sample", _truncate("\n".join(sample)))
+            # Buffer the first rows to infer column types for the overview,
+            # then replay them as the first data rows (no second file pass).
+            type_buffer: list[list[str]] = []
+            for row in reader:
+                type_buffer.append(row)
+                if len(type_buffer) >= TYPE_SAMPLE_ROWS:
+                    break
+
+            types: list[str] = []
+            for col_idx in range(len(headers)):
+                col_values = [r[col_idx] for r in type_buffer if col_idx < len(r)]
+                types.append(_infer_type(col_values))
+
+            overview = [f"# Tabular file: {path.name}", "",
+                        f"- {len(headers)} columns", "", "## Columns"]
+            for h, t in zip(headers, types):
+                overview.append(f"- `{h}` *({t})*")
+            yield _new_chunk("overview", "\n".join(overview), 0, 0)
+
+            # Stream every row into size-bounded data chunks. The header
+            # is repeated at the top of each chunk for column context.
+            header_line = "columns: " + ", ".join(headers)
+            buf_lines: list[str] = []
+            buf_chars = 0
+            chunk_row_start = 1
+            row_num = 0
+
+            def _flush(end_row: int):
+                nonlocal buf_lines, buf_chars, chunk_row_start
+                if not buf_lines:
+                    return None
+                body = header_line + "\n" + "\n".join(buf_lines)
+                ch = _new_chunk(f"rows {chunk_row_start}–{end_row}",
+                                body, chunk_row_start, end_row)
+                buf_lines = []
+                buf_chars = 0
+                chunk_row_start = end_row + 1
+                return ch
+
+            from itertools import chain
+            for row in chain(type_buffer, reader):
+                row_num += 1
+                line = _format_row(headers, row)
+                # +1 for the newline join.
+                if buf_lines and buf_chars + len(line) + 1 > MAX_CHUNK_CHARS:
+                    ch = _flush(row_num - 1)
+                    if ch is not None:
+                        yield ch
+                buf_lines.append(line)
+                buf_chars += len(line) + 1
+            ch = _flush(row_num)
+            if ch is not None:
+                yield ch
+        finally:
+            f.close()
 
     def extract_metadata(self, path: Path) -> dict:
         return {
