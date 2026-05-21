@@ -257,3 +257,7 @@ A single project run as a whole obeys:
   the run.
 - Producers (CLI, hooks, watcher) never block on the worker — they
   enqueue, possibly spawn it, and return.
+
+## Contributors
+
+Thanks to everyone who reported issues and tested RTFM.
