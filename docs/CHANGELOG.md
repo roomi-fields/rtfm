@@ -7,6 +7,11 @@ description: >-
 
 # Changelog
 
+## [0.14.1] — 2026-05-21
+
+### Fixed
+- `rtfm.core.embeddings` no longer hard-imports numpy at module load. numpy is part of the `[embeddings]` extra, but `reconcile()` (and the queue handlers) need only the metadata helpers (`resolve_model`, `DEFAULT_MODEL`) — which don't touch numpy. The top-level `import numpy` made `test_reconcile` fail in the core/dev CI matrix (`ModuleNotFoundError: numpy`). numpy is now imported lazily inside the functions that use it, with `from __future__ import annotations` keeping the `np.ndarray` type hints from evaluating at import time.
+
 ## [0.14.0] — 2026-05-21
 
 ### Fixed — embeddings no longer leak when chunks are deleted

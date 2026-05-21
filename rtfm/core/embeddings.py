@@ -1,11 +1,19 @@
 """Embeddings support for semantic search."""
+from __future__ import annotations
 
 import os
 import sys
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, List, NamedTuple, Optional, Tuple
 
-import numpy as np
+# numpy is part of the [embeddings] extra. It's imported lazily inside
+# the functions that actually need it, so this module's *metadata*
+# helpers (resolve_model, DEFAULT_MODEL, EMBEDDING_MODELS) stay
+# importable in a core/dev install without numpy — used by reconcile,
+# the queue handlers, etc. ``from __future__ import annotations`` keeps
+# the ``np.ndarray`` type hints from being evaluated at import time.
+if TYPE_CHECKING:
+    import numpy as np
 
 
 class ModelInfo(NamedTuple):
@@ -135,8 +143,9 @@ def get_model(model_name: str = DEFAULT_MODEL):
     return _model
 
 
-def _normalize(v: np.ndarray) -> np.ndarray:
+def _normalize(v: "np.ndarray") -> "np.ndarray":
     """L2-normalize embeddings so dot product equals cosine similarity."""
+    import numpy as np
     norm = np.linalg.norm(v, axis=-1, keepdims=True)
     norm = np.where(norm == 0, 1, norm)
     return v / norm
@@ -154,12 +163,13 @@ def embed_text(
     text: str,
     model_name: str = DEFAULT_MODEL,
     is_query: bool = True,
-) -> np.ndarray:
+) -> "np.ndarray":
     """Generate embedding for a single text.
 
     is_query=True applies the model's query prefix when required (mxbai, e5...).
     Set is_query=False for indexing/document embedding.
     """
+    import numpy as np
     if is_query:
         text = _apply_query_prefix(text, model_name)
     model = get_model(model_name)
@@ -174,11 +184,12 @@ def embed_texts(
     batch_size: int = 32,
     show_progress: bool = False,
     is_query: bool = False,
-) -> np.ndarray:
+) -> "np.ndarray":
     """Generate embeddings for multiple texts (documents by default).
 
     Set is_query=True only when embedding a batch of queries.
     """
+    import numpy as np
     if is_query:
         texts = [_apply_query_prefix(t, model_name) for t in texts]
     model = get_model(model_name)
@@ -187,13 +198,15 @@ def embed_texts(
     return _normalize(arr)
 
 
-def embedding_to_bytes(embedding: np.ndarray) -> bytes:
+def embedding_to_bytes(embedding: "np.ndarray") -> bytes:
     """Convert numpy embedding to bytes for SQLite storage."""
+    import numpy as np
     return embedding.astype(np.float32).tobytes()
 
 
-def bytes_to_embedding(data: bytes) -> np.ndarray:
+def bytes_to_embedding(data: bytes) -> "np.ndarray":
     """Convert bytes from SQLite back to numpy embedding."""
+    import numpy as np
     return np.frombuffer(data, dtype=np.float32)
 
 
@@ -202,11 +215,13 @@ def embedding_dim_from_bytes(data: bytes) -> int:
     return len(data) // 4
 
 
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+def cosine_similarity(a: "np.ndarray", b: "np.ndarray") -> float:
     """Cosine similarity; assumes both vectors are L2-normalized."""
+    import numpy as np
     return float(np.dot(a, b))
 
 
-def cosine_similarity_batch(query: np.ndarray, embeddings: np.ndarray) -> np.ndarray:
+def cosine_similarity_batch(query: "np.ndarray", embeddings: "np.ndarray") -> "np.ndarray":
     """Cosine similarity between a query vector and N embeddings (assumes normalized)."""
+    import numpy as np
     return np.dot(embeddings, query)
