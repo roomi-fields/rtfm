@@ -478,3 +478,5 @@ MIT — use it, fork it, extend it, ship it.
 [⭐ Star on GitHub](https://github.com/roomi-fields/rtfm) if RTFM saves your agent from hallucinating.
 
 </div>
+
+<!-- queue-worker docs live in docs/architecture.md -->
