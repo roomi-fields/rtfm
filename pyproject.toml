@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rtfm-ai"
-version = "0.14.1"
+version = "0.15.0"
 description = "RTFM — The open retrieval layer for AI agents. Indexes code, docs, legal, research, data. Extensible parser system. Serves surgical context via MCP."
 readme = "README.md"
 license = "MIT"
@@ -38,6 +38,13 @@ dependencies = [
 pdf = [
     "pdftext>=0.3.0",
     "marker-pdf>=0.2.0",
+]
+ocr = [
+    # CPU-friendly OCR backend (default). Needs the tesseract binary
+    # on the system (apt install tesseract-ocr tesseract-ocr-<lang>).
+    "pytesseract>=0.3.10",
+    "pypdfium2>=4.0",
+    "Pillow>=9.0",
 ]
 embeddings = [
     "fastembed>=0.3.0",

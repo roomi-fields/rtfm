@@ -245,6 +245,92 @@ def extract_with_pdftext(path: Path) -> list[dict]:
         raise PDFExtractionError(f"pdftext extraction failed: {e}")
 
 
+# Default OCR languages and render scale for tesseract. scale=2.0 maps a
+# typical PDF page to ~150-200 DPI, the sweet spot for tesseract accuracy
+# vs. speed/memory.
+TESSERACT_DEFAULT_LANGS = "eng+fra"
+TESSERACT_RENDER_SCALE = 2.0
+
+
+def extract_with_tesseract(
+    path: Path,
+    langs: str = TESSERACT_DEFAULT_LANGS,
+    page_start: int = 1,
+    page_end: Optional[int] = None,
+    scale: float = TESSERACT_RENDER_SCALE,
+) -> list[dict]:
+    """OCR a (range of) PDF page(s) with tesseract — fast and CPU-light.
+
+    Renders each page to an image via pypdfium2 (already a dependency)
+    and OCRs it with tesseract (a fast C binary, no multi-GB ML models
+    → no OOM/timeout that sank marker on CPU). Pages are processed one
+    at a time so memory stays bounded even on a 600-page book.
+
+    ``page_start``/``page_end`` are 1-indexed and inclusive; this is what
+    lets the worker split a big scan into short, resumable P3 tranches.
+
+    Returns ``[{'page': n, 'text': ...}, ...]`` for pages with text.
+    """
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        raise PDFExtractionError(
+            "\n\n  ❌ OCR requires the pdf extra (pypdfium2).\n"
+            "     Install with:  pip install rtfm-ai[pdf]\n"
+        )
+    try:
+        import pytesseract
+        from PIL import Image  # noqa: F401 — pytesseract needs PIL
+    except ImportError:
+        raise PDFExtractionError(
+            "\n\n  ❌ tesseract OCR backend requires pytesseract + Pillow.\n"
+            "     Install with:  pip install rtfm-ai[ocr]\n"
+            "     and the tesseract binary (apt install tesseract-ocr).\n"
+        )
+
+    # Keep only languages actually installed, so a missing pack doesn't
+    # abort the whole page with a tesseract error.
+    try:
+        available = set(pytesseract.get_languages(config=""))
+        requested = [l for l in langs.split("+") if l in available]
+        eff_langs = "+".join(requested) or "eng"
+    except Exception:
+        eff_langs = langs
+
+    import warnings
+    try:
+        data = path.read_bytes()
+    except OSError as e:
+        raise PDFExtractionError(f"read failed: {e}")
+
+    out: list[dict] = []
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            doc = pdfium.PdfDocument(data)
+            try:
+                n = len(doc)
+                lo = max(1, page_start)
+                hi = min(n, page_end if page_end is not None else n)
+                for i in range(lo - 1, hi):  # 0-indexed range
+                    page = doc[i]
+                    bitmap = page.render(scale=scale)
+                    pil = bitmap.to_pil()
+                    try:
+                        text = pytesseract.image_to_string(pil, lang=eff_langs)
+                    finally:
+                        pil.close()
+                    if text and text.strip():
+                        out.append({"page": i + 1, "text": text})
+            finally:
+                doc.close()
+    except PDFExtractionError:
+        raise
+    except Exception as e:
+        raise PDFExtractionError(f"tesseract extraction failed: {e}")
+    return out
+
+
 # Subprocess body for marker OCR. Run as a one-shot child process so
 # every PDF starts with a fresh interpreter — marker's pipeline holds
 # 3-8 GB of model state and never releases it in-process, so before
@@ -339,6 +425,48 @@ def extract_with_marker(path: Path) -> list[dict]:
     return [{"page": 1, "text": payload.get("markdown", "")}]
 
 
+def pages_to_chunks(
+    pages: list[dict],
+    book_slug: str,
+    book_title: str,
+    book_file: str,
+    ext_meta: Optional[dict] = None,
+    page_offset: int = 0,
+) -> Iterator[Chunk]:
+    """Turn ``[{'page': n, 'text': ...}]`` into Chunks.
+
+    Shared by ``PDFParser.parse`` and the P3 OCR handler so OCR'd page
+    ranges produce exactly the same chunk shape as a normal parse.
+    ``chunk_id`` embeds the page number, so a per-tranche re-run yields
+    stable ids and the page-range delete in ``append_ocr_chunks`` is
+    idempotent.
+    """
+    ext_meta = ext_meta or {}
+    for page_info in pages:
+        page_num = page_info['page']
+        page_text = page_info['text']
+        paragraphs = split_into_paragraphs(page_text)
+        chunks = merge_short_paragraphs(paragraphs)
+        for para_num, chunk_text in enumerate(chunks, 1):
+            chunk_id = f"{book_slug}-p{page_num:03d}-{para_num:03d}"
+            yield Chunk(
+                id=chunk_id,
+                content=chunk_text,
+                book_title=book_title,
+                book_slug=book_slug,
+                book_file=book_file,
+                chapter_title=f"Page {page_num}",
+                chapter_num=page_num,
+                page_start=page_num,
+                page_end=page_num,
+                paragraph=para_num,
+                section_type="page",
+                content_chars=len(chunk_text),
+                content_hash=content_hash(chunk_text),
+                metadata=ext_meta,
+            )
+
+
 @ParserRegistry.register
 class PDFParser(BaseParser):
     """
@@ -409,37 +537,10 @@ class PDFParser(BaseParser):
         book_slug = metadata.get('book_slug') or slugify(book_title)
         book_file = metadata.get('source_file') or path.name
 
-        # Process each page
-        chunk_counter = 0
-        for page_info in pages:
-            page_num = page_info['page']
-            page_text = page_info['text']
-
-            # Split into paragraphs and merge/split as needed
-            paragraphs = split_into_paragraphs(page_text)
-            chunks = merge_short_paragraphs(paragraphs)
-
-            for para_num, chunk_text in enumerate(chunks, 1):
-                chunk_counter += 1
-
-                chunk_id = f"{book_slug}-p{page_num:03d}-{chunk_counter:04d}"
-
-                yield Chunk(
-                    id=chunk_id,
-                    content=chunk_text,
-                    book_title=book_title,
-                    book_slug=book_slug,
-                    book_file=book_file,
-                    chapter_title=f"Page {page_num}",
-                    chapter_num=page_num,
-                    page_start=page_num,
-                    page_end=page_num,
-                    paragraph=para_num,
-                    section_type="page",
-                    content_chars=len(chunk_text),
-                    content_hash=content_hash(chunk_text),
-                    metadata=metadata.get('extended', {}),
-                )
+        yield from pages_to_chunks(
+            pages, book_slug, book_title, book_file,
+            ext_meta=metadata.get('extended', {}),
+        )
 
     def extract_metadata(self, path: Path) -> dict:
         """Extract metadata from PDF file."""

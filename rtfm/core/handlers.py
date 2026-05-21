@@ -7,14 +7,12 @@ P1 ingest : index a single file. Payload schema:
 P2 embed  : embed a batch of chunks. Payload schema:
     {"chunk_ids": [int, ...], "model": <optional hf or alias>}
 
-P3 OCR    : re-ingest a scanned PDF with the marker backend so the
-            text layer is reconstructed from page images. Payload:
-                {"root": ..., "corpus": ..., "filepath": ...}
-            P1 auto-enqueues this when a PDF produces zero chunks
-            AND ``ocr_fallback: true`` is set in ``.rtfm/config.json``.
-            The marker run itself happens in an isolated subprocess
-            (see :mod:`rtfm.parsers.pdf`) so its 3–8 GB of model state
-            is reclaimed by the OS between PDFs.
+P3 OCR    : OCR a page range of a scanned PDF and append its chunks.
+            Payload: {"root","corpus","filepath","page_start","page_end"}.
+            P1 auto-enqueues these (one per PAGES_PER_OCR_JOB tranche)
+            when a PDF is a scan AND ``ocr_fallback: true``. Default
+            backend is tesseract (fast on CPU, no OOM); marker is opt-in
+            via ``ocr_backend: marker``.
 """
 from __future__ import annotations
 
@@ -40,6 +38,34 @@ EMBED_BATCH_SIZE = 64
 # chars per page; scans yield ~0. This replaces the old "0 chunks"
 # heuristic, which missed scans that produced 1-2 junk chunks.
 SCAN_CHARS_PER_PAGE = 20
+
+# A scanned book is OCR'd in tranches of this many pages — one P3 job
+# each — so a 600-page book becomes ~12 short, independently-resumable
+# jobs instead of one ~hour-long block that monopolises the worker.
+PAGES_PER_OCR_JOB = 50
+
+
+def enqueue_ocr_jobs(queue: "Queue", root: str, corpus: str, filepath: str,
+                     page_count: int) -> int:
+    """Split a scanned PDF into page-range P3 jobs and enqueue them.
+    Returns the number of jobs enqueued (deduped against pending).
+
+    Each job payload: {root, corpus, filepath, page_start, page_end}.
+    The page range is what makes the OCR resumable per tranche.
+    """
+    if page_count <= 0:
+        return 0
+    enq = 0
+    start = 1
+    while start <= page_count:
+        end = min(start + PAGES_PER_OCR_JOB - 1, page_count)
+        if queue.enqueue("ocr", {
+            "root": root, "corpus": corpus, "filepath": filepath,
+            "page_start": start, "page_end": end,
+        }) is not None:
+            enq += 1
+        start = end + 1
+    return enq
 
 
 def _compute_hash(path: Path) -> str:
@@ -128,9 +154,18 @@ def handle_ingest(job: Job, worker: "Worker") -> None:
         if is_scan and _ocr_enabled(worker.db_path):
             queue = Queue(str(worker.db_path))
             try:
-                queue.enqueue("ocr", {
-                    "root": str(root), "corpus": corpus, "filepath": rel,
-                })
+                # Split into page-range tranches so a big scan becomes
+                # several short, resumable P3 jobs. page_count comes from
+                # the parser (stats["pages"]); fall back to a single job
+                # if unknown.
+                pages = stats.get("pages") or 0
+                if pages > 0:
+                    enqueue_ocr_jobs(queue, str(root), corpus, rel, pages)
+                else:
+                    queue.enqueue("ocr", {
+                        "root": str(root), "corpus": corpus, "filepath": rel,
+                        "page_start": 1, "page_end": None,
+                    })
             finally:
                 queue.close()
             return  # no P2 for a zero-chunk book — wait until P3 fills it
@@ -195,25 +230,51 @@ def _ocr_enabled(db_path) -> bool:
         return False
 
 
+def _ocr_config(db_path) -> tuple[str, str]:
+    """Read (ocr_backend, ocr_langs) from .rtfm/config.json. Defaults:
+    backend 'tesseract' (fast on CPU), langs 'eng+fra'."""
+    import json as _json
+    from pathlib import Path as _Path
+    cfg = _Path(db_path).parent / "config.json"
+    backend, langs = "tesseract", "eng+fra"
+    if cfg.exists():
+        try:
+            data = _json.loads(cfg.read_text(encoding="utf-8"))
+            backend = data.get("ocr_backend", backend)
+            langs = data.get("ocr_langs", langs)
+        except Exception:
+            pass
+    return backend, langs
+
+
 def handle_ocr(job: Job, worker: "Worker") -> None:
-    """P3 — re-ingest a scanned PDF with the marker (OCR) backend.
+    """P3 — OCR a page range of a scanned PDF and append its chunks.
 
-    Called when P1 detected a zero-chunk PDF and ``ocr_fallback`` is
-    on. Drops whatever empty book P1 left behind, then re-ingests the
-    same file forcing ``PDFParser(backend="marker")``. Marker itself
-    runs in a one-shot subprocess (rtfm/parsers/pdf.py), so its RAM
-    footprint is reclaimed between PDFs.
+    Each P3 job covers one page tranche (page_start..page_end), so a
+    600-page book is several short, independently-resumable jobs rather
+    than one hour-long block. The tranche's chunks are appended to the
+    book idempotently (``append_ocr_chunks`` deletes that page range
+    first), so a retry never duplicates and other tranches are intact.
 
-    After a successful OCR ingest, the chunks need embeddings — we
-    enqueue P2 batches for them, same as the P1 path.
+    Backend (config ``ocr_backend``):
+      - ``tesseract`` (default): pypdfium2 render → tesseract. Fast on
+        CPU, no multi-GB models → no OOM/timeout.
+      - ``marker``: high quality (GPU recommended), whole file.
+
+    After appending, the new chunks are enqueued for P2 embedding.
     """
     from rtfm.core.sync import _path_to_slug
-    from rtfm.parsers.pdf import PDFParser
+    from rtfm.parsers.pdf import (
+        extract_with_tesseract, extract_with_marker,
+        pages_to_chunks, extract_title_from_filename,
+    )
 
     payload = job.payload
     root = Path(payload["root"]).resolve()
     corpus = payload["corpus"]
     rel = payload["filepath"]
+    page_start = payload.get("page_start", 1)
+    page_end = payload.get("page_end")  # None = to end
     abs_path = root / rel
 
     if not abs_path.is_file():
@@ -222,45 +283,61 @@ def handle_ocr(job: Job, worker: "Worker") -> None:
         raise ValueError(f"P3 OCR only handles .pdf — got {abs_path.suffix}")
 
     book_slug = _path_to_slug(rel, corpus)
-    file_hash = _compute_hash(abs_path)
+    book_title = extract_title_from_filename(abs_path.stem)
+    backend, langs = _ocr_config(worker.db_path)
+
+    # OCR just this tranche.
+    if backend == "marker":
+        pages = extract_with_marker(abs_path)  # whole file (marker has no range)
+    else:
+        pages = extract_with_tesseract(
+            abs_path, langs=langs, page_start=page_start, page_end=page_end)
 
     lib = Library(str(worker.db_path))
     try:
-        # Drop any empty book P1 left behind for this file. Cascade
-        # cleans up chunks/embeddings/edges/file_versions.
-        lib.delete_book(book_slug)
+        # Ensure the book row exists (P1 created an empty one; if it was
+        # cleaned up, recreate via a 0-chunk ingest-less insert).
+        existing = lib.list_indexed_files(corpus=corpus).get(rel)
+        if not existing:
+            lib.set_sync_root(corpus, str(root))
+            lib.update_indexed_file(
+                filepath=rel, file_hash=_compute_hash(abs_path),
+                corpus=corpus, book_slug=book_slug,
+                file_size=abs_path.stat().st_size)
+        # Make sure a book row exists for append.
+        if not lib._get_conn().execute(
+                "SELECT 1 FROM books WHERE slug=?", (book_slug,)).fetchone():
+            lib._get_conn().execute(
+                "INSERT INTO books (slug, title, filename, corpus, indexed_at) "
+                "VALUES (?,?,?,?,datetime('now'))",
+                (book_slug, book_title, rel, corpus))
+            lib._get_conn().commit()
 
-        stats = lib.ingest(
-            abs_path, corpus=corpus,
-            parser=PDFParser(backend="marker"),
-            metadata={"book_slug": book_slug, "source_file": rel},
-        )
-        lib.update_indexed_file(
-            filepath=rel, file_hash=file_hash,
-            corpus=corpus, book_slug=book_slug,
-            file_size=abs_path.stat().st_size,
-        )
+        chunks = list(pages_to_chunks(
+            pages, book_slug, book_title, rel,
+            ext_meta={"ocr": backend}))
 
-        # Even after OCR, marker may legitimately fail on a corrupted
-        # PDF — surface that as a job failure rather than queueing P2
-        # for a still-empty book.
-        if stats.get("chunks", 0) == 0:
-            raise RuntimeError(
-                f"marker produced 0 chunks for {rel} — file may be "
-                "corrupted or genuinely empty"
-            )
+        lo = page_start
+        hi = page_end if page_end is not None else (
+            max((c.page_start for c in chunks), default=page_start))
+        result = lib.append_ocr_chunks(book_slug, chunks, lo, hi)
 
-        # Same P2 follow-up logic as P1.
-        chunk_ids = lib.chunk_ids_for_book(book_slug)
-        if chunk_ids:
-            queue = Queue(str(worker.db_path))
-            try:
-                batches = [chunk_ids[i:i + EMBED_BATCH_SIZE]
-                           for i in range(0, len(chunk_ids), EMBED_BATCH_SIZE)]
-                queue.enqueue_many("embed",
-                                   [{"chunk_ids": b} for b in batches])
-            finally:
-                queue.close()
+        # Enqueue P2 for the newly-added chunks of this tranche only.
+        if result.get("chunks", 0) > 0:
+            new_ids = [
+                r["id"] for r in lib._get_conn().execute(
+                    """SELECT c.id FROM chunks c JOIN books b ON c.book_id=b.id
+                       WHERE b.slug=? AND c.chapter_num BETWEEN ? AND ?""",
+                    (book_slug, lo, hi)).fetchall()
+            ]
+            if new_ids:
+                queue = Queue(str(worker.db_path))
+                try:
+                    batches = [new_ids[i:i + EMBED_BATCH_SIZE]
+                               for i in range(0, len(new_ids), EMBED_BATCH_SIZE)]
+                    queue.enqueue_many("embed", [{"chunk_ids": b} for b in batches])
+                finally:
+                    queue.close()
     finally:
         lib.close()
 

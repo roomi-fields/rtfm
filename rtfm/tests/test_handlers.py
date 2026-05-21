@@ -269,3 +269,83 @@ def test_handle_embed_writes_embeddings(tmp_path: Path):
     n_emb = conn.execute("SELECT COUNT(*) FROM chunk_embeddings").fetchone()[0]
     assert n_chunks > 0
     assert n_emb == n_chunks, f"every chunk must have an embedding ({n_emb}/{n_chunks})"
+
+
+class TestOCRSplit:
+    """Tests for the page-range-split OCR (P3) path."""
+
+    def test_enqueue_ocr_jobs_splits_by_pages(self, tmp_path):
+        from rtfm.core.handlers import enqueue_ocr_jobs, PAGES_PER_OCR_JOB
+        from rtfm.core.library import Library
+        from rtfm.core.queue import Queue
+        db = tmp_path / "library.db"
+        Library(str(db)).close()
+        q = Queue(str(db))
+        try:
+            # 130 pages, 50/job → 3 tranches (1-50, 51-100, 101-130)
+            n = enqueue_ocr_jobs(q, "/root", "c", "big.pdf", 130)
+            assert n == 3
+            ranges = sorted((j.payload["page_start"], j.payload["page_end"])
+                            for j in q.list_pending() if j.type == "ocr")
+            assert ranges == [(1, 50), (51, 100), (101, 130)]
+        finally:
+            q.close()
+
+    def test_enqueue_ocr_jobs_zero_pages_noop(self, tmp_path):
+        from rtfm.core.handlers import enqueue_ocr_jobs
+        from rtfm.core.library import Library
+        from rtfm.core.queue import Queue
+        db = tmp_path / "library.db"
+        Library(str(db)).close()
+        q = Queue(str(db))
+        try:
+            assert enqueue_ocr_jobs(q, "/root", "c", "x.pdf", 0) == 0
+        finally:
+            q.close()
+
+    def test_handle_ocr_appends_tranche_idempotently(self, tmp_path, monkeypatch):
+        """handle_ocr OCRs a page range and appends chunks; re-running
+        the same tranche replaces (not duplicates) its chunks."""
+        from rtfm.core import handlers
+        from rtfm.core.library import Library
+        from rtfm.core.queue import Job
+
+        root = tmp_path / "src"
+        root.mkdir()
+        pdf = root / "scan.pdf"
+        pdf.write_bytes(b"%PDF-1.4\nfake\n%%EOF\n")
+        db = tmp_path / ".rtfm" / "library.db"
+        db.parent.mkdir(parents=True)
+        Library(str(db)).close()
+        (tmp_path / ".rtfm" / "config.json").write_text(
+            '{"ocr_backend":"tesseract","ocr_langs":"eng"}')
+
+        # Mock the OCR extraction — return fake text for pages 1-2.
+        def fake_tess(path, langs="eng", page_start=1, page_end=None, scale=2.0):
+            return [{"page": p, "text": f"ocr text page {p}\n\nsecond para {p}"}
+                    for p in range(page_start, (page_end or 2) + 1)]
+        monkeypatch.setattr(handlers, "extract_with_tesseract", fake_tess, raising=False)
+        # patch the name imported inside handle_ocr
+        import rtfm.parsers.pdf as pdfmod
+        monkeypatch.setattr(pdfmod, "extract_with_tesseract", fake_tess)
+
+        worker = SimpleNamespace(db_path=db)
+        job = Job(id=1, type="ocr", priority=3,
+                  payload={"root": str(root), "corpus": "test",
+                           "filepath": "scan.pdf", "page_start": 1, "page_end": 2},
+                  status="running", created_at="", started_at=None,
+                  finished_at=None, error=None, attempts=1)
+        handlers.handle_ocr(job, worker)
+
+        import sqlite3
+        c = sqlite3.connect(db)
+        n1 = c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        c.close()
+        assert n1 > 0
+
+        # Re-run the same tranche → idempotent (count unchanged, no dup).
+        handlers.handle_ocr(job, worker)
+        c = sqlite3.connect(db)
+        n2 = c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        c.close()
+        assert n2 == n1

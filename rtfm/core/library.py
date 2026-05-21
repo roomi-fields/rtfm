@@ -548,6 +548,69 @@ class Library:
 
         return self._index_chunks(chunk_list, corpus, metadata or {})
 
+    def append_ocr_chunks(
+        self,
+        book_slug: str,
+        chunks: list[Chunk],
+        page_lo: int,
+        page_hi: int,
+    ) -> dict:
+        """Append OCR'd chunks for a page range to an existing book,
+        idempotently. Used by the split P3 OCR handler: each tranche
+        (pages lo..hi) replaces just its own chunks, so re-running a
+        tranche (retry) doesn't duplicate, and other tranches are left
+        intact. The book row must already exist (P1 created it).
+
+        Chunks carry ``chapter_num == page_num`` (set by the PDF parser),
+        which is how we scope the delete to this tranche.
+
+        Returns ``{"chunks": n_added}``.
+        """
+        conn = self._get_conn()
+        row = conn.execute("SELECT id FROM books WHERE slug = ?",
+                           (book_slug,)).fetchone()
+        if not row:
+            return {"chunks": 0, "error": "book not found"}
+        book_id = row["id"]
+
+        # Idempotency: drop existing chunks in this page range first.
+        # FK=ON cascades to chunk_embeddings.
+        conn.execute(
+            "DELETE FROM chunks WHERE book_id = ? "
+            "AND chapter_num BETWEEN ? AND ?",
+            (book_id, page_lo, page_hi),
+        )
+
+        added = 0
+        for chunk in chunks:
+            tags_json = json.dumps(chunk.tags) if chunk.tags else None
+            metadata_json = json.dumps(chunk.metadata) if chunk.metadata else None
+            conn.execute(
+                """INSERT INTO chunks
+                   (chunk_id, book_id, chapter_id, chapter_num, chapter_title,
+                    page_start, page_end, paragraph, content, content_chars,
+                    content_hash, line_start, line_end, tags, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (chunk.id, book_id, None, chunk.chapter_num, chunk.chapter_title,
+                 chunk.page_start, chunk.page_end, chunk.paragraph,
+                 chunk.content, chunk.content_chars, chunk.content_hash,
+                 chunk.line_start, chunk.line_end, tags_json, metadata_json),
+            )
+            added += 1
+
+        # Recompute book totals from the actual chunks.
+        agg = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(content_chars),0) AS c "
+            "FROM chunks WHERE book_id = ?", (book_id,)
+        ).fetchone()
+        conn.execute(
+            "UPDATE books SET chunk_count = ?, total_chars = ?, indexed_at = ? "
+            "WHERE id = ?",
+            (agg["n"], agg["c"], datetime.now().isoformat(), book_id),
+        )
+        conn.commit()
+        return {"chunks": added}
+
     def _index_chunks(
         self,
         chunks: list[Chunk],

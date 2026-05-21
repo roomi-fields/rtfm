@@ -679,18 +679,18 @@ def cmd_backfill_pages(args):
             from rtfm.config import save_config
             save_config(rtfm_root, cfg)
         from rtfm.core.queue import Queue
+        from rtfm.core.handlers import enqueue_ocr_jobs
         from rtfm.cli_worker import ensure_worker_running
         q = Queue(str(db_path))
         enq = 0
         try:
             for corpus, fn, n, cpp in scans:
                 root = roots.get(corpus)
-                if q.enqueue("ocr", {"root": root, "corpus": corpus,
-                                     "filepath": fn}) is not None:
-                    enq += 1
+                # n = page count → split into page-range tranches.
+                enq += enqueue_ocr_jobs(q, root, corpus, fn, n)
         finally:
             q.close()
-        print(f"\nEnqueued {enq} P3 OCR job(s).")
+        print(f"\nEnqueued {enq} P3 OCR job(s) (page-range tranches).")
         pid = ensure_worker_running(rtfm_root / ".rtfm")
         if pid:
             print(f"Worker draining in background (PID {pid}).")
@@ -969,18 +969,18 @@ def cmd_doctor(args):
             save_config(rtfm_root, cfg)
             print("\n(ocr_fallback enabled in config.json)")
         from rtfm.core.queue import Queue
+        from rtfm.core.handlers import enqueue_ocr_jobs
         from rtfm.cli_worker import ensure_worker_running
         q = Queue(str(db_path))
         enq = 0
         try:
             for corpus, fn, info in cats["scan"]:
                 root = roots.get(corpus)
-                if q.enqueue("ocr", {"root": root, "corpus": corpus,
-                                     "filepath": fn}) is not None:
-                    enq += 1
+                # info["pages"] is the real page count → split into tranches.
+                enq += enqueue_ocr_jobs(q, root, corpus, fn, info.get("pages", 0))
         finally:
             q.close()
-        print(f"\nEnqueued {enq} P3 OCR job(s).")
+        print(f"\nEnqueued {enq} P3 OCR job(s) (page-range tranches).")
         pid = ensure_worker_running(rtfm_root / ".rtfm")
         if pid:
             print(f"Worker draining in background (PID {pid}).")

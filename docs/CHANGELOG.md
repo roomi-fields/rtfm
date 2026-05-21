@@ -7,6 +7,21 @@ description: >-
 
 # Changelog
 
+## [0.15.0] — 2026-05-21
+
+### Changed — OCR: tesseract backend by default, split into page tranches
+
+marker (Surya models) is excellent but unusable for OCR on CPU: on a real corpus every big scan (Narmour 499p, Eco 253p, Chomsky…) either **timed out at 20 min or OOM-crashed** during layout. New default OCR path:
+
+- **`extract_with_tesseract`** — renders each page via pypdfium2 (already a dep) and OCRs it with tesseract (fast C binary, no multi-GB ML models → no OOM/timeout). Multilingual (eng, fra, + indic packs). Languages auto-filtered to those actually installed.
+- **Page-range splitting** — a scanned book is OCR'd in tranches of `PAGES_PER_OCR_JOB = 50`, one P3 job each. A 600-page book becomes ~12 short, independently-resumable jobs instead of one hour-long block that monopolises the worker. `enqueue_ocr_jobs()` does the split; P1, `rtfm doctor --enqueue-ocr` and `backfill-pages --enqueue-ocr` all use it.
+- **Idempotent append** — `Library.append_ocr_chunks(book_slug, chunks, page_lo, page_hi)` deletes that page range then inserts, so re-running a tranche (retry) never duplicates and other tranches stay intact. Each tranche enqueues P2 embedding for just its new chunks.
+- **Config**: `ocr_backend` (`tesseract` default | `marker` | `auto`), `ocr_langs` (default `eng+fra`; set e.g. `eng+fra+tam+hin+san` for Indic-script scans).
+- New `[ocr]` extra: `pytesseract`, `pypdfium2`, `Pillow` (+ the system `tesseract` binary).
+- `pages_to_chunks()` extracted from `PDFParser.parse` and shared with the OCR handler so OCR'd pages produce identical chunk shapes. 6 new tests (split ranges, idempotent tranche append).
+
+Trade-off: tesseract is excellent on clean print (your scanned books) but weaker than marker on heavy maths/tables/multi-column. For making text searchable it's the right call on a GPU-less machine; marker stays available via `ocr_backend: marker`.
+
 ## [0.14.1] — 2026-05-21
 
 ### Fixed
