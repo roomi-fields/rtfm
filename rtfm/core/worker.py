@@ -46,6 +46,11 @@ IDLE_POLL_SECONDS = 5.0
 # queue within ~30 s, automatically.
 SCAN_INTERVAL_SECONDS = 30.0
 
+# How often, while idle, to reconcile the DB (purge orphan embeddings,
+# re-queue un-embedded chunks). Far less urgent than the file scan, and
+# only ever runs at rest, so a long interval is fine.
+RECONCILE_INTERVAL_SECONDS = 3600.0
+
 # Status snapshot lives next to the DB so ``rtfm status`` can find it
 # without re-reading config.
 STATE_FILENAME = "worker_state.json"
@@ -148,15 +153,22 @@ class Worker:
     def __init__(self, rtfm_dir: Path, db_path: Path,
                  handlers: dict[str, Callable[[Job, "Worker"], None]],
                  scan_interval: float = SCAN_INTERVAL_SECONDS,
+                 reconcile_interval: float = RECONCILE_INTERVAL_SECONDS,
                  log: Optional[Callable[[str], None]] = None):
         self.rtfm_dir = rtfm_dir
         self.db_path = db_path
         self.handlers = handlers
         self.scan_interval = scan_interval
+        self.reconcile_interval = reconcile_interval
         self._stop = False
         self._jobs_done = 0
         self._jobs_failed = 0
         self._last_scan_at = 0.0  # monotonic, 0 = scan ASAP on first idle
+        # Don't reconcile immediately on startup — let the first scan +
+        # any backlog drain first. Seed with "now" so the first
+        # reconcile happens one interval in.
+        self._last_reconcile_at = 0.0
+        self._reconcile_seeded = False
         self._log = log or (lambda msg: None)
         self._queue = Queue(db_path)
         self._started_at = _now_iso()
@@ -173,8 +185,11 @@ class Worker:
             while not self._stop:
                 job = self._queue.dequeue()
                 if job is None:
-                    # Idle: opportunity to fold-in the watcher tick.
+                    # Idle: fold-in the watcher tick + DB reconciliation.
+                    # Both run only at rest, so they never fight an
+                    # in-flight ingest/move.
                     self._maybe_scan()
+                    self._maybe_reconcile()
                     self._snapshot("idle", None)
                     self._sleep(IDLE_POLL_SECONDS)
                     continue
@@ -209,6 +224,29 @@ class Worker:
             # A scan failure must never bring the worker down — the
             # priority drain is more important.
             self._log(f"scan error: {exc}")
+
+    def _maybe_reconcile(self) -> None:
+        """Reconcile the DB if enough idle time has elapsed. No-op
+        otherwise. Only ever called while the queue is empty (= at
+        rest), so purging orphans can't race a re-ingest."""
+        import time as _t
+        now = _t.monotonic()
+        if not self._reconcile_seeded:
+            # First idle: don't reconcile yet, just start the clock.
+            self._last_reconcile_at = now
+            self._reconcile_seeded = True
+            return
+        if now - self._last_reconcile_at < self.reconcile_interval:
+            return
+        self._last_reconcile_at = now
+        try:
+            from rtfm.core.reconcile import reconcile
+            stats = reconcile(self.db_path, log=self._log)
+            if stats["orphans_purged"] or stats["chunks_requeued"]:
+                self._log(f"reconcile: purged {stats['orphans_purged']}, "
+                          f"re-queued {stats['chunks_requeued']}")
+        except Exception as exc:
+            self._log(f"reconcile error: {exc}")
 
     def _scan_once(self) -> int:
         """One pass over every configured source. Returns the count of

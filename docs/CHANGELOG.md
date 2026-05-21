@@ -7,6 +7,22 @@ description: >-
 
 # Changelog
 
+## [0.14.0] — 2026-05-21
+
+### Fixed — embeddings no longer leak when chunks are deleted
+
+`Library._get_conn` now sets `PRAGMA foreign_keys = ON`. SQLite has FK enforcement **off by default**, so the `chunk_embeddings → chunks` `ON DELETE CASCADE` never fired: every re-ingest/`delete_book` left the old embeddings behind as orphans (a real index had **197k orphans = 19%** of all embeddings). They didn't pollute search (the semantic query JOINs on `chunks`, excluding them) but wasted disk. With FKs on, deleting a chunk removes its embedding.
+
+### Added — self-healing reconciliation (`rtfm gc` + idle worker pass)
+
+A live pipeline is never perfectly consistent (interrupted syncs, re-ingests, moves). Rather than try to prevent every gap, RTFM now **reconciles** the index periodically:
+
+- `rtfm.core.reconcile.reconcile()` — purges orphan embeddings and re-queues every chunk missing an embedding as P2 jobs.
+- **The worker runs it automatically while idle** (every `RECONCILE_INTERVAL_SECONDS = 3600`, only when the queue is empty — so it never races an in-flight re-ingest/move, and an orphan only ever means "chunk gone for good" since `move_file` preserves chunk ids).
+- **`rtfm gc [--vacuum] [--force]`** — manual trigger. Refuses while the worker is busy (reconciliation is only safe at rest); `--force` overrides; `--vacuum` reclaims disk after purging.
+
+This also surfaces and self-heals **un-embedded chunks** — content that exists but was never embedded (e.g. after an inline/`--no-embeddings` sync), so it's invisible to semantic search until reconciled. 5 new tests in `test_reconcile.py`, incl. a regression that FK=ON cascades the delete.
+
 ## [0.13.0] — 2026-05-21
 
 ### Fixed — half the supported formats were never scanned

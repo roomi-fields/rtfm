@@ -699,6 +699,48 @@ def cmd_backfill_pages(args):
     conn.close()
 
 
+def cmd_gc(args):
+    """Reconcile the index: purge orphan embeddings + re-queue
+    un-embedded chunks.
+
+    A live pipeline drifts (interrupted syncs, re-ingests, moves):
+    embeddings whose chunk was deleted linger, and some chunks end up
+    with no embedding. This is the manual trigger for the same
+    reconciliation the worker runs automatically while idle. Safe only
+    at rest, so it refuses while the worker is busy (use --force).
+    """
+    from rtfm.config import find_rtfm_root
+    from rtfm.core.reconcile import reconcile, count_orphan_embeddings
+
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("gc: no .rtfm/ project root in the cwd chain.")
+    rtfm_dir = rtfm_root / ".rtfm"
+    db_path = rtfm_dir / "library.db"
+
+    if not getattr(args, "force", False):
+        from rtfm.core.worker import worker_running
+        ws = worker_running(rtfm_dir)
+        if ws is not None and ws.status == "busy":
+            sys.exit(
+                f"gc: worker is busy (PID {ws.pid}). Reconciliation is only "
+                "safe at rest (purging an orphan mid-reingest could race).\n"
+                "  → wait for idle (rtfm worker status), or pass --force."
+            )
+
+    print("Reconciling index (purge orphans + re-queue un-embedded)...")
+    stats = reconcile(db_path, vacuum=getattr(args, "vacuum", False),
+                      log=lambda m: print(f"  {m}"))
+    print(f"\nDone: {stats['orphans_purged']} orphan embedding(s) purged, "
+          f"{stats['chunks_requeued']} chunk(s) re-queued for embedding "
+          f"({stats['embed_jobs']} P2 batch(es)).")
+    if stats["embed_jobs"]:
+        from rtfm.cli_worker import ensure_worker_running
+        pid = ensure_worker_running(rtfm_dir)
+        if pid:
+            print(f"Worker draining the embed backlog (PID {pid}).")
+
+
 def cmd_reindex(args):
     """Targeted re-ingestion after a parser change — by extension,
     corpus, or parser name.
@@ -2445,6 +2487,19 @@ def main():
     p_re.add_argument("--parser", help="Re-ingest files handled by this parser (e.g. csv)")
     p_re.add_argument("--corpus", "-c", help="Limit to this corpus")
     p_re.set_defaults(func=cmd_reindex)
+
+    # gc — reconcile the index (purge orphan embeddings, re-queue
+    # un-embedded chunks). Same logic the worker runs while idle.
+    p_gc = subparsers.add_parser(
+        "gc",
+        help="Reconcile the index: purge orphan embeddings + re-queue "
+             "chunks missing an embedding.",
+    )
+    p_gc.add_argument("--vacuum", action="store_true",
+                      help="Run VACUUM after purging to reclaim disk space.")
+    p_gc.add_argument("--force", action="store_true",
+                      help="Run even if the worker is busy.")
+    p_gc.set_defaults(func=cmd_gc)
 
     # add (register a source)
     p_add = subparsers.add_parser("add", help="Register a source directory")

@@ -230,6 +230,10 @@ class Library:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA busy_timeout = 60000")
             self._conn.execute("PRAGMA journal_mode = WAL")
+            # Enforce ON DELETE CASCADE. SQLite has FKs OFF by default,
+            # so deleting a chunk used to leave its chunk_embeddings row
+            # behind (orphan). Must be set per-connection.
+            self._conn.execute("PRAGMA foreign_keys = ON")
         return self._conn
 
     def _init_db(self):
