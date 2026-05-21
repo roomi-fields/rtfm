@@ -477,6 +477,6 @@ MIT — use it, fork it, extend it, ship it.
 
 [⭐ Star on GitHub](https://github.com/roomi-fields/rtfm) if RTFM saves your agent from hallucinating.
 
-</div>
+Curious how it works under the hood? See the [Architecture](docs/architecture.md) — SQLite + FTS5, the parser registry, and the priority-queue worker (ingest → embed → OCR).
 
-<!-- queue-worker docs live in docs/architecture.md -->
+</div>
