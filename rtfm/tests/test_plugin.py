@@ -6,6 +6,56 @@ from pathlib import Path
 
 from rtfm.plugin.claude_md import inject_claude_md, RTFM_MARKER
 from rtfm.plugin.install import generate_mcp_json, write_mcp_json, init_project
+from rtfm.plugin.hooks import install_hook
+
+
+class TestInstallHook:
+    """The hooks must stay lightweight: revive the worker on prompt/stop,
+    enqueue a single file on edit. They must NOT run a full sync (that
+    re-MD5s the corpus and can mass-delete on an incomplete scan)."""
+
+    def test_registers_three_hooks(self, tmp_path):
+        install_hook(tmp_path, corpus="t")
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        hooks = settings["hooks"]
+        assert "UserPromptSubmit" in hooks
+        assert "Stop" in hooks
+        assert "PostToolUse" in hooks
+
+        # PostToolUse must target file-edit tools only.
+        ptu = hooks["PostToolUse"]
+        assert any(e.get("matcher") == "Write|Edit|MultiEdit" for e in ptu)
+
+        # All three scripts written.
+        hooks_dir = tmp_path / ".claude" / "hooks"
+        assert (hooks_dir / "rtfm_sync.py").exists()
+        assert (hooks_dir / "rtfm_stop_sync.py").exists()
+        assert (hooks_dir / "rtfm_posttool_sync.py").exists()
+
+    def test_prompt_hook_does_not_full_sync(self, tmp_path):
+        install_hook(tmp_path, corpus="t")
+        script = (tmp_path / ".claude" / "hooks" / "rtfm_sync.py").read_text()
+        # Heartbeat only — must call ensure_worker_running and must NOT
+        # import/run the heavy sync().
+        assert "ensure_worker_running" in script
+        assert "from rtfm.core.sync import sync" not in script
+
+    def test_posttool_hook_enqueues_not_syncs(self, tmp_path):
+        install_hook(tmp_path, corpus="t")
+        script = (tmp_path / ".claude" / "hooks" / "rtfm_posttool_sync.py").read_text()
+        assert "enqueue" in script
+        assert "from rtfm.core.sync import sync" not in script
+
+    def test_idempotent_no_duplicate_hooks(self, tmp_path):
+        install_hook(tmp_path, corpus="t")
+        install_hook(tmp_path, corpus="t")
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        for evt in ("UserPromptSubmit", "Stop", "PostToolUse"):
+            rtfm_entries = [
+                e for e in settings["hooks"][evt]
+                if any("rtfm" in h.get("command", "") for h in e.get("hooks", []))
+            ]
+            assert len(rtfm_entries) == 1, f"{evt} duplicated"
 
 
 class TestInjectClaudeMd:

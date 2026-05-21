@@ -1,4 +1,17 @@
-"""Claude Code hooks for RTFM — auto-sync on prompt + final sync on stop."""
+"""Claude Code hooks for RTFM.
+
+Design (0.16.0+): the hooks are deliberately *lightweight*. All heavy
+work — scanning sources, ingesting, embedding, OCR — is done by the single
+background worker daemon, which scans non-destructively on an idle timer.
+The hooks never run a full ``sync()`` (that re-MD5s the whole corpus on
+every prompt — slow on NTFS-via-WSL — and, worse, could delete files that
+a momentarily-incomplete scan failed to see). Instead:
+
+  - UserPromptSubmit / Stop  → just ensure the worker is alive.
+  - PostToolUse (Write/Edit)  → enqueue the one file the agent just wrote
+                                as a P1 ingest job. Non-destructive: only
+                                ever ADDS work, never scans or removes.
+"""
 
 from __future__ import annotations
 
@@ -6,87 +19,45 @@ import json
 from pathlib import Path
 
 
-# ── Final sync (Stop hook) ───────────────────────────────────────────────
+# ── Worker heartbeat (UserPromptSubmit + Stop) ───────────────────────────
+# Both events run the same tiny script: revive the background worker if it
+# died. No scan, no MD5, no DB writes on the user's hot path. Discovery of
+# new/changed files is the worker's job (idle-scan, non-destructive).
 
-STOP_SYNC_SCRIPT = r'''#!/usr/bin/env python3
-"""RTFM Stop hook — final sync to catch files created/modified this turn.
+HOOK_SCRIPT = r'''#!/usr/bin/env python3
+"""RTFM UserPromptSubmit hook — keep the background worker alive.
 
-The UserPromptSubmit hook syncs every 30s, but the last Write/Edit may
-happen right before the agent stops. This hook runs a final sync to
-ensure everything is indexed.
+No sync here. The single background worker handles discovery (idle-scan),
+ingestion, embeddings and OCR. This hook only revives that worker if it
+died, so a new session brings the pipeline back. Cheap by design: no
+filesystem scan, no hashing, nothing on the user's hot path.
 """
-import json, os, sys, time
+import os, time
 from pathlib import Path
 
-# Resolve project root from $CLAUDE_PROJECT_DIR so the hook works regardless
-# of the agent's current working directory.
 PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parents[2])
+
 
 def _log(msg):
     try:
         ts = time.strftime("%H:%M:%S")
-        log_path = PROJECT_ROOT / ".rtfm" / "rtfm.log"
-        with open(log_path, "a") as f:
+        with open(PROJECT_ROOT / ".rtfm" / "rtfm.log", "a") as f:
             f.write(f"[{ts}]       hook | {msg}\n")
     except Exception:
         pass
 
+
 def main():
     rtfm_dir = PROJECT_ROOT / ".rtfm"
-    if not rtfm_dir.exists():
+    if not (rtfm_dir / "library.db").exists():
         return
-
-    db_path = rtfm_dir / "library.db"
-    if not db_path.exists():
-        return
-
-    # Read sources from config
-    config_path = rtfm_dir / "config.json"
-    sources = []
-    default_corpus = "default"
-    ocr_fallback = False
-    if config_path.exists():
-        try:
-            cfg = json.loads(config_path.read_text())
-            sources = cfg.get("sources", [])
-            default_corpus = cfg.get("corpus", "default")
-            ocr_fallback = cfg.get("ocr_fallback", False)
-        except Exception:
-            pass
-
-    if not sources:
-        sources = [{"path": str(PROJECT_ROOT), "corpus": default_corpus}]
-
-    _log(f"stop-sync starting {len(sources)} source(s)")
-    t0 = time.time()
     try:
-        from rtfm.core.library import Library
-        from rtfm.core.sync import sync
-
-        lib = Library(str(db_path))
-        total_added = total_modified = 0
-        for src in sources:
-            src_path = Path(src.get("path", ".")).resolve()
-            src_corpus = src.get("corpus", default_corpus)
-            ext_set = None
-            if src.get("extensions"):
-                ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
-                           for e in src["extensions"].split(",")}
-            result = sync(
-                library=lib,
-                root=src_path,
-                corpus=src_corpus,
-                extensions=ext_set,
-                generate_embeddings=False,
-                ocr_fallback=ocr_fallback,
-            )
-            total_added += result.added
-            total_modified += result.modified
-        lib.close()
-        elapsed = time.time() - t0
-        _log(f"stop-sync done +{total_added} ~{total_modified} time={elapsed:.2f}s")
+        from rtfm.cli_worker import ensure_worker_running
+        pid = ensure_worker_running(rtfm_dir)
+        if pid:
+            _log(f"worker alive pid={pid}")
     except Exception as e:
-        _log(f"stop-sync ERROR: {e}")
+        _log(f"worker ensure ERROR: {e}")
 
 
 if __name__ == "__main__":
@@ -94,221 +65,125 @@ if __name__ == "__main__":
 '''
 
 
-# ── Sync hook (UserPromptSubmit) ─────────────────────────────────────────
+# The Stop hook is identical to the prompt hook: at session end, make sure
+# the worker is alive so it drains anything the PostToolUse hook enqueued
+# and idle-scans for anything missed. No full sync.
+STOP_SYNC_SCRIPT = HOOK_SCRIPT
 
-HOOK_SCRIPT = r'''#!/usr/bin/env python3
-"""RTFM UserPromptSubmit hook — fast incremental FTS sync.
 
-Runs on every prompt:
-1. Reads corpus from .rtfm/config.json (set during init)
-2. Dry-run diff first: if a lot of new files are detected, announce it
-3. Quick incremental sync (FTS only, no embeddings) — typically <2s
-4. After sync, surface result + any health warnings (PDF scans, ...)
-5. Embeddings are handled by the MCP server in background
+# ── File enqueue (PostToolUse: Write|Edit|MultiEdit) ─────────────────────
+# Fires right after the agent writes a file. Maps that one file to its
+# configured source/corpus and enqueues a single P1 ingest job for the
+# worker. This is the only place a hook touches the index directly, and it
+# only ever adds work for the file that just changed — never scans, never
+# deletes, never touches unrelated files.
 
-Anything printed to stdout is injected into the agent's context for the
-current turn, so the agent will mention it to the user when relevant.
+POSTTOOL_HOOK_SCRIPT = r'''#!/usr/bin/env python3
+"""RTFM PostToolUse hook — enqueue the just-written file for ingestion.
+
+Reads the edited file path from the hook payload (stdin JSON), maps it to a
+configured source (corpus + root), and enqueues ONE P1 ingest job. The
+worker does the actual parse/index. Non-destructive: only ever adds a job.
 """
 import json, os, sys, time
 from pathlib import Path
 
-STALE_SECONDS = 30          # Re-sync at most every 30 seconds
-ANNOUNCE_THRESHOLD = 50     # Pre-sync announce if > N files to index
-
-# Resolve project root from $CLAUDE_PROJECT_DIR so the hook works regardless
-# of the agent's current working directory.
 PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parents[2])
 
+
 def _log(msg):
-    """Append to .rtfm/rtfm.log (inline, no imports)."""
     try:
         ts = time.strftime("%H:%M:%S")
-        log_path = PROJECT_ROOT / ".rtfm" / "rtfm.log"
-        with open(log_path, "a") as f:
+        with open(PROJECT_ROOT / ".rtfm" / "rtfm.log", "a") as f:
             f.write(f"[{ts}]       hook | {msg}\n")
     except Exception:
         pass
 
 
-def _load_seen_scans(rtfm_dir):
-    """Scans already signalled to the agent during this project's lifetime.
-
-    Stored as a JSON list so the hook doesn't repeat the same warning on
-    every single turn. User can reset it by deleting .rtfm/seen_scans.json.
-    """
-    p = rtfm_dir / "seen_scans.json"
-    if not p.exists():
-        return set()
+def _edited_path(payload):
+    ti = payload.get("tool_input") or {}
+    p = ti.get("file_path") or ti.get("path") or ti.get("notebook_path")
+    if not p:
+        return None
     try:
-        return set(json.loads(p.read_text()))
+        return Path(p).resolve()
     except Exception:
-        return set()
-
-
-def _save_seen_scans(rtfm_dir, seen):
-    try:
-        (rtfm_dir / "seen_scans.json").write_text(json.dumps(sorted(seen)))
-    except Exception:
-        pass
+        return None
 
 
 def main():
     rtfm_dir = PROJECT_ROOT / ".rtfm"
-    if not rtfm_dir.exists():
-        return
-
     db_path = rtfm_dir / "library.db"
     if not db_path.exists():
         return
 
-    # Throttle: don't sync more than once every STALE_SECONDS
-    stamp_file = rtfm_dir / ".sync_ts"
-    now = time.time()
-    if stamp_file.exists():
-        try:
-            last = float(stamp_file.read_text().strip())
-            if now - last < STALE_SECONDS:
-                _log(f"throttled (last sync {now - last:.0f}s ago)")
-                return
-        except (ValueError, OSError):
-            pass
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        return
+    fpath = _edited_path(payload)
+    if not fpath or not fpath.is_file():
+        return
 
-    # Read sources from config
-    config_path = rtfm_dir / "config.json"
-    sources = []
-    default_corpus = "default"
-    ocr_fallback = False
-    if config_path.exists():
+    # Only enqueue files RTFM can actually parse.
+    try:
+        from rtfm.parsers.base import ParserRegistry
+        import rtfm.parsers  # noqa: F401 — register all parsers
+        if ParserRegistry.get_parser(fpath) is None:
+            return
+    except Exception:
+        return
+
+    cfg = {}
+    cfg_path = rtfm_dir / "config.json"
+    if cfg_path.exists():
         try:
-            cfg = json.loads(config_path.read_text())
-            sources = cfg.get("sources", [])
-            default_corpus = cfg.get("corpus", "default")
-            ocr_fallback = cfg.get("ocr_fallback", False)
+            cfg = json.loads(cfg_path.read_text())
         except Exception:
             pass
+    sources = cfg.get("sources") or [
+        {"path": str(PROJECT_ROOT), "corpus": cfg.get("corpus", "default")}]
 
-    # Fallback: no sources configured, sync project root with default corpus
-    if not sources:
-        sources = [{"path": str(PROJECT_ROOT), "corpus": default_corpus}]
+    # Pick the most specific (deepest-rooted) source that contains the file
+    # and whose extension filter (if any) admits it.
+    best = None  # (root, corpus, depth)
+    for src in sources:
+        try:
+            root = Path(src.get("path", ".")).resolve()
+        except Exception:
+            continue
+        try:
+            fpath.relative_to(root)
+        except ValueError:
+            continue
+        exts = src.get("extensions")
+        if exts:
+            allowed = {e.strip().lower() if e.strip().startswith(".")
+                       else f".{e.strip().lower()}" for e in exts.split(",")}
+            if fpath.suffix.lower() not in allowed:
+                continue
+        depth = len(root.parts)
+        if best is None or depth > best[2]:
+            best = (root, src.get("corpus", cfg.get("corpus", "default")), depth)
 
-    _log(f"sync starting {len(sources)} source(s)")
-    t0 = time.time()
+    if best is None:
+        return
+    root, corpus, _ = best
+    rel = str(fpath.relative_to(root))
+
     try:
-        from rtfm.core.library import Library
-        from rtfm.core.sync import sync, quick_diff
-
-        lib = Library(str(db_path))
-
-        # 1. Quick path/size diff to count what's likely new or changed.
-        #    Hash-free, but still stat()s every tracked file — which on
-        #    NTFS-via-WSL or network shares can be tens of seconds per
-        #    source. We bound the *total* preview time so the hook never
-        #    blocks the user's prompt waiting on remote storage: if the
-        #    budget is exhausted, we just skip the pre-sync announcement.
-        PRE_BUDGET = 2.0
-        pre_start = time.time()
-        pending_total = 0
-        announce_ready = True
-        for src in sources:
-            if time.time() - pre_start > PRE_BUDGET:
-                announce_ready = False
-                _log("pre-scan budget exceeded, skipping announcement")
-                break
-            src_path = Path(src.get("path", ".")).resolve()
-            src_corpus = src.get("corpus", default_corpus)
-            ext_set = None
-            if src.get("extensions"):
-                ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
-                           for e in src["extensions"].split(",")}
-            try:
-                qd = quick_diff(
-                    library=lib,
-                    root=src_path,
-                    corpus=src_corpus,
-                    extensions=ext_set,
-                )
-                pending_total += len(qd.added) + len(qd.modified)
-            except Exception:
-                pass
-
-        if announce_ready and pending_total >= ANNOUNCE_THRESHOLD:
-            print(f"→ RTFM: indexing {pending_total} new/modified file(s)...",
-                  flush=True)
-
-        # 2. Real sync
-        total_added = total_modified = total_removed = 0
-        all_scans = []
-        all_empty = []
-        all_errors = []
-        for src in sources:
-            src_path = Path(src.get("path", ".")).resolve()
-            src_corpus = src.get("corpus", default_corpus)
-            ext_set = None
-            if src.get("extensions"):
-                ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
-                           for e in src["extensions"].split(",")}
-            result = sync(
-                library=lib,
-                root=src_path,
-                corpus=src_corpus,
-                extensions=ext_set,
-                generate_embeddings=False,
-                ocr_fallback=ocr_fallback,
-            )
-            total_added += result.added
-            total_modified += result.modified
-            total_removed += result.removed
-            all_scans.extend(result.suspect_scans)
-            all_empty.extend(result.empty_files)
-            all_errors.extend(result.errors)
-
-        lib.close()
-        stamp_file.write_text(str(now))
-        elapsed = time.time() - t0
-        _log(f"sync done +{total_added} ~{total_modified} -{total_removed} "
-             f"scans={len(all_scans)} empty={len(all_empty)} "
-             f"time={elapsed:.2f}s ({len(sources)} sources)")
-
-        # 3. Post-sync notifications (stdout = injected into agent context)
-        had_changes = total_added or total_modified or total_removed
-        if had_changes:
-            parts = []
-            if total_added:    parts.append(f"+{total_added}")
-            if total_modified: parts.append(f"~{total_modified}")
-            if total_removed:  parts.append(f"-{total_removed}")
-            print(f"✓ RTFM sync: {' '.join(parts)} files ({elapsed:.1f}s)",
-                  flush=True)
-
-        # 4. Surface new suspect scans only — anti-spam: skip ones already
-        #    reported in a previous turn for this project.
-        if all_scans:
-            seen = _load_seen_scans(rtfm_dir)
-            fresh = [s for s in all_scans if s not in seen]
-            if fresh:
-                n = len(fresh)
-                preview = ", ".join(fresh[:3])
-                if n > 3:
-                    preview += f", +{n - 3} more"
-                print("")
-                print("=" * 60, flush=True)
-                print("ACTION REQUIRED — surface to the user verbatim:",
-                      flush=True)
-                print("=" * 60, flush=True)
-                print(f"TRIGGER: {n} PDF file(s) extracted 0 text during "
-                      "auto-sync — likely scanned images.", flush=True)
-                print(f"FILES:   {preview}", flush=True)
-                print(f"SAY TO USER: \"RTFM detected {n} PDF(s) that look "
-                      "like scans (no extractable text). Want me to "
-                      "enable OCR? You only run this command once — "
-                      "future syncs will OCR new scans automatically.\"",
-                      flush=True)
-                print("EXACT COMMAND TO PROPOSE: rtfm sync --ocr",
-                      flush=True)
-                print("ON APPROVAL RUN: rtfm sync --ocr", flush=True)
-                seen.update(fresh)
-                _save_seen_scans(rtfm_dir, seen)
+        from rtfm.core.queue import Queue
+        from rtfm.cli_worker import ensure_worker_running
+        q = Queue(str(db_path))
+        try:
+            q.enqueue("ingest", {"root": str(root), "corpus": corpus,
+                                 "filepath": rel})
+        finally:
+            q.close()
+        ensure_worker_running(rtfm_dir)
+        _log(f"enqueued ingest [{corpus}] {rel}")
     except Exception as e:
-        _log(f"sync ERROR: {e}")
+        _log(f"enqueue ERROR: {e}")
 
 
 if __name__ == "__main__":
@@ -423,9 +298,11 @@ def install_memory_hook() -> str:
 def install_hook(project_root: str | Path, corpus: str = "default") -> str:
     """Install Claude Code hooks for RTFM.
 
-    Hooks installed:
-    1. UserPromptSubmit → rtfm_sync.py (incremental sync every 30s)
-    2. Stop → rtfm_stop_sync.py (final sync to catch last writes)
+    Hooks installed (all lightweight — the background worker does the work):
+    1. UserPromptSubmit → rtfm_sync.py        (revive worker if dead)
+    2. Stop             → rtfm_stop_sync.py   (revive worker to drain/scan)
+    3. PostToolUse      → rtfm_posttool_sync.py (enqueue the just-written
+                          file as a P1 ingest, on Write|Edit|MultiEdit)
 
     Also writes .rtfm/config.json with the corpus setting.
 
@@ -450,6 +327,9 @@ def install_hook(project_root: str | Path, corpus: str = "default") -> str:
 
     stop_sync_path = hooks_dir / "rtfm_stop_sync.py"
     stop_sync_path.write_text(STOP_SYNC_SCRIPT, encoding="utf-8")
+
+    posttool_path = hooks_dir / "rtfm_posttool_sync.py"
+    posttool_path.write_text(POSTTOOL_HOOK_SCRIPT, encoding="utf-8")
 
     # Clean up old hook scripts
     for old in ["rtfm_remember_reminder.py", "rtfm_remember_stamp.py"]:
@@ -501,8 +381,9 @@ def install_hook(project_root: str | Path, corpus: str = "default") -> str:
     # $CLAUDE_PROJECT_DIR always resolves to the project root at runtime.
     sync_rel = sync_path.relative_to(project_root).as_posix()
     stop_sync_rel = stop_sync_path.relative_to(project_root).as_posix()
+    posttool_rel = posttool_path.relative_to(project_root).as_posix()
 
-    # 1. UserPromptSubmit → incremental sync (throttled every 30s)
+    # 1. UserPromptSubmit → revive worker (no sync).
     ups = _clean_hooks(hooks.get("UserPromptSubmit", []))
     ups.append({
         "hooks": [{
@@ -513,19 +394,31 @@ def install_hook(project_root: str | Path, corpus: str = "default") -> str:
     })
     hooks["UserPromptSubmit"] = ups
 
-    # 2. Stop → final sync (catches files written since last sync)
+    # 2. Stop → revive worker to drain/scan after the session.
     stop = _clean_hooks(hooks.get("Stop", []))
     stop.append({
         "hooks": [{
             "type": "command",
             "command": f'{python} "$CLAUDE_PROJECT_DIR"/{stop_sync_rel}',
-            "timeout": 15,
+            "timeout": 10,
         }],
     })
     hooks["Stop"] = stop
 
+    # 3. PostToolUse → enqueue the just-written file (Write|Edit|MultiEdit).
+    ptu = _clean_hooks(hooks.get("PostToolUse", []))
+    ptu.append({
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [{
+            "type": "command",
+            "command": f'{python} "$CLAUDE_PROJECT_DIR"/{posttool_rel}',
+            "timeout": 10,
+        }],
+    })
+    hooks["PostToolUse"] = ptu
+
     # Clean up old hooks that are no longer needed
-    for old_event in ["PostToolUse", "SessionStart"]:
+    for old_event in ["SessionStart"]:
         if old_event in hooks:
             cleaned = _clean_hooks(hooks[old_event])
             if cleaned:

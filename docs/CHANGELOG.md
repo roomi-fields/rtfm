@@ -7,6 +7,23 @@ description: >-
 
 # Changelog
 
+## [0.16.0] — 2026-05-21
+
+### Fixed — sync no longer wipes a corpus on an incomplete scan (data-loss bug)
+
+A live corpus on NTFS-via-WSL lost ~500 fully-indexed PDFs (and their embeddings). Root cause: the session hooks ran a **full `sync()` of every source on every prompt**. While an external process was reorganising files on flaky NTFS, a scan caught a moment when hundreds of files were temporarily absent → `sync()` flagged them `removed` → `delete_book` destroyed their chunks; a later `gc` then purged the now-orphaned embeddings. The background worker was never the cause — its idle-scan only ever *adds*, never deletes.
+
+- **Mass-removal circuit breaker** in `sync()`: refuses a removal batch that is both large (≥ `REMOVE_CIRCUIT_MIN_FILES`, default 25) **and** a big fraction of the corpus (≥ `REMOVE_CIRCUIT_RATIO`, default 25%) — the signature of an incomplete scan, not real deletions. Index left intact; a warning is surfaced. Override with `rtfm sync --force-remove` (or `force_remove=True`) for deliberate bulk deletes.
+- **File-list mode never deletes**: when `sync(files=[...])` is given a partial list, files not in that list are no longer treated as removed (their absence from a partial list is not evidence of deletion).
+
+### Changed — lightweight hooks: the worker does the work
+
+The Claude Code hooks no longer run a full `sync()` (which re-MD5'd the entire corpus on every prompt — slow on NTFS, and the trigger for the data-loss bug above). New design:
+
+- **UserPromptSubmit / Stop** → only revive the background worker if it died. No scan, no hashing, nothing on the user's hot path.
+- **PostToolUse (Write\|Edit\|MultiEdit)** → enqueue *the one file* the agent just wrote as a P1 ingest job (mapped to its source/corpus, gated on a registered parser). Non-destructive: only ever adds work.
+- Discovery of new/changed/moved files across all sources is the worker's non-destructive idle-scan. New `install_hook` registers all three; re-running is idempotent.
+
 ## [0.15.0] — 2026-05-21
 
 ### Changed — OCR: tesseract backend by default, split into page tranches

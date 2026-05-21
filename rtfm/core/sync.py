@@ -70,6 +70,19 @@ DEFAULT_EXCLUDE_DIRS: set[str] = {
     "db",
 }
 
+# ── mass-removal circuit breaker ────────────────────────────────────────────
+# A full sync deletes every indexed file not seen on disk. That is only
+# correct when the scan is trustworthy. On NTFS-via-WSL a mount hiccup, or an
+# external process reorganising files mid-scan, can make scan_directory()
+# return far fewer files than are indexed — and an unguarded sync then wipes
+# books + chunks + the expensive embeddings for files that are merely
+# temporarily absent (this destroyed ~500 PDFs once). The breaker refuses a
+# removal batch when it is both large in absolute terms AND a big fraction of
+# the corpus — the signature of a bad scan, not real deletions. Pass
+# force_remove=True (or `rtfm sync --force-remove`) to override deliberately.
+REMOVE_CIRCUIT_MIN_FILES = 25
+REMOVE_CIRCUIT_RATIO = 0.25
+
 
 # ── data classes ──────────────────────────────────────────────────────────
 
@@ -531,6 +544,7 @@ def sync(
     retain_history: int | None = 50,
     ocr_fallback: bool = False,
     progress_interval: float | None = None,
+    force_remove: bool = False,
 ) -> SyncResult:
     """Orchestrate a full incremental sync.
 
@@ -767,15 +781,43 @@ def sync(
                     print(f"[sync] progress: {detail}", file=sys.stderr)
                 last_progress_emit = now
 
-    # 6. Process removed
-    # When retain_history is None (unlimited history), we preserve
-    # vanished files in the index so their file_versions snapshots stay
-    # accessible. This is the contract for memory-snapshot corpora:
-    # nothing is ever lost, even if the source file disappears.
+    # 6. Process removed — guarded against transient scan misses.
+    #
+    # Deleting an indexed file destroys its book, chunks and (expensive)
+    # embeddings. We only do that when the scan is trustworthy. Three gates,
+    # in order of precedence:
+    #   (a) retain_history is None → never delete (memory-snapshot corpora:
+    #       nothing is ever lost, even if the source file disappears).
+    #   (b) file-list mode (files=) → never delete: a caller-supplied partial
+    #       list says nothing about files it didn't mention, so their absence
+    #       from `files` is not evidence of deletion.
+    #   (c) mass-removal circuit breaker → if a removal batch is both large
+    #       and a big fraction of the corpus, the scan is almost certainly
+    #       incomplete (mount hiccup, external reorg mid-scan); skip it and
+    #       surface a warning instead of wiping the index. force_remove
+    #       overrides for deliberate bulk deletes.
     if retain_history is None:
         for rel in diff.removed:
             if on_progress:
                 on_progress("remove", rel, "skipped (retain_history=None)")
+    elif files is not None:
+        for rel in diff.removed:
+            if on_progress:
+                on_progress("remove", rel, "skipped (file-list mode)")
+    elif (not force_remove and diff.removed
+          and len(diff.removed) >= REMOVE_CIRCUIT_MIN_FILES
+          and len(diff.removed) >= REMOVE_CIRCUIT_RATIO * (len(indexed) or 1)):
+        n, total = len(diff.removed), len(indexed)
+        msg = (
+            f"refused to remove {n}/{total} files "
+            f"({n / (total or 1):.0%} of corpus '{corpus}') — scan looks "
+            f"incomplete (mount hiccup or reorg in progress?). Index left "
+            f"intact. Re-run with force_remove=True to override."
+        )
+        result.errors.append(msg)
+        print(f"[sync] {msg}", file=sys.stderr)
+        if on_progress:
+            on_progress("error", "", msg)
     else:
         for rel in diff.removed:
             try:

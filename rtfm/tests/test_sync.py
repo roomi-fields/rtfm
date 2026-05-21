@@ -385,6 +385,79 @@ class TestSync:
         assert "notes.txt" in move_events[0][1]
 
 
+class TestRemovalSafety:
+    """Guards that stop a transient/incomplete scan from wiping a corpus.
+
+    Regression: a session hook ran a full sync of every source on every
+    prompt while an external process reorganised files on flaky NTFS; an
+    incomplete scan flagged ~500 indexed PDFs as 'removed' and deleted
+    their books + chunks + (expensive) embeddings.
+    """
+
+    def _make_corpus(self, tmp_path, n):
+        for i in range(n):
+            (tmp_path / f"f{i:03d}.txt").write_text(
+                f"Document number {i}.\n"
+                "This file has enough text to be indexed by the plaintext "
+                "parser so that it produces at least one chunk and book.\n"
+            )
+
+    def test_circuit_breaker_blocks_mass_removal(self, sync_db, tmp_path):
+        """A scan missing most of the corpus must NOT delete anything."""
+        self._make_corpus(tmp_path, 40)
+        sync(sync_db, tmp_path, corpus="t", generate_embeddings=False)
+        assert sync_db.get_stats()["books"] == 40
+
+        # Simulate a bad scan: 30/40 files vanish at once (75%).
+        for i in range(30):
+            (tmp_path / f"f{i:03d}.txt").unlink()
+
+        result = sync(sync_db, tmp_path, corpus="t",
+                      generate_embeddings=False)
+        assert result.removed == 0, "circuit breaker should block deletion"
+        assert any("refused to remove" in e for e in result.errors)
+        # Index left fully intact.
+        assert sync_db.get_stats()["books"] == 40
+
+    def test_force_remove_overrides_breaker(self, sync_db, tmp_path):
+        """force_remove=True applies a deliberate bulk delete."""
+        self._make_corpus(tmp_path, 40)
+        sync(sync_db, tmp_path, corpus="t", generate_embeddings=False)
+        for i in range(30):
+            (tmp_path / f"f{i:03d}.txt").unlink()
+
+        result = sync(sync_db, tmp_path, corpus="t",
+                      generate_embeddings=False, force_remove=True)
+        assert result.removed == 30
+        assert sync_db.get_stats()["books"] == 10
+
+    def test_small_delete_still_applies(self, sync_db, tmp_path):
+        """A normal small deletion is below the breaker and applies."""
+        self._make_corpus(tmp_path, 40)
+        sync(sync_db, tmp_path, corpus="t", generate_embeddings=False)
+        for i in range(2):  # 2/40 = 5% — well under threshold
+            (tmp_path / f"f{i:03d}.txt").unlink()
+
+        result = sync(sync_db, tmp_path, corpus="t",
+                      generate_embeddings=False)
+        assert result.removed == 2
+        assert sync_db.get_stats()["books"] == 38
+
+    def test_file_list_mode_never_removes(self, sync_db, tmp_path):
+        """A partial files= list says nothing about unmentioned files,
+        so their absence from the list must not delete them."""
+        self._make_corpus(tmp_path, 40)
+        sync(sync_db, tmp_path, corpus="t", generate_embeddings=False)
+
+        # Touch one file, sync only that one via files=. The other 39 are
+        # not in the list but must survive.
+        (tmp_path / "f000.txt").write_text("changed content, more text here.\n")
+        result = sync(sync_db, tmp_path, corpus="t",
+                      generate_embeddings=False, files=["f000.txt"])
+        assert result.removed == 0
+        assert sync_db.get_stats()["books"] == 40
+
+
 # ── PlainTextParser ───────────────────────────────────────────────────────
 
 class TestPlainTextParser:

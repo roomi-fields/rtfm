@@ -1810,6 +1810,7 @@ def cmd_sync(args):
                         generate_embeddings=not args.no_embeddings,
                         on_progress=_progress,
                         force=args.force,
+                        force_remove=getattr(args, "force_remove", False),
                         ocr_fallback=ocr_fallback,
                         progress_interval=progress_interval,
                     )
@@ -1854,6 +1855,7 @@ def cmd_sync(args):
         files=files_list,
         on_progress=_progress,
         force=args.force,
+        force_remove=getattr(args, "force_remove", False),
         ocr_fallback=ocr_fallback,
         progress_interval=progress_interval,
     )
@@ -2371,6 +2373,12 @@ def main():
     p_sync.add_argument("--dry-run", action="store_true", help="Show what would change")
     p_sync.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
     p_sync.add_argument("--force", action="store_true", help="Re-index all files (ignore hash cache)")
+    p_sync.add_argument(
+        "--force-remove", action="store_true",
+        help="Override the mass-removal circuit breaker. By default sync "
+             "refuses to delete a large fraction of a corpus in one pass "
+             "(a sign of an incomplete scan); use this for deliberate bulk "
+             "deletes.")
     p_sync.add_argument("--files", nargs="+", help="Specific files to sync (for git hooks)")
     p_sync.add_argument(
         "--ocr", action="store_true",
