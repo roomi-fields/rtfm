@@ -44,6 +44,13 @@ SCAN_CHARS_PER_PAGE = 20
 # jobs instead of one ~hour-long block that monopolises the worker.
 PAGES_PER_OCR_JOB = 50
 
+# Above this many ``remove`` jobs enqueued by a single ``scan``, the
+# handler also schedules a one-shot VACUUM. Big deletions leave lots
+# of free pages in the SQLite file; without a VACUUM the DB stays
+# bloated. Threshold tuned so a handful of removed files never triggers
+# it (vacuum is exclusive-lock + slow), but a real bulk wipe does.
+AUTO_VACUUM_AFTER_REMOVES = 200
+
 
 def enqueue_ocr_jobs(queue: "Queue", root: str, corpus: str, filepath: str,
                      page_count: int) -> int:
@@ -74,6 +81,163 @@ def _compute_hash(path: Path) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def handle_scan(job: Job, worker: "Worker") -> None:
+    """P1 — scan one source root and fan out per-file work to the queue.
+
+    Replaces the legacy inline ``sync()`` for the worker path: instead of
+    parsing files itself, the scan computes a diff and emits child jobs:
+
+    * cross-corpus moves and same-corpus moves are applied inline — they
+      are cheap (DB row updates only, no parsing, no re-embedding).
+    * removals → one ``remove`` job per file, guarded by the same
+      mass-removal circuit breaker that protects ``sync()``: if a batch
+      is both big in absolute terms (>= ``REMOVE_CIRCUIT_MIN_FILES``)
+      *and* a large fraction of the corpus (>= ``REMOVE_CIRCUIT_RATIO``),
+      the whole batch is refused — the scan is almost certainly
+      incomplete (mount hiccup, external reorg in progress). Pass
+      ``force_remove=True`` in the payload to override deliberately.
+    * additions + modifications → one ``ingest`` job per file.
+
+    When a single scan enqueues more than :data:`AUTO_VACUUM_AFTER_REMOVES`
+    remove jobs, a one-shot ``vacuum`` job is also queued so the freed
+    pages get reclaimed once the removes drain.
+
+    Payload schema::
+
+        {
+          "root": "<absolute path of source root>",
+          "corpus": "<corpus name>",
+          "extensions": "csv,txt" | None,   # optional override
+          "force_remove": False              # optional, default False
+        }
+    """
+    from rtfm.core.sync import (
+        REMOVE_CIRCUIT_MIN_FILES, REMOVE_CIRCUIT_RATIO,
+        _path_to_slug, compute_diff, scan_directory,
+    )
+
+    payload = job.payload or {}
+    root_raw = payload.get("root")
+    corpus = payload.get("corpus")
+    if not root_raw or not corpus:
+        raise ValueError("scan payload requires 'root' and 'corpus'")
+
+    root = Path(root_raw).resolve()
+    if not root.is_dir():
+        worker._log(f"scan [{corpus}] {root}: not a directory, skipped")
+        return
+
+    # Build the extension override set (None → registry default).
+    ext_set: set[str] | None = None
+    ext_raw = payload.get("extensions")
+    if ext_raw:
+        ext_set = {
+            e.strip() if e.strip().startswith(".") else f".{e.strip()}"
+            for e in ext_raw.split(",") if e.strip()
+        } or None
+
+    force_remove = bool(payload.get("force_remove", False))
+
+    lib = Library(str(worker.db_path))
+    try:
+        lib.set_sync_root(corpus, str(root))
+        files_on_disk = scan_directory(root, ext_set)
+        indexed = lib.list_indexed_files(corpus=corpus)
+        indexed_global = lib.list_indexed_files()
+        diff = compute_diff(
+            files_on_disk, indexed, root,
+            indexed_global=indexed_global,
+            current_corpus=corpus,
+        )
+
+        # Cross-corpus moves: cheap, in-place — no parsing, no re-embed.
+        cross_moved = 0
+        for old_rel, _old_corpus, new_path in diff.cross_moved:
+            try:
+                new_rel = str(new_path.relative_to(root))
+            except ValueError:
+                new_rel = str(new_path)
+            try:
+                new_slug = _path_to_slug(new_rel, corpus)
+                if lib.move_file(old_rel, new_rel, new_slug,
+                                 new_corpus=corpus):
+                    cross_moved += 1
+            except Exception as exc:
+                worker._log(f"scan [{corpus}] cross-move error {old_rel}: {exc}")
+
+        # Same-corpus moves: same content, new path within the corpus.
+        # Mirrors the inline branch in :func:`rtfm.core.sync.sync` so the
+        # worker doesn't pointlessly re-ingest a renamed file.
+        moved = 0
+        for old_rel, new_path in diff.moved:
+            try:
+                new_rel = str(new_path.relative_to(root))
+            except ValueError:
+                new_rel = str(new_path)
+            try:
+                new_slug = _path_to_slug(new_rel, corpus)
+                if lib.move_file(old_rel, new_rel, new_slug):
+                    moved += 1
+            except Exception as exc:
+                worker._log(f"scan [{corpus}] move error {old_rel}: {exc}")
+    finally:
+        lib.close()
+
+    # Removals → ``remove`` jobs, guarded by the mass-removal circuit
+    # breaker. Same thresholds as the legacy ``sync()``.
+    queue = Queue(str(worker.db_path))
+    remove_jobs = 0
+    skipped_removed = 0
+    try:
+        n_removed = len(diff.removed)
+        n_indexed = len(indexed)
+        if n_removed:
+            breaker_trips = (
+                not force_remove
+                and n_removed >= REMOVE_CIRCUIT_MIN_FILES
+                and n_removed >= REMOVE_CIRCUIT_RATIO * (n_indexed or 1)
+            )
+            if breaker_trips:
+                worker._log(
+                    f"refused to remove {n_removed}/{n_indexed} files in "
+                    f"[{corpus}] — scan looks incomplete. Re-run with "
+                    f"force_remove=True to override."
+                )
+                skipped_removed = n_removed
+            else:
+                payloads = [{"filepath": rel, "corpus": corpus}
+                            for rel in diff.removed]
+                inserted, _ = queue.enqueue_many("remove", payloads)
+                remove_jobs = inserted
+
+        # Additions + modifications → ``ingest`` jobs.
+        ingest_jobs = 0
+        ingest_payloads: list[dict] = []
+        for fpath in diff.added + diff.modified:
+            try:
+                rel = str(fpath.relative_to(root))
+            except ValueError:
+                rel = str(fpath)
+            ingest_payloads.append({
+                "root": str(root), "corpus": corpus, "filepath": rel,
+            })
+        if ingest_payloads:
+            inserted, _ = queue.enqueue_many("ingest", ingest_payloads)
+            ingest_jobs = inserted
+
+        # Big-scan auto-vacuum: schedule a one-shot VACUUM so the freed
+        # pages get reclaimed once the removes drain.
+        if remove_jobs > AUTO_VACUUM_AFTER_REMOVES:
+            queue.enqueue("vacuum", {"reason": "auto-after-big-scan-remove"})
+    finally:
+        queue.close()
+
+    worker._log(
+        f"scan [{corpus}] +{ingest_jobs} ~{moved + cross_moved} "
+        f"-{remove_jobs} (skip_removed={skipped_removed})"
+    )
 
 
 def handle_ingest(job: Job, worker: "Worker") -> None:
@@ -342,6 +506,93 @@ def handle_ocr(job: Job, worker: "Worker") -> None:
         lib.close()
 
 
+def handle_vacuum(job: Job, worker: "Worker") -> None:
+    """P4 — VACUUM the SQLite DB to reclaim space from deleted rows.
+
+    VACUUM rebuilds the file, so it needs an EXCLUSIVE lock on the
+    whole DB. We open a *fresh* direct connection (not via Library,
+    whose long-lived connections would block VACUUM) and run it in
+    autocommit mode (``isolation_level=None``) — VACUUM cannot run
+    inside a transaction. A 60s ``busy_timeout`` gives other writers
+    a chance to finish; if the lock still can't be taken, the
+    ``OperationalError`` propagates and the worker marks the job
+    ``failed`` — the user retries later.
+
+    Payload is empty by design (vacuum is global). An optional
+    ``"reason"`` key (free text) is echoed in the log line.
+    """
+    import sqlite3
+
+    reason = (job.payload or {}).get("reason") or "explicit"
+    db_path = Path(worker.db_path)
+    before_mb = db_path.stat().st_size / (1024 * 1024) if db_path.exists() else 0.0
+
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    try:
+        conn.execute("PRAGMA busy_timeout = 60000")
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
+
+    after_mb = db_path.stat().st_size / (1024 * 1024) if db_path.exists() else 0.0
+    worker._log(f"vacuum done — {before_mb:.0f}M → {after_mb:.0f}M ({reason})")
+
+
+def handle_remove(job: Job, worker: "Worker") -> None:
+    """P2 — remove a single file from the index.
+
+    Inverse of :func:`handle_ingest`: drops the book row (its chunks
+    follow via FK cascade) and the ``indexed_files`` tracking entry.
+    Payload schema: ``{"filepath": <rel path>, "corpus": <name>}``.
+
+    A filepath that is not in ``indexed_files`` is logged as a no-op
+    rather than raising — the user may have already removed it, or the
+    queue may be replaying a stale event after a manual ``rtfm reindex``.
+    """
+    payload = job.payload
+    corpus = payload["corpus"]
+    rel = payload["filepath"]
+
+    lib = Library(str(worker.db_path))
+    try:
+        removed = lib.remove_file(rel)
+        if removed:
+            worker._log(f"remove [{corpus}] {rel}")
+        else:
+            worker._log(f"remove [{corpus}] {rel}: not in index")
+    finally:
+        lib.close()
+
+
+def handle_reconcile(job: Job, worker: "Worker") -> None:
+    """P4 — self-heal pass: purge orphan embeddings, re-queue un-embedded
+    chunks.
+
+    Thin wrapper around :func:`rtfm.core.reconcile.reconcile`, which holds
+    the actual logic (and is also covered by ``test_reconcile.py``).
+
+    Payload schema:
+        ``{}`` — just reconcile.
+        ``{"vacuum": True}`` — opt-in: after reconciliation, also enqueue a
+        P4 ``vacuum`` job (only if anything was purged — vacuuming an
+        unchanged DB is pure overhead).
+    """
+    from rtfm.core.reconcile import reconcile
+
+    stats = reconcile(worker.db_path, log=worker._log)
+    worker._log(
+        f"reconcile: purged {stats['orphans_purged']} orphan(s), "
+        f"re-queued {stats['chunks_requeued']} chunk(s) "
+        f"as {stats['embed_jobs']} P5 batch(es)"
+    )
+    if job.payload.get("vacuum") and stats["orphans_purged"] > 0:
+        queue = Queue(str(worker.db_path))
+        try:
+            queue.enqueue("vacuum", {"reason": "after-reconcile"})
+        finally:
+            queue.close()
+
+
 def handle_embed(job: Job, worker: "Worker") -> None:
     """P2 — embed a batch of chunks identified by id.
 
@@ -366,7 +617,11 @@ def handle_embed(job: Job, worker: "Worker") -> None:
 
 # Dispatch table consumed by :func:`rtfm.core.worker.Worker`.
 HANDLERS = {
+    "scan": handle_scan,
+    "remove": handle_remove,
     "ingest": handle_ingest,
+    "reconcile": handle_reconcile,
+    "vacuum": handle_vacuum,
     "embed": handle_embed,
     "ocr": handle_ocr,
 }
