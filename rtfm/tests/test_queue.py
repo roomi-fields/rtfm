@@ -172,3 +172,90 @@ def test_list_pending_orders_by_priority(queue: Queue):
     queue.enqueue("embed", {"chunks": [1]})
     rows = queue.list_pending()
     assert [r.type for r in rows] == ["ingest", "embed", "ocr"]
+
+
+# ── New job types (0.18.0): scan, remove, reconcile, vacuum ──────────────
+
+def test_new_job_types_can_be_enqueued(queue: Queue):
+    """The 4 new structural job types must round-trip through the queue."""
+    from rtfm.core.queue import (P_SCAN, P_REMOVE, P_RECONCILE, P_VACUUM,
+                                 P_INGEST, P_EMBED, P_OCR, P_USER)
+    expected = {
+        "scan": P_SCAN,
+        "remove": P_REMOVE,
+        "ingest": P_INGEST,
+        "reconcile": P_RECONCILE,
+        "vacuum": P_VACUUM,
+        "embed": P_EMBED,
+        "ocr": P_OCR,
+    }
+    for t, p in expected.items():
+        # Use a unique payload so dedup doesn't reject duplicates.
+        jid = queue.enqueue(t, {"k": t})
+        assert jid is not None, f"failed to enqueue {t}"
+    pending = queue.list_pending(limit=20)
+    by_type = {j.type: j.priority for j in pending}
+    assert by_type == expected
+    # P0 is the explicit-user lane, lower than every default.
+    assert P_USER < min(expected.values())
+
+
+def test_priority_order_p0_to_p6(queue: Queue):
+    """Dequeue order must respect the new 7-level scheme strictly."""
+    from rtfm.core.queue import P_USER
+    queue.enqueue("ocr",       {"k": 1})  # P6
+    queue.enqueue("embed",     {"k": 2})  # P5
+    queue.enqueue("reconcile", {"k": 3})  # P4
+    queue.enqueue("ingest",    {"k": 4})  # P3
+    queue.enqueue("remove",    {"k": 5})  # P2
+    queue.enqueue("scan",      {"k": 6})  # P1
+    queue.enqueue("ingest",    {"urgent": True}, priority=P_USER)  # P0 — wins
+    out = []
+    while True:
+        j = queue.dequeue()
+        if j is None:
+            break
+        out.append(j.type)
+    assert out == ["ingest", "scan", "remove", "ingest", "reconcile",
+                   "embed", "ocr"]
+
+
+def test_migration_from_legacy_3_type_check(tmp_path: Path):
+    """An existing DB with the legacy CHECK constraint (ingest/embed/ocr
+    only) must be transparently migrated when Queue opens it, preserving
+    rows and accepting the new types afterwards."""
+    db = tmp_path / "library.db"
+    # Hand-craft the OLD schema (what 0.17 and earlier shipped).
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE work_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT NOT NULL CHECK(type IN ('ingest', 'embed', 'ocr')),
+            priority INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'running', 'done', 'failed')),
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            started_at TEXT,
+            finished_at TEXT,
+            error TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO work_queue (type, priority, payload) VALUES
+            ('ingest', 1, '{"f":"old"}'),
+            ('embed', 2, '{"chunks":[1]}');
+    """)
+    conn.commit()
+    conn.close()
+
+    # Old rows must be preserved AND the new types must be accepted.
+    q = Queue(db)
+    try:
+        assert q.stats().get("ingest", {}).get("pending", 0) == 1
+        assert q.stats().get("embed", {}).get("pending", 0) == 1
+        new_id = q.enqueue("scan", {"root": "/x"})
+        assert new_id is not None
+        new2 = q.enqueue("reconcile", {})
+        assert new2 is not None
+    finally:
+        q.close()

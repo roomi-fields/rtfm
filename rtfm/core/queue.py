@@ -1,16 +1,22 @@
 """Persistent work queue for the RTFM worker daemon.
 
 A single ``work_queue`` table in ``library.db`` holds pending jobs at
-three priority levels:
+seven priority levels — every DB-writing operation in RTFM goes through
+this queue. The CLI, hooks, slash commands and the worker's own periodic
+ticks are all *producers*; only the worker writes to the library.
 
-  P1 = ingest  → a single file to (re)index
-  P2 = embed   → a batch of chunks without embeddings
-  P3 = ocr     → a single scan-suspect PDF to OCR
+  P0 = user-explicit (slash commands, manual ``rtfm <cmd>``)
+  P1 = scan       — discover changes in a source
+  P2 = remove     — delete an indexed file whose source disappeared
+  P3 = ingest     — parse one file → chunks
+  P4 = reconcile / vacuum — short maintenance work
+  P5 = embed      — vectorise a batch of chunks
+  P6 = ocr        — OCR one page-range of a scanned PDF
 
 The worker (see :mod:`rtfm.core.worker`) pops the highest-priority
-pending job at every tick — so a freshly-enqueued P1 always preempts a
-P2/P3 backlog. Granularity is intentionally fine (1 file / 1 batch /
-1 PDF) so preemption is responsive.
+pending job at every tick — so a fresh P0 always preempts a P5/P6
+backlog. Granularity is intentionally fine (1 source / 1 file / 1 batch
+/ 1 page-range) so preemption is responsive.
 
 Concurrency contract:
 
@@ -35,19 +41,46 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 
-# Priority constants — lower number runs first.
-P_INGEST = 1
-P_EMBED = 2
-P_OCR = 3
+# Priority constants — lower number runs first. The space between levels
+# is intentional: leaves room for future intermediate priorities without
+# renumbering. P_USER (0) is the explicit user-request lane that wins
+# over every periodic/background producer.
+P_USER = 0
+P_SCAN = 10
+P_REMOVE = 20
+P_INGEST = 30
+P_RECONCILE = 40
+P_VACUUM = 40
+P_EMBED = 50
+P_OCR = 60
 
-JobType = str  # 'ingest' | 'embed' | 'ocr'
+#: Default priority for a given job type when the caller doesn't override.
+DEFAULT_PRIORITY: dict[str, int] = {
+    "scan": P_SCAN,
+    "remove": P_REMOVE,
+    "ingest": P_INGEST,
+    "reconcile": P_RECONCILE,
+    "vacuum": P_VACUUM,
+    "embed": P_EMBED,
+    "ocr": P_OCR,
+}
+
+#: All currently-recognised job types. The DB-side CHECK constraint is
+#: kept in sync with this set via the migration in :meth:`Queue._init_schema`.
+JOB_TYPES: tuple[str, ...] = ("scan", "remove", "ingest",
+                              "reconcile", "vacuum", "embed", "ocr")
+
+JobType = str
 JobStatus = str  # 'pending' | 'running' | 'done' | 'failed'
 
 
-SCHEMA = """
+# Built so the in-DB CHECK constraint stays in lockstep with JOB_TYPES.
+_TYPE_CHECK_SQL = "CHECK(type IN (" + ", ".join(f"'{t}'" for t in JOB_TYPES) + "))"
+
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS work_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL CHECK(type IN ('ingest', 'embed', 'ocr')),
+    type TEXT NOT NULL {_TYPE_CHECK_SQL},
     priority INTEGER NOT NULL,
     payload TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending'
@@ -131,7 +164,56 @@ class Queue:
 
     def _init_schema(self) -> None:
         conn = self._get_conn()
+        # On a brand-new DB, this creates the table with the current CHECK.
         conn.executescript(SCHEMA)
+        # On a pre-existing DB, the IF NOT EXISTS above is a no-op and the
+        # old CHECK still rejects the new job types. Detect that, and
+        # rebuild the table in-place if so.
+        self._migrate_table_check(conn)
+
+    def _migrate_table_check(self, conn: sqlite3.Connection) -> None:
+        """If ``work_queue.type`` still has the legacy 3-type CHECK,
+        rebuild the table with the current 7-type CHECK. Preserves data."""
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='work_queue'"
+        ).fetchone()
+        if not row or not row["sql"]:
+            return
+        # Cheap fingerprint: the old schema listed exactly three types.
+        current_sql = row["sql"]
+        if "'reconcile'" in current_sql:
+            return  # already migrated
+        # Rebuild. CREATE TABLE …_new with the up-to-date schema, copy
+        # rows, swap.
+        conn.executescript(f"""
+            BEGIN;
+            CREATE TABLE work_queue_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL {_TYPE_CHECK_SQL},
+                priority INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending', 'running', 'done', 'failed')),
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                started_at TEXT,
+                finished_at TEXT,
+                error TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO work_queue_new
+              SELECT id, type, priority, payload, status,
+                     created_at, started_at, finished_at, error, attempts
+              FROM work_queue;
+            DROP TABLE work_queue;
+            ALTER TABLE work_queue_new RENAME TO work_queue;
+            CREATE INDEX IF NOT EXISTS idx_queue_pending
+                ON work_queue(priority ASC, created_at ASC)
+                WHERE status = 'pending';
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_unique_pending
+                ON work_queue(type, payload)
+                WHERE status = 'pending';
+            COMMIT;
+        """)
 
     def close(self) -> None:
         if self._conn is not None:
@@ -145,8 +227,7 @@ class Queue:
         """Queue a job. Returns the new row id, or ``None`` if a pending
         job with the same ``(type, payload)`` already exists (dedup)."""
         if priority is None:
-            priority = {"ingest": P_INGEST, "embed": P_EMBED,
-                        "ocr": P_OCR}[type]
+            priority = DEFAULT_PRIORITY[type]
         body = json.dumps(payload, sort_keys=True)
         try:
             cur = self._get_conn().execute(
@@ -171,8 +252,7 @@ class Queue:
         retry the whole batch a few times before giving up.
         """
         if priority is None:
-            priority = {"ingest": P_INGEST, "embed": P_EMBED,
-                        "ocr": P_OCR}[type]
+            priority = DEFAULT_PRIORITY[type]
         payloads = list(payloads)  # we need to iterate twice on retry
         conn = self._get_conn()
 
