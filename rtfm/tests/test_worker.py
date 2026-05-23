@@ -116,25 +116,21 @@ def test_maybe_reconcile_enqueues_one_reconcile(tmp_path: Path):
     worker = _make_worker(rtfm_dir, db)
     # First call: seeds the clock, no enqueue.
     worker._maybe_reconcile()
-    q = Queue(db)
-    try:
-        assert [j for j in q.list_pending() if j.type == "reconcile"] == []
-    finally:
-        q.close()
+    pending = worker._queue.list_pending(limit=10_000)
+    assert [j for j in pending if j.type == "reconcile"] == []
 
     # Pretend the interval has expired.
     worker._last_reconcile_at = 0.0
     worker._maybe_reconcile()
 
-    q = Queue(db)
-    try:
-        pending = q.list_pending(limit=10_000)
-        rec = [j for j in pending if j.type == "reconcile"]
-        assert len(rec) == 1, f"expected 1 reconcile job, got {len(rec)}"
-        assert rec[0].priority == P_RECONCILE
-        assert rec[0].payload == {}
-    finally:
-        q.close()
+    # Verify via the worker's own queue connection — on older SQLite
+    # builds (Python 3.11 ships 3.40) a freshly-opened second connection
+    # can briefly miss the very-recent WAL write, even in autocommit mode.
+    pending = worker._queue.list_pending(limit=10_000)
+    rec = [j for j in pending if j.type == "reconcile"]
+    assert len(rec) == 1, f"expected 1 reconcile job, got {len(rec)}"
+    assert rec[0].priority == P_RECONCILE
+    assert rec[0].payload == {}
 
 
 def test_maybe_scan_throttle_blocks_within_interval(tmp_path: Path):

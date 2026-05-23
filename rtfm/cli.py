@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -43,7 +42,6 @@ def _watch_jobs(
     if background:
         return 0
     start = time.time()
-    prev_done = 0
     try:
         while True:
             stats = queue.stats()
@@ -67,7 +65,6 @@ def _watch_jobs(
             if pending == 0 and running == 0:
                 sys.stderr.write("\n")
                 return 1 if failed else 0
-            prev_done = done
             time.sleep(poll_s)
     except KeyboardInterrupt:
         sys.stderr.write("\n(interrupted — worker keeps draining in background)\n")
@@ -463,7 +460,7 @@ def cmd_embed_models(args):
             f"{alias+mark:<10} {info.dim:<6} ~{info.size_mb}MB    "
             f"{cached:<8} {info.languages:<14} {info.hf_name}"
         )
-    print(f"\n  * = default. Pass --embed-model <alias> or a full HF model name.")
+    print("\n  * = default. Pass --embed-model <alias> or a full HF model name.")
 
 
 
@@ -1088,7 +1085,6 @@ def cmd_status(args):
     # Indexed files summary
     indexed = lib.list_indexed_files()
     if indexed:
-        from datetime import datetime
         dates = []
         for info in indexed.values():
             if info.get("indexed_at"):
@@ -1101,7 +1097,7 @@ def cmd_status(args):
             print(f"\nIndexed files: {len(indexed)}")
             print(f"Last sync:     {last_sync}")
     else:
-        print(f"\nIndexed files: 0")
+        print("\nIndexed files: 0")
 
     # Parsers available
     from rtfm.parsers.base import ParserRegistry
