@@ -89,8 +89,12 @@ def test_maybe_scan_dedup_on_repeat_tick(tmp_path: Path):
 
     worker = _make_worker(rtfm_dir, db)
     worker._maybe_scan()
-    # Force the throttle to allow a second tick immediately.
-    worker._last_scan_at = 0.0
+    # Force the throttle to allow a second tick immediately. Using a
+    # relative offset rather than 0.0 — time.monotonic()'s origin is
+    # implementation-defined, so on a fresh CI runner monotonic() can
+    # be smaller than the throttle interval.
+    import time as _t
+    worker._last_scan_at = _t.monotonic() - worker.scan_interval - 1
     worker._maybe_scan()
 
     q = Queue(db)
@@ -119,8 +123,13 @@ def test_maybe_reconcile_enqueues_one_reconcile(tmp_path: Path):
     pending = worker._queue.list_pending(limit=10_000)
     assert [j for j in pending if j.type == "reconcile"] == []
 
-    # Pretend the interval has expired.
-    worker._last_reconcile_at = 0.0
+    # Pretend the interval has expired. time.monotonic() has an
+    # implementation-defined origin (boot time on Linux), so on a
+    # short-lived CI runner monotonic() can return less than the default
+    # reconcile_interval (3600s). Force expiration with a value that is
+    # guaranteed to be old enough relative to whatever monotonic returns.
+    import time as _t
+    worker._last_reconcile_at = _t.monotonic() - worker.reconcile_interval - 1
     worker._maybe_reconcile()
 
     # Verify via the worker's own queue connection — on older SQLite
