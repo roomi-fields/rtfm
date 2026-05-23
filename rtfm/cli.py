@@ -186,6 +186,170 @@ def cmd_books(args):
     lib.close()
 
 
+def cmd_check(args):
+    """Report the searchability + processing state of one or more books.
+
+    Designed for programmatic consumers (agents, scripts): JSON by
+    default. Tells you in one shot whether a book has chunks, an
+    embedding per chunk, and whether any pipeline step is still queued
+    or has failed (ingest, OCR, embed).
+
+    Three input modes:
+      - ``--slug <slug>``: exact match on ``books.slug``. Stable across
+        file moves — recommended for pipelines.
+      - ``--path <path>``: exact match on ``books.filename`` (relative or
+        absolute; the absolute path is normalised against each known
+        sync root before lookup).
+      - positional ``<identifier>``: substring fallback (matches slug
+        or filename, case-insensitive). For quick human lookups.
+
+    Optional ``--corpus`` scopes the match. Exit code: 0 = every match
+    is fully searchable + embedded, 1 = some match is incomplete,
+    2 = no match at all.
+    """
+    import sqlite3 as _sqlite3
+    from pathlib import Path as _Path
+    db_path = resolve_db(args.db)
+
+    slug = getattr(args, "slug", None)
+    path = getattr(args, "path", None)
+    ident = getattr(args, "identifier", None)
+    corpus = getattr(args, "corpus", None)
+    if not (slug or path or ident):
+        sys.exit("rtfm check: pass --slug, --path, or a positional identifier.")
+
+    conn = _sqlite3.connect(db_path)
+    conn.row_factory = _sqlite3.Row
+
+    # Build the query depending on the input mode.
+    where: list[str] = []
+    params: list = []
+    if slug:
+        where.append("slug = ?")
+        params.append(slug)
+        echoed = f"slug={slug!r}"
+    elif path:
+        # Try the path verbatim, then strip any matching sync_root prefix
+        # so absolute paths line up with the relative filenames stored
+        # in books.filename.
+        candidates = {path, path.lstrip("/")}
+        try:
+            absolute = str(_Path(path).resolve())
+        except Exception:
+            absolute = path
+        candidates.add(absolute)
+        for row in conn.execute("SELECT root_path FROM sync_roots").fetchall():
+            root = row["root_path"]
+            if absolute.startswith(root.rstrip("/") + "/"):
+                rel = absolute[len(root.rstrip("/")) + 1:]
+                candidates.add(rel)
+        placeholders = ", ".join("?" for _ in candidates)
+        where.append(f"filename IN ({placeholders})")
+        params.extend(sorted(candidates))
+        echoed = f"path={path!r}"
+    else:
+        where.append("(slug LIKE ? OR LOWER(filename) LIKE ?)")
+        params.extend([f"%{ident}%", f"%{ident.lower()}%"])
+        echoed = f"ident={ident!r}"
+    if corpus:
+        where.append("corpus = ?")
+        params.append(corpus)
+
+    sql = ("SELECT id, slug, title, filename, corpus, page_count FROM books "
+           "WHERE " + " AND ".join(where) + " ORDER BY filename LIMIT 20")
+    matches = conn.execute(sql, params).fetchall()
+
+    results: list[dict] = []
+    for b in matches:
+        bid = b["id"]
+        n_chunks = conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE book_id = ?", (bid,)
+        ).fetchone()[0]
+        n_embed = conn.execute(
+            """SELECT COUNT(*) FROM chunk_embeddings e
+               JOIN chunks c ON c.id = e.chunk_id
+               WHERE c.book_id = ?""", (bid,)
+        ).fetchone()[0]
+
+        # Pipeline state for this book — look at every status the queue
+        # exposes (pending / running / failed) so consumers can route
+        # differently: pending → wait; failed → blocked_human; absent +
+        # not searchable → never indexed.
+        def _q_state(job_type: str) -> dict[str, int]:
+            if not b["filename"]:
+                return {"pending": 0, "running": 0, "failed": 0, "done": 0}
+            like = f'%"filepath": "%{b["filename"]}%"%'
+            rows = conn.execute(
+                """SELECT status, COUNT(*) AS n FROM work_queue
+                   WHERE type = ? AND payload LIKE ? GROUP BY status""",
+                (job_type, like),
+            ).fetchall()
+            out = {"pending": 0, "running": 0, "failed": 0, "done": 0}
+            for r in rows:
+                out[r["status"]] = r["n"]
+            return out
+        ingest_q = _q_state("ingest")
+        ocr_q = _q_state("ocr")
+        embed_q_pending = conn.execute(
+            "SELECT COUNT(*) FROM work_queue "
+            "WHERE type='embed' AND status='pending'"
+        ).fetchone()[0]
+
+        results.append({
+            "slug": b["slug"],
+            "title": b["title"],
+            "filename": b["filename"],
+            "corpus": b["corpus"],
+            "page_count": b["page_count"],
+            "chunks": n_chunks,
+            "embeddings": n_embed,
+            "searchable": n_chunks > 0,
+            "embeddings_ready": n_chunks > 0 and n_embed >= n_chunks,
+            "ingest_pending": ingest_q["pending"] + ingest_q["running"] > 0,
+            "ingest_failed": ingest_q["failed"] > 0,
+            "ocr_attempted": (ocr_q["done"] + ocr_q["failed"]) > 0,
+            "ocr_pending": ocr_q["pending"] + ocr_q["running"] > 0,
+            "ocr_failed": ocr_q["failed"] > 0,
+            "embed_pending": (n_chunks - n_embed) > 0 and embed_q_pending > 0,
+        })
+    conn.close()
+
+    payload = {
+        "query": echoed,
+        "matches": len(results),
+        "books": results,
+    }
+    if getattr(args, "format", "json") == "text":
+        if not results:
+            print(f"no match for {echoed}")
+        else:
+            for r in results:
+                tag = []
+                if not r["searchable"]:
+                    tag.append("NOT-SEARCHABLE")
+                if not r["embeddings_ready"]:
+                    tag.append("EMBED-MISSING")
+                if r["ocr_failed"]:
+                    tag.append("OCR-FAILED")
+                if r["ocr_pending"]:
+                    tag.append("OCR-PENDING")
+                if r["ingest_failed"]:
+                    tag.append("INGEST-FAILED")
+                if r["ingest_pending"]:
+                    tag.append("INGEST-PENDING")
+                tagstr = " " + " ".join(f"[{t}]" for t in tag) if tag else ""
+                print(f"{r['slug']}  ({r['chunks']} chunks, "
+                      f"{r['embeddings']} embeds){tagstr}")
+    else:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    if not results:
+        sys.exit(2)
+    not_ready = [r for r in results
+                 if not (r["searchable"] and r["embeddings_ready"])]
+    sys.exit(1 if not_ready else 0)
+
+
 def cmd_corpora(args):
     """List corpora in the library."""
     lib = _get_lib(args)
@@ -1940,6 +2104,21 @@ def main():
     p_books.add_argument("--corpus", "-c", help="Filter by corpus")
     p_books.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_books.set_defaults(func=cmd_books)
+
+    # check — report searchability + processing state of a book
+    p_check = subparsers.add_parser(
+        "check",
+        help="Report a book's index/embed/OCR state (machine-readable)",
+        parents=[db_parent],
+    )
+    p_check.add_argument("identifier", nargs="?",
+                         help="Substring fallback (matches slug or filename)")
+    p_check.add_argument("--slug", help="Exact match on books.slug (stable across moves)")
+    p_check.add_argument("--path", help="Match a file path (absolute or relative)")
+    p_check.add_argument("--corpus", "-c", help="Scope to a corpus")
+    p_check.add_argument("--format", "-f", choices=["text", "json"],
+                         default="json", help="Output format (default: json)")
+    p_check.set_defaults(func=cmd_check)
 
     # corpora
     p_corpora = subparsers.add_parser("corpora", help="List corpora", parents=[db_parent])
