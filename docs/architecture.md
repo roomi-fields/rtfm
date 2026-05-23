@@ -10,25 +10,44 @@ description: >-
 
 ## Pipeline
 
+Every write to the DB goes through the worker. The CLI, the hooks, the
+slash commands and the worker's own periodic ticks are all *producers*;
+the worker is the only consumer. There is no other path — and that's the
+property the rest of the architecture depends on.
+
 ```
 File on disk
-  → hook / CLI / worker idle scan   (producer: detects change)
-    → work_queue                    (SQLite, priority + dedup)
-      → Worker daemon               (1 process, nice 19, ionice idle)
-        ├─ P1 ingest                Parser → chunks → books table
-        │     └─ enqueue P2 follow-up for the new chunks
-        │     └─ enqueue P3 if PDF + 0 chunks + ocr_fallback
-        ├─ P2 embed                 fastembed batch → chunk_embeddings
-        └─ P3 OCR                   marker subprocess → re-ingest
-                                       └─ enqueue P2 for OCR'd chunks
-          → Search (FTS5 / semantic / hybrid)
-            → Progressive disclosure (metadata → expand)
+  ↑                            (producers — enqueue jobs)
+  │   ┌── CLI commands         → P0 (user-explicit)
+  │   ├── slash commands       → P0
+  │   ├── PostToolUse hook     → P3 ingest (edited file)
+  │   └── Worker periodic tick → P1 scan / P4 reconcile
+  │
+  └── work_queue (SQLite, priority + dedup)
+                ↓
+      Worker daemon  (1 process per project, nice 19, ionice idle)
+                ↓ dequeue by priority, FIFO within priority
+      Handler dispatch:
+        P0 = user-explicit            (priority lane, no work in itself)
+        P1 scan       → compute_diff, fan out P2 remove + P3 ingest
+        P2 remove     → drop a vanished file from the index
+        P3 ingest     → parse one file → chunks → books
+                        + enqueue P5 embed for the new chunks
+                        + enqueue P6 OCR if PDF + ocr_fallback + scan
+        P4 reconcile  → purge orphan embeddings, re-queue un-embedded
+        P4 vacuum     → reclaim space (auto after big remove batch)
+        P5 embed      → fastembed batch → chunk_embeddings
+        P6 OCR        → tesseract page-range → append chunks
+                        + enqueue P5 for those chunks
+                ↓
+      Search (FTS5 / semantic / hybrid)
+        → Progressive disclosure (metadata → expand)
 ```
 
-The queue is the spine: every producer enqueues per-file (or per-batch)
-jobs, the single worker drains by priority. Granularity is intentionally
-fine so a fresh P1 (file you just edited) preempts a P2/P3 backlog at
-the next job boundary.
+Granularity is intentionally fine — 1 source per `scan`, 1 file per
+`ingest`/`remove`, 1 batch per `embed`, 1 page-range per `ocr` — so a
+fresh P0 command preempts a long P5/P6 backlog at the next job boundary
+(a handful of seconds, not hours).
 
 ## Core Modules
 
@@ -54,33 +73,56 @@ by the hot path of `rtfm sync` and the watcher.
 
 ### `rtfm/core/queue.py` — Persistent priority queue
 
-`work_queue` table in the same `library.db`. `Queue` class:
+`work_queue` table in the same `library.db`. Seven priority lanes:
 
-- `enqueue(type, payload)` → returns the row id, or `None` if a pending
-  job with the same `(type, payload)` already exists (dedup).
+| Priority | Type(s)             | Who enqueues                              |
+|---------:|---------------------|-------------------------------------------|
+| **P0**   | any                 | explicit user (CLI, slash command)        |
+| **P1**   | `scan`              | worker periodic tick, also any user P0    |
+| **P2**   | `remove`            | the `scan` handler when files vanished    |
+| **P3**   | `ingest`            | the `scan` handler, PostToolUse hook      |
+| **P4**   | `reconcile`, `vacuum` | worker periodic tick; auto after big remove |
+| **P5**   | `embed`             | `ingest` handler                          |
+| **P6**   | `ocr`               | `ingest` handler when PDF + `ocr_fallback` |
+
+`Queue` class:
+
+- `enqueue(type, payload, priority=None)` → returns the row id, or `None`
+  if a pending job with the same `(type, payload)` already exists. The
+  default priority comes from `DEFAULT_PRIORITY[type]`; callers pass
+  `priority=P_USER` (= 0) to claim the P0 lane.
 - `dequeue()` → atomic single-statement `UPDATE … RETURNING` that picks
-  the highest-priority pending row and flips it to `running`.
+  the highest-priority pending row (lowest number wins) and flips it to
+  `running`.
 - `mark_done(id)` / `mark_failed(id, error)`.
 - `stats()` / `list_pending()` / `list_failed()` / `retry_failed()` /
   `clear_done()` — used by `rtfm queue …`.
 
-Concurrency: multiple producers (CLI, hooks, watcher) can enqueue at the
+Concurrency: multiple producers (CLI, hooks, MCP) can enqueue at the
 same time through SQLite WAL; only one consumer thanks to the worker's
 `flock`. Dedup is enforced by `UNIQUE(type, payload) WHERE status =
-'pending'` so a hook re-queuing the same path while the first attempt
-is still pending is a no-op.
+'pending'` so a periodic tick re-queuing the same scan while the first
+one is still pending is a no-op.
+
+On a pre-0.18 DB the `work_queue` table only knew three job types
+(`ingest`, `embed`, `ocr`) via a CHECK constraint. The first time a
+0.18+ `Queue` opens such a DB it rebuilds the table in place — rows
+preserved — so the new types can be enqueued.
 
 ### `rtfm/core/worker.py` — The drain daemon
 
-Single-threaded loop:
+Single-threaded loop. **All DB writes pass through here** — the CLI, the
+hooks and the MCP server only enqueue:
 
 ```
 while not stop:
     job = queue.dequeue()
     if job is None:
+        _maybe_scan()         # enqueue P1 scans every SCAN_INTERVAL
+        _maybe_reconcile()    # enqueue P4 reconcile every hour
         sleep IDLE_POLL_SECONDS (5 s)
         continue
-    handlers[job.type](job, self)
+    HANDLERS[job.type](job, self)
     queue.mark_done(...)
 ```
 
@@ -89,43 +131,74 @@ project). Writes its live state atomically to `.rtfm/worker_state.json`
 so `rtfm status` / `/rtfm.status` can show the running job without
 touching the DB. SIGTERM/SIGINT → finish current job → exit.
 
-### `rtfm/core/handlers.py` — Per-priority handlers
+Preemption is at job boundary, not in the middle of a job: a fresh P0
+`scan` queued mid-OCR waits for that OCR tranche (a few minutes at
+most, never a full book) to finish before running. Long work is
+deliberately chunked — 1 file, 1 batch of 64 chunks, 1 page-range of
+50 pages — so the "next boundary" arrives quickly.
 
-- **`handle_ingest`** (P1) — same per-file logic as the legacy inline
-  sync (parse → ingest → upsert `indexed_files`). After ingest:
+### `rtfm/core/handlers.py` — One handler per job type
+
+- **`handle_scan`** (P1) — walks a source via `scan_directory` +
+  `compute_diff`, applies cross-corpus and same-corpus moves inline
+  (cheap row updates; chunks, embeddings, tags survive), then fans out
+  child jobs: a P2 `remove` per disappeared file, a P3 `ingest` per new
+  or modified file. A **mass-removal circuit breaker** refuses to enqueue
+  removes if a single scan would drop more than 25 files and more than
+  25 % of the corpus — the signature of a flaky mount or a mid-reorg
+  scan, not real deletions. `force_remove=True` in the payload overrides.
+  When the breaker fires, the index is left intact and a warning is
+  surfaced. When a scan does emit a big batch of removes (above
+  `AUTO_VACUUM_AFTER_REMOVES`, default 200), a P4 `vacuum` is queued
+  behind to reclaim the freed pages.
+- **`handle_remove`** (P2) — drops the book row (chunks cascade via FK)
+  and the `indexed_files` tracking entry. A path that's no longer
+  tracked is logged and skipped, never raised.
+- **`handle_ingest`** (P3) — parse → ingest → upsert `indexed_files`.
+  After ingest:
   - if the PDF has 0 chunks **and** `ocr_fallback: true` in
-    `.rtfm/config.json` → enqueue P3 for the same file, skip P2;
+    `.rtfm/config.json` → enqueue P6 OCR jobs (one per page-range
+    tranche), skip P5;
   - otherwise → split the new chunks into `EMBED_BATCH_SIZE=64` batches
-    and enqueue P2 jobs.
-- **`handle_embed`** (P2) — load `chunk_ids` from payload, run
+    and enqueue P5 jobs.
+- **`handle_reconcile`** (P4) — purge orphan embeddings, re-queue chunks
+  missing an embedding. Optional `{"vacuum": true}` payload enqueues a
+  follow-up vacuum if anything was purged.
+- **`handle_vacuum`** (P4) — opens its own SQLite connection (Library's
+  long-lived one would block VACUUM), runs `VACUUM` in autocommit, logs
+  the before→after size.
+- **`handle_embed`** (P5) — load `chunk_ids` from payload, run
   `library.embed_chunks_by_id` (idempotent — already-embedded chunks
   are skipped).
-- **`handle_ocr`** (P3) — drop any empty book P1 left behind, re-ingest
-  with `PDFParser(backend="marker")`, enqueue P2 follow-up. Marker
-  itself runs in a one-shot subprocess (see `rtfm/parsers/pdf.py`) so
-  its 3–8 GB of model state is reclaimed by the OS between PDFs.
+- **`handle_ocr`** (P6) — tesseract via pypdfium2 on a page range,
+  append chunks idempotently, enqueue P5 follow-up.
 
-### Idle scan inside the worker (no separate watcher daemon)
+### Periodic ticks: just enqueuers
 
-There is no standalone watcher process. The worker, when its priority
-queue is empty, runs the periodic source scan itself every
-`SCAN_INTERVAL_SECONDS` (default 30 s). One project = one consumer
-process, which is the explicit design rule.
+The worker has two periodic ticks, both throttled and both idempotent
+thanks to the queue's dedup:
 
-The idle scan uses **`compute_diff` (MD5)**, not `quick_diff`. This
-costs more I/O than the size+mtime check but is the only way to:
+- **`_maybe_scan`** (every `SCAN_INTERVAL_SECONDS`, default 30 s) →
+  enqueues one P1 `scan` job per configured source.
+- **`_maybe_reconcile`** (every `RECONCILE_INTERVAL_SECONDS`, default
+  1 h) → enqueues one P4 `reconcile` job.
+
+Neither does any scanning or reconciling itself — that work lives in
+`handle_scan` and `handle_reconcile`. There is no `_scan_once` method
+anymore; if you find a reference to it, that's a stale doc.
+
+**Why polling for the scan tick, not inotify**: RTFM frequently indexes
+Obsidian vaults on `/mnt/d/…` (NTFS via WSL). Inotify events do not
+propagate across that boundary, so a pure-inotify scheme would silently
+miss every change there. The tick only enqueues; the actual scan still
+uses `compute_diff` (MD5) inside the `scan` handler, which is the only
+way to:
 
 - detect **cross-corpus moves** (same MD5, different corpus) and
   transfer them inline via `Library.move_file(new_corpus=...)` —
   chunks, embeddings, tags survive untouched;
 - skip **mtime false-positives** that bite on NTFS-via-WSL whenever
   a file is touched without its content changing.
-
-**Why polling, not inotify**: RTFM frequently indexes Obsidian vaults
-on `/mnt/d/…` (NTFS via WSL). Inotify events do not propagate across
-that boundary, so a pure-inotify scheme would silently miss every
-change there. The poll runs only while the queue is empty, so a long
-ingest or OCR run is never paused to scan.
 
 ### `rtfm/core/embeddings.py` — Semantic search
 
@@ -199,16 +272,25 @@ generation kicks off the first time semantic search is requested.
 
 ## CLI Surface
 
-| Command | Mode | Notes |
+Every mutating command follows the same shape: **enqueue P0 jobs, ensure
+the worker is alive, watch the queue until pending and running both
+hit zero, exit**. `--background` skips the watching loop and returns
+immediately. No command ever writes to the DB directly — that's the
+property the architecture is built around.
+
+| Command | Enqueues | Notes |
 |---|---|---|
-| `rtfm sync` | enqueue (default) | scans sources, enqueues P1 jobs, auto-spawns worker, returns immediately |
-| `rtfm sync --inline` | legacy blocking | same code path as 0.9.x; useful for CI / `--no-embeddings` / `--ocr` daemon mode |
-| `rtfm sync --ocr` | enqueue P3 | persists `ocr_fallback: true`, enqueues a P3 for every flagged scan, returns |
-| `rtfm embed` | enqueue (default) | scans for chunks without embedding, enqueues P2 batches |
-| `rtfm embed --force` / `--inline` | legacy blocking | re-embed everything, or a one-shot run |
-| `rtfm worker [start \| stop \| status] [--scan-interval S]` | manage daemon | one process per project; idle scan folded in (no separate watcher) |
+| `rtfm sync` | P0 `scan` per source | watches; `--force-remove` flows into the payload; `--dry-run` prints the plan without enqueuing; `--files FILE…` enqueues P0 `ingest` instead of scanning |
+| `rtfm sync --ocr` | P0 `ocr` per flagged scan | also persists `ocr_fallback: true` so future ingestions auto-OCR |
+| `rtfm reindex --ext / --parser / --corpus` | P0 `ingest` (filtered) | bumped to P0 — user's explicit refresh wins over the periodic backlog |
+| `rtfm gc [--vacuum]` | P0 `reconcile` | `--vacuum` flag rides in the payload, fires only if something was purged |
+| `rtfm vacuum` | P0 `vacuum` | reports before→after size |
+| `rtfm doctor` | P0 `scan`s + P0 `reconcile` | full pass + diagnostic report |
+| `rtfm backfill-pages` | P0 `ingest` (filtered) | re-parse to repopulate stale `page_count` |
+| `rtfm embed` | enqueue (default) | scans for chunks without embedding, enqueues P5 batches |
+| `rtfm worker [start \| stop \| status] [--scan-interval S]` | manage daemon | one process per project; periodic ticks fold in |
 | `rtfm queue [stats \| list \| failed \| clear-done \| retry-failed]` | inspect / manage queue | |
-| `rtfm status` | health report | now includes `Worker / Queue:` section |
+| `rtfm status` | health report | includes `Worker / Queue:` section |
 
 ## Database Schema
 

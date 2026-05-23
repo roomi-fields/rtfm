@@ -7,6 +7,32 @@ description: >-
 
 # Changelog
 
+## [0.18.0] — 2026-05-23
+
+### Changed — every DB write now goes through the worker (no more inline path)
+
+The CLI, the hooks and the slash commands stop touching the DB directly. They become *producers* that enqueue jobs into a single 7-level priority queue; the worker daemon is the only consumer. This removes a whole class of bugs (concurrent writes from different RTFM versions, inline OCR that blocks the user's terminal for hours, hooks that ran a full destructive sync on every prompt) and makes the system observable: a `rtfm sync` shows live queue progress instead of a long opaque blocking call.
+
+Seven priority lanes, lowest number wins:
+
+- **P0** = explicit user (slash commands, manual CLI invocations)
+- **P1** = `scan` — detect changes in a source
+- **P2** = `remove` — drop a vanished file from the index
+- **P3** = `ingest` — parse one file → chunks
+- **P4** = `reconcile` / `vacuum` — short maintenance
+- **P5** = `embed` — vectorise a batch of chunks
+- **P6** = `ocr` — OCR a page-range of a scanned PDF
+
+What changed concretely:
+
+- **New job types**: `scan`, `remove`, `reconcile`, `vacuum`, each with its own handler in `rtfm/core/handlers.py`. The `scan` handler subsumes the old `_scan_once` method on the worker and the destructive `sync()` removed-path — including the mass-removal circuit breaker from 0.16.0.
+- **Worker periodic ticks** (`_maybe_scan`, `_maybe_reconcile`) now just enqueue jobs. The work happens in handlers. Queue dedup (`UNIQUE(type, payload) WHERE status='pending'`) keeps the queue clean across repeated ticks.
+- **CLI** — every mutating command (`rtfm sync`, `rtfm gc`, `rtfm doctor`, `rtfm reindex`, `rtfm vacuum`, `rtfm backfill-pages`) becomes "enqueue P0 + watch progress + exit". `--background` skips the watching loop. `rtfm sync --inline` is gone (the inline path is gone). `cli.py` shrank 2587 → 2274 lines.
+- **DB migration is automatic**: pre-0.18 DBs had a `CHECK(type IN ('ingest','embed','ocr'))` on `work_queue` that blocked the new job types. The first 0.18+ `Queue` open rebuilds the table in place, rows preserved.
+- **Docs**: `docs/architecture.md` rewritten for the new model (priority table, handler list, periodic-tick semantics).
+
+Test suite: 552 → 565 passed (24 skipped).
+
 ## [0.17.0] — 2026-05-23
 
 ### Fixed — stop indexing our own state directory (feedback loop)
