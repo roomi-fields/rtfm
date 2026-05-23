@@ -27,7 +27,7 @@ def rtfm_project(tmp_path):
 
 class TestSyncWithoutArgs:
     def test_sync_all_sources_from_config(self, rtfm_project, monkeypatch):
-        """rtfm sync (no args) should sync all sources from config."""
+        """rtfm sync --background should enqueue P0 scan jobs for every source."""
         # Create two source directories with files
         docs_dir = rtfm_project / "docs"
         docs_dir.mkdir()
@@ -45,18 +45,25 @@ class TestSyncWithoutArgs:
         monkeypatch.delenv("RTFM_DB", raising=False)
 
         from rtfm.cli import main
-        with patch("sys.argv", ["rtfm", "sync", "--no-embeddings"]):
-            main()
+        # --background avoids spawning a real worker subprocess and avoids
+        # blocking on the watcher poll loop.
+        with patch("rtfm.cli_worker.ensure_worker_running", return_value=12345), \
+             patch("sys.argv", ["rtfm", "sync", "--background"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
 
-        # Verify chunks were indexed
-        from rtfm.core.library import Library
-        lib = Library(str(rtfm_project / ".rtfm" / "library.db"))
-        stats = lib.get_stats()
-        assert stats["chunks"] > 0
-        lib.close()
+        # Verify scan jobs were enqueued at P0.
+        from rtfm.core.queue import Queue, P_USER
+        q = Queue(str(rtfm_project / ".rtfm" / "library.db"))
+        jobs = q.list_pending(limit=20)
+        scans = [j for j in jobs if j.type == "scan"]
+        assert len(scans) == 2, f"expected 2 scan jobs, got {len(scans)}"
+        assert all(j.priority == P_USER for j in scans)
+        q.close()
 
     def test_sync_explicit_overrides_config(self, rtfm_project, monkeypatch):
-        """rtfm sync /path --corpus x should ignore config."""
+        """rtfm sync /path --corpus x --background enqueues a scan for that source."""
         src_dir = rtfm_project / "src"
         src_dir.mkdir()
         (src_dir / "test.md").write_text("# Test\n\nThis is a test document with enough content to create a chunk.")
@@ -65,15 +72,19 @@ class TestSyncWithoutArgs:
         monkeypatch.delenv("RTFM_DB", raising=False)
 
         from rtfm.cli import main
-        with patch("sys.argv", ["rtfm", "sync", str(src_dir), "--corpus", "explicit", "--no-embeddings"]):
-            main()
+        with patch("rtfm.cli_worker.ensure_worker_running", return_value=12345), \
+             patch("sys.argv", ["rtfm", "sync", str(src_dir), "--corpus", "explicit",
+                                "--background"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
 
-        from rtfm.core.library import Library
-        lib = Library(str(rtfm_project / ".rtfm" / "library.db"))
-        corpora = lib.list_corpora()
-        corpus_names = [c["corpus"] for c in corpora]
-        assert "explicit" in corpus_names
-        lib.close()
+        from rtfm.core.queue import Queue
+        q = Queue(str(rtfm_project / ".rtfm" / "library.db"))
+        jobs = q.list_pending(limit=20)
+        assert any(j.type == "scan" and j.payload.get("corpus") == "explicit"
+                   for j in jobs)
+        q.close()
 
 
 class TestAddAndSources:

@@ -1,13 +1,77 @@
-"""Command-line interface for rtfm."""
+"""Command-line interface for rtfm.
+
+Since 0.16.x every mutating command is a thin producer: it enqueues
+P0 (``P_USER``) jobs, ensures the worker daemon is running, and watches
+queue stats until the work it asked for is drained. No CLI command
+parses or writes to the library in-process anymore — that's the worker's
+job. Use ``--background`` to enqueue and return immediately.
+"""
+
+from __future__ import annotations
 
 import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from rtfm.config import resolve_db
 from rtfm.core.library import Library
+
+
+def _watch_jobs(
+    queue,
+    initial_ids: set[int],
+    *,
+    poll_s: float = 1.0,
+    background: bool = False,
+    label: str = "",
+) -> int:
+    """Block until every pending/running job has reached a terminal
+    state, polling ``queue.stats()`` every ``poll_s`` seconds.
+
+    We watch the *whole* queue (not just ``initial_ids``) because the
+    jobs we enqueued typically fan out child jobs — a scan enqueues
+    ingest/remove jobs, a reconcile may enqueue embed batches, etc. The
+    user expects ``rtfm sync`` to return only when all of that has
+    drained.
+
+    Returns 0 if no failures, 1 if any job ended ``failed``. With
+    ``background=True``, returns 0 immediately.
+    """
+    if background:
+        return 0
+    start = time.time()
+    prev_done = 0
+    try:
+        while True:
+            stats = queue.stats()
+            pending = sum(s.get("pending", 0) for s in stats.values())
+            running = sum(s.get("running", 0) for s in stats.values())
+            done = sum(s.get("done", 0) for s in stats.values())
+            failed = sum(s.get("failed", 0) for s in stats.values())
+            elapsed = time.time() - start
+            per_type = [
+                f"{t}={s.get('pending', 0)}p/{s.get('running', 0)}r"
+                for t, s in sorted(stats.items())
+                if s.get("pending") or s.get("running")
+            ]
+            extra = ("  " + " ".join(per_type)) if per_type else ""
+            lbl = f"{label} " if label else ""
+            sys.stderr.write(
+                f"\r[{elapsed:5.0f}s] {lbl}pending={pending} running={running} "
+                f"done={done} failed={failed}{extra}\033[K"
+            )
+            sys.stderr.flush()
+            if pending == 0 and running == 0:
+                sys.stderr.write("\n")
+                return 1 if failed else 0
+            prev_done = done
+            time.sleep(poll_s)
+    except KeyboardInterrupt:
+        sys.stderr.write("\n(interrupted — worker keeps draining in background)\n")
+        return 130
 
 
 def _get_lib(args) -> Library:
@@ -599,29 +663,29 @@ def _classify_pdf(abs_path: Path) -> dict:
 
 
 def cmd_backfill_pages(args):
-    """Backfill books.page_count + corrected total_chars for indexed PDFs.
+    """Re-ingest every PDF whose ``books.page_count`` is missing.
 
-    Re-reads each PDF's real text via pypdfium2 (not the possibly-stale
-    books.total_chars) to compute a deterministic chars-per-page scan
-    signal, and writes back both page_count and the freshly-measured
-    char count. With ``--enqueue-ocr`` + ``ocr_fallback``, enqueues P3
-    OCR for the PDFs that are provably scans (and *readable* — a file
-    pdfium can't open can't be OCR'd either, so it is skipped).
+    Enqueues a P0 ingest job per PDF — the worker's ingest path runs the
+    real PDF parser, which populates ``page_count`` and the scan signal
+    deterministically. With ``ocr_fallback: true`` in config, scans will
+    chain into P0/P3 OCR jobs automatically (no special path in this
+    command anymore).
     """
-    from rtfm.config import find_rtfm_root, load_config
-    from rtfm.core.handlers import SCAN_CHARS_PER_PAGE
+    from rtfm.config import find_rtfm_root
+    from rtfm.core.queue import Queue, P_USER
+    from rtfm.cli_worker import ensure_worker_running
 
     rtfm_root = find_rtfm_root()
     if rtfm_root is None:
         sys.exit("backfill-pages: no .rtfm/ project root in the cwd chain.")
-    db_path = rtfm_root / ".rtfm" / "library.db"
+    rtfm_dir = rtfm_root / ".rtfm"
+    db_path = rtfm_dir / "library.db"
 
     import sqlite3
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=60000")
 
-    cfg = load_config(rtfm_root)
     roots = {r["corpus"]: r["root_path"]
              for r in conn.execute("SELECT corpus, root_path FROM sync_roots")}
 
@@ -631,86 +695,61 @@ def cmd_backfill_pages(args):
            WHERE (filename LIKE '%.pdf' OR filename LIKE '%.PDF')
              AND (page_count IS NULL OR page_count = 0)"""
     ).fetchall()
+    conn.close()
     print(f"PDFs missing page_count: {len(pdfs)}")
 
-    updated = unreadable = wrong_format = 0
-    scans: list[tuple] = []
+    if not pdfs:
+        return
+
+    payloads = []
+    skipped_no_root = 0
     for b in pdfs:
         root = roots.get(b["corpus"])
         if not root:
-            unreadable += 1
+            skipped_no_root += 1
             continue
-        info = _classify_pdf(Path(root) / b["filename"])
-        cat = info["category"]
-        if cat in ("missing", "unreadable"):
-            unreadable += 1
-            continue
-        if cat == "wrong-format":
-            wrong_format += 1
-            continue
-        # ok or scan → we have the true page count. (We do NOT overwrite
-        # total_chars: measure_pdf_text only samples the first pages, so
-        # its char count is a scan probe, not the document total. The
-        # scan verdict already came from the real sampled text, which is
-        # the bug we set out to fix.)
-        conn.execute(
-            "UPDATE books SET page_count = ? WHERE id = ?",
-            (info["pages"], b["id"]),
+        payloads.append({
+            "root": root, "corpus": b["corpus"], "filepath": b["filename"],
+        })
+
+    if not payloads:
+        print(f"  all {skipped_no_root} skipped (no sync root for corpus).")
+        return
+
+    queue = Queue(str(db_path))
+    try:
+        inserted, deduped = queue.enqueue_many(
+            "ingest", payloads, priority=P_USER,
         )
-        updated += 1
-        if cat == "scan":
-            scans.append((b["corpus"], b["filename"], info["pages"], info["cpp"]))
-    conn.commit()
-
-    print(f"  page_count written: {updated}")
-    print(f"  unreadable/missing: {unreadable}")
-    print(f"  wrong-format (not really PDF): {wrong_format}")
-    print(f"\nProvable scans (< {SCAN_CHARS_PER_PAGE} chars/page, readable): {len(scans)}")
-    for corpus, fn, n, cpp in sorted(scans)[:40]:
-        print(f"  [{corpus:<18}] {cpp:5.1f} c/p  {n:4}p  {fn[:50]}")
-    if len(scans) > 40:
-        print(f"  ... +{len(scans) - 40} more")
-
-    if getattr(args, "enqueue_ocr", False):
-        if not cfg.get("ocr_fallback"):
-            print("\n⚠ ocr_fallback is false in config.json — enabling it so "
-                  "the worker will run these P3 jobs.")
-            cfg["ocr_fallback"] = True
-            from rtfm.config import save_config
-            save_config(rtfm_root, cfg)
-        from rtfm.core.queue import Queue
-        from rtfm.core.handlers import enqueue_ocr_jobs
-        from rtfm.cli_worker import ensure_worker_running
-        q = Queue(str(db_path))
-        enq = 0
-        try:
-            for corpus, fn, n, cpp in scans:
-                root = roots.get(corpus)
-                # n = page count → split into page-range tranches.
-                enq += enqueue_ocr_jobs(q, root, corpus, fn, n)
-        finally:
-            q.close()
-        print(f"\nEnqueued {enq} P3 OCR job(s) (page-range tranches).")
-        pid = ensure_worker_running(rtfm_root / ".rtfm")
-        if pid:
-            print(f"Worker draining in background (PID {pid}).")
-    else:
-        print("\n(Use --enqueue-ocr to queue P3 OCR jobs for these scans.)")
-    conn.close()
+        print(f"  queued {inserted} P0 ingest job(s)"
+              + (f", {deduped} already pending" if deduped else "")
+              + (f", {skipped_no_root} skipped (no sync root)"
+                 if skipped_no_root else "")
+              + ".")
+        if inserted == 0:
+            return
+        ensure_worker_running(rtfm_dir)
+        sys.exit(_watch_jobs(
+            queue, set(),
+            background=getattr(args, "background", False),
+            label="backfill",
+        ))
+    finally:
+        queue.close()
 
 
 def cmd_gc(args):
     """Reconcile the index: purge orphan embeddings + re-queue
     un-embedded chunks.
 
-    A live pipeline drifts (interrupted syncs, re-ingests, moves):
-    embeddings whose chunk was deleted linger, and some chunks end up
-    with no embedding. This is the manual trigger for the same
-    reconciliation the worker runs automatically while idle. Safe only
-    at rest, so it refuses while the worker is busy (use --force).
+    Enqueues a P0 ``reconcile`` job (carrying ``vacuum`` when ``--vacuum``
+    is set) and watches the queue until it drains. The actual purge /
+    requeue logic lives in :func:`rtfm.core.reconcile.reconcile`, called
+    by the worker.
     """
     from rtfm.config import find_rtfm_root
-    from rtfm.core.reconcile import reconcile, count_orphan_embeddings
+    from rtfm.core.queue import Queue, P_USER
+    from rtfm.cli_worker import ensure_worker_running
 
     rtfm_root = find_rtfm_root()
     if rtfm_root is None:
@@ -718,27 +757,39 @@ def cmd_gc(args):
     rtfm_dir = rtfm_root / ".rtfm"
     db_path = rtfm_dir / "library.db"
 
-    if not getattr(args, "force", False):
-        from rtfm.core.worker import worker_running
-        ws = worker_running(rtfm_dir)
-        if ws is not None and ws.status == "busy":
-            sys.exit(
-                f"gc: worker is busy (PID {ws.pid}). Reconciliation is only "
-                "safe at rest (purging an orphan mid-reingest could race).\n"
-                "  → wait for idle (rtfm worker status), or pass --force."
-            )
+    queue = Queue(db_path)
+    try:
+        jid = queue.enqueue(
+            "reconcile",
+            {"vacuum": bool(getattr(args, "vacuum", False))},
+            priority=P_USER,
+        )
+        if jid is None:
+            print("gc: a reconcile job is already pending.")
+        else:
+            print(f"gc: P0 reconcile job #{jid} queued"
+                  + (" (with vacuum)" if getattr(args, "vacuum", False) else "")
+                  + ".")
 
-    print("Reconciling index (purge orphans + re-queue un-embedded)...")
-    stats = reconcile(db_path, vacuum=getattr(args, "vacuum", False),
-                      log=lambda m: print(f"  {m}"))
-    print(f"\nDone: {stats['orphans_purged']} orphan embedding(s) purged, "
-          f"{stats['chunks_requeued']} chunk(s) re-queued for embedding "
-          f"({stats['embed_jobs']} P2 batch(es)).")
-    if stats["embed_jobs"]:
-        from rtfm.cli_worker import ensure_worker_running
-        pid = ensure_worker_running(rtfm_dir)
-        if pid:
-            print(f"Worker draining the embed backlog (PID {pid}).")
+        ensure_worker_running(rtfm_dir)
+        rc = _watch_jobs(
+            queue, {jid} if jid else set(),
+            background=getattr(args, "background", False),
+            label="gc",
+        )
+
+        # Report the final outcome from the queue itself.
+        if not getattr(args, "background", False):
+            failed = queue.list_failed(limit=5)
+            recent_failed = [j for j in failed if j.type in ("reconcile", "vacuum", "embed")]
+            if recent_failed:
+                print("Recent failures:")
+                for j in recent_failed:
+                    err = (j.error or "").splitlines()[0][:120]
+                    print(f"  #{j.id} {j.type}: {err}")
+        sys.exit(rc)
+    finally:
+        queue.close()
 
 
 def cmd_reindex(args):
@@ -759,7 +810,7 @@ def cmd_reindex(args):
         rtfm reindex --ext pdf --corpus icm-bibliography
     """
     from rtfm.config import find_rtfm_root
-    from rtfm.core.queue import Queue
+    from rtfm.core.queue import Queue, P_USER
     from rtfm.cli_worker import ensure_worker_running
 
     rtfm_root = find_rtfm_root()
@@ -825,46 +876,94 @@ def cmd_reindex(args):
         payloads.append({"root": root, "corpus": b["corpus"],
                          "filepath": b["filename"]})
     try:
-        inserted, deduped = queue.enqueue_many("ingest", payloads)
+        inserted, deduped = queue.enqueue_many(
+            "ingest", payloads, priority=P_USER,
+        )
+
+        scope = []
+        if exts:
+            scope.append("ext " + ",".join(sorted(e.lstrip(".") for e in exts)))
+        if getattr(args, "corpus", None):
+            scope.append(f"corpus {args.corpus}")
+        print(f"reindex ({'; '.join(scope)}): {len(books)} matching file(s), "
+              f"{inserted} P0 ingest job(s) queued"
+              + (f", {deduped} already pending" if deduped else "")
+              + (f", {skipped_no_root} skipped (no sync root)" if skipped_no_root else "")
+              + ".")
+        if inserted == 0:
+            return
+
+        ensure_worker_running(rtfm_dir)
+        # We don't track the ids per-row (enqueue_many returns counts),
+        # but watching the whole queue is fine — reindex is intentionally
+        # the only producer in this command.
+        sys.exit(_watch_jobs(
+            queue, set(),
+            background=getattr(args, "background", False),
+            label="reindex",
+        ))
     finally:
         queue.close()
 
-    scope = []
-    if exts:
-        scope.append("ext " + ",".join(sorted(e.lstrip(".") for e in exts)))
-    if getattr(args, "corpus", None):
-        scope.append(f"corpus {args.corpus}")
-    print(f"reindex ({'; '.join(scope)}): {len(books)} matching file(s), "
-          f"{inserted} queued for re-ingest"
-          + (f", {deduped} already pending" if deduped else "")
-          + (f", {skipped_no_root} skipped (no sync root)" if skipped_no_root else "")
-          + ".")
-    if inserted:
-        pid = ensure_worker_running(rtfm_dir)
-        if pid:
-            print(f"Worker draining in background (PID {pid}). "
-                  "P1 ingest preempts any pending embed/OCR, so these "
-                  "refresh first.")
+
+def cmd_vacuum(args):
+    """Enqueue a P0 vacuum job (rebuilds the SQLite DB to reclaim space
+    from deleted rows) and watch until it drains. Reports the file size
+    before/after via the worker log.
+    """
+    from rtfm.config import find_rtfm_root
+    from rtfm.core.queue import Queue, P_USER
+    from rtfm.cli_worker import ensure_worker_running
+
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("vacuum: no .rtfm/ project root in the cwd chain.")
+    rtfm_dir = rtfm_root / ".rtfm"
+    db_path = rtfm_dir / "library.db"
+
+    before_mb = db_path.stat().st_size / (1024 * 1024) if db_path.exists() else 0.0
+    queue = Queue(db_path)
+    try:
+        jid = queue.enqueue(
+            "vacuum", {"reason": "explicit-cli"}, priority=P_USER,
+        )
+        if jid is None:
+            print("vacuum: a vacuum job is already pending.")
         else:
-            print("Worker already running — refresh in progress.")
+            print(f"vacuum: P0 job #{jid} queued. DB size before: "
+                  f"{before_mb:.1f} MB.")
+
+        ensure_worker_running(rtfm_dir)
+        rc = _watch_jobs(
+            queue, {jid} if jid else set(),
+            background=getattr(args, "background", False),
+            label="vacuum",
+        )
+        if not getattr(args, "background", False):
+            after_mb = (db_path.stat().st_size / (1024 * 1024)
+                        if db_path.exists() else 0.0)
+            print(f"DB size after: {after_mb:.1f} MB "
+                  f"(reclaimed {before_mb - after_mb:+.1f} MB).")
+        sys.exit(rc)
+    finally:
+        queue.close()
 
 
 def cmd_doctor(args):
-    """Diagnose every indexed PDF: ok / scan / unreadable / wrong-format.
+    """Trigger a full pass over the project: P0 scan(s) + P0 reconcile,
+    then watch the queue until drained.
 
-    Reads each file (magic bytes + real text via pypdfium2), never the
-    DB's stale total_chars. Produces an actionable report and, with
-    flags, fixes what it can:
+    Also prints a diagnostic report of every indexed PDF (ok / scan /
+    unreadable / wrong-format) so the user knows what the worker will
+    fix on its own (scans → OCR via ``ocr_fallback`` heuristic) and what
+    needs manual attention (wrong-format, unreadable).
 
-      --enqueue-ocr     queue P3 OCR for readable scans (enables
-                        ocr_fallback if needed)
-      --fix-extensions  rename mislabeled files (e.g. a .pdf that is
-                        really an EPUB) to their true extension on disk,
-                        so a future sync routes them to the right parser
+    Use ``--background`` to enqueue and return immediately.
     """
-    from rtfm.config import find_rtfm_root, load_config
+    from rtfm.config import find_rtfm_root
     from rtfm.core.handlers import SCAN_CHARS_PER_PAGE
-    from rtfm.core.sniff import FORMAT_TO_EXTENSION
+    from rtfm.core.queue import Queue, P_USER
+    from rtfm.cli_worker import ensure_worker_running
 
     rtfm_root = find_rtfm_root()
     if rtfm_root is None:
@@ -872,24 +971,7 @@ def cmd_doctor(args):
     rtfm_dir = rtfm_root / ".rtfm"
     db_path = rtfm_dir / "library.db"
 
-    # Never run two PDF scanners in parallel on the same (often DrvFs)
-    # mount — that concurrency is what saturated I/O and swap in the
-    # field. If the worker is actively draining jobs, refuse unless
-    # forced. (A worker that's idle is fine — doctor is read-only and
-    # the worker yields between jobs.)
-    if not getattr(args, "force", False):
-        from rtfm.core.worker import worker_running
-        ws = worker_running(rtfm_dir)
-        if ws is not None and ws.status == "busy":
-            sys.exit(
-                f"doctor: worker is busy (PID {ws.pid}, job "
-                f"{ws.current_job_type}). Running a full PDF scan now would "
-                "fight it for I/O on the same mount and can freeze WSL.\n"
-                "  → wait for the worker to go idle (rtfm worker status),\n"
-                "    or `rtfm worker stop` first,\n"
-                "    or pass --force if you accept the contention."
-            )
-
+    # --- Diagnostic report (read-only) ---
     import sqlite3
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -902,92 +984,77 @@ def cmd_doctor(args):
            WHERE filename LIKE '%.pdf' OR filename LIKE '%.PDF'
            ORDER BY corpus, filename"""
     ).fetchall()
-    print(f"Diagnosing {len(pdfs)} indexed PDFs (reading real text)...\n")
-
-    cats: dict[str, list] = {"ok": [], "scan": [], "unreadable": [],
-                             "wrong-format": [], "missing": []}
-    for b in pdfs:
-        root = roots.get(b["corpus"])
-        if not root:
-            cats["missing"].append((b["corpus"], b["filename"], None))
-            continue
-        info = _classify_pdf(Path(root) / b["filename"])
-        cats[info["category"]].append((b["corpus"], b["filename"], info))
-
-    print("=== Summary ===")
-    print(f"  ok (has text layer) : {len(cats['ok'])}")
-    print(f"  scan (need OCR)     : {len(cats['scan'])}")
-    print(f"  unreadable (corrupt): {len(cats['unreadable'])}")
-    print(f"  wrong-format        : {len(cats['wrong-format'])}")
-    print(f"  missing on disk     : {len(cats['missing'])}")
-
-    if cats["wrong-format"]:
-        print("\n=== Wrong-format (not really PDF — OCR won't help) ===")
-        for corpus, fn, info in cats["wrong-format"][:30]:
-            print(f"  [{corpus:<16}] {info['real_format']:<6} {fn[:55]}")
-
-    if cats["unreadable"]:
-        print("\n=== Unreadable (pdfium can't open — re-acquire source) ===")
-        for corpus, fn, info in cats["unreadable"][:30]:
-            print(f"  [{corpus:<16}] {fn[:60]}")
-
-    if cats["scan"]:
-        print(f"\n=== Scans needing OCR (< {SCAN_CHARS_PER_PAGE} c/p, readable) ===")
-        for corpus, fn, info in sorted(cats["scan"], key=lambda x: x[2]["cpp"])[:40]:
-            print(f"  [{corpus:<16}] {info['cpp']:4.1f}c/p {info['pages']:4}p  {fn[:48]}")
-        if len(cats["scan"]) > 40:
-            print(f"  ... +{len(cats['scan']) - 40} more")
-
-    # --- Actions ---
-    if getattr(args, "fix_extensions", False) and cats["wrong-format"]:
-        print("\n--- Fixing extensions ---")
-        fixed = 0
-        for corpus, fn, info in cats["wrong-format"]:
-            new_ext = FORMAT_TO_EXTENSION.get(info["real_format"])
-            if not new_ext:
+    if pdfs:
+        print(f"Diagnosing {len(pdfs)} indexed PDFs (reading real text)...\n")
+        cats: dict[str, list] = {"ok": [], "scan": [], "unreadable": [],
+                                 "wrong-format": [], "missing": []}
+        for b in pdfs:
+            root = roots.get(b["corpus"])
+            if not root:
+                cats["missing"].append((b["corpus"], b["filename"], None))
                 continue
-            root = roots.get(corpus)
-            src = Path(root) / fn
-            dst = src.with_suffix(new_ext)
-            if dst.exists():
-                print(f"  skip (target exists): {dst.name}")
-                continue
-            try:
-                src.rename(dst)
-                print(f"  {src.name}  →  {dst.name}")
-                fixed += 1
-            except OSError as e:
-                print(f"  ! {src.name}: {e}")
-        print(f"Renamed {fixed} file(s). Run `rtfm sync` to re-ingest them "
-              "through the correct parser.")
+            info = _classify_pdf(Path(root) / b["filename"])
+            cats[info["category"]].append((b["corpus"], b["filename"], info))
 
-    if getattr(args, "enqueue_ocr", False) and cats["scan"]:
-        cfg = load_config(rtfm_root)
-        if not cfg.get("ocr_fallback"):
-            cfg["ocr_fallback"] = True
-            from rtfm.config import save_config
-            save_config(rtfm_root, cfg)
-            print("\n(ocr_fallback enabled in config.json)")
-        from rtfm.core.queue import Queue
-        from rtfm.core.handlers import enqueue_ocr_jobs
-        from rtfm.cli_worker import ensure_worker_running
-        q = Queue(str(db_path))
-        enq = 0
-        try:
-            for corpus, fn, info in cats["scan"]:
-                root = roots.get(corpus)
-                # info["pages"] is the real page count → split into tranches.
-                enq += enqueue_ocr_jobs(q, root, corpus, fn, info.get("pages", 0))
-        finally:
-            q.close()
-        print(f"\nEnqueued {enq} P3 OCR job(s) (page-range tranches).")
-        pid = ensure_worker_running(rtfm_root / ".rtfm")
-        if pid:
-            print(f"Worker draining in background (PID {pid}).")
-    elif not getattr(args, "enqueue_ocr", False):
-        print("\n(Use --enqueue-ocr to queue OCR for the scans, "
-              "--fix-extensions to rename mislabeled files.)")
+        print("=== PDF summary ===")
+        print(f"  ok (has text layer) : {len(cats['ok'])}")
+        print(f"  scan (need OCR)     : {len(cats['scan'])}")
+        print(f"  unreadable (corrupt): {len(cats['unreadable'])}")
+        print(f"  wrong-format        : {len(cats['wrong-format'])}")
+        print(f"  missing on disk     : {len(cats['missing'])}")
+
+        if cats["wrong-format"]:
+            print("\n=== Wrong-format (not really PDF — OCR won't help) ===")
+            for corpus, fn, info in cats["wrong-format"][:30]:
+                print(f"  [{corpus:<16}] {info['real_format']:<6} {fn[:55]}")
+            print("  → rename these manually so a future sync picks the right parser.")
+
+        if cats["unreadable"]:
+            print("\n=== Unreadable (pdfium can't open — re-acquire source) ===")
+            for corpus, fn, info in cats["unreadable"][:30]:
+                print(f"  [{corpus:<16}] {fn[:60]}")
+
+        if cats["scan"]:
+            print(f"\n=== Scans (< {SCAN_CHARS_PER_PAGE} c/p, readable) ===")
+            for corpus, fn, info in sorted(cats["scan"], key=lambda x: x[2]["cpp"])[:40]:
+                print(f"  [{corpus:<16}] {info['cpp']:4.1f}c/p {info['pages']:4}p  {fn[:48]}")
+            if len(cats["scan"]) > 40:
+                print(f"  ... +{len(cats['scan']) - 40} more")
+            print("  → the worker auto-enqueues OCR for these when "
+                  "ocr_fallback=true (`rtfm sync --ocr` to enable).")
     conn.close()
+
+    # --- Trigger a full pass via the queue ---
+    print("\nEnqueuing P0 scan(s) + P0 reconcile...")
+    sources = _resolve_sources(rtfm_root, args)
+    queue = Queue(db_path)
+    try:
+        enqueued: set[int] = set()
+        for src in sources:
+            src_path = Path(src.get("path", ".")).resolve()
+            src_corpus = src.get("corpus", "default")
+            if not src_path.is_dir():
+                continue
+            payload: dict = {"root": str(src_path), "corpus": src_corpus,
+                             "force_remove": False}
+            if src.get("extensions"):
+                payload["extensions"] = src["extensions"]
+            jid = queue.enqueue("scan", payload, priority=P_USER)
+            if jid is not None:
+                enqueued.add(jid)
+        jid = queue.enqueue("reconcile", {}, priority=P_USER)
+        if jid is not None:
+            enqueued.add(jid)
+        print(f"  {len(enqueued)} P0 job(s) queued.")
+
+        ensure_worker_running(rtfm_dir)
+        sys.exit(_watch_jobs(
+            queue, enqueued,
+            background=getattr(args, "background", False),
+            label="doctor",
+        ))
+    finally:
+        queue.close()
 
 
 def cmd_status(args):
@@ -1213,99 +1280,26 @@ def cmd_status(args):
 
 
 def cmd_ocr_worker(args):
-    """Internal background worker for OCR re-indexing.
-
-    Runs incremental sync over every configured source with
-    ocr_fallback=True, while continuously updating
-    ``.rtfm/ocr_state.json`` so the user can watch progress via
-    ``rtfm status``. Designed to be invoked by ``cmd_sync(--ocr)``
-    through ``subprocess.Popen(start_new_session=True)`` — never by
-    the user directly.
+    """Removed in 0.16.x — the OCR pass is now part of the unified
+    worker queue (P0 scan + P3 OCR jobs). Kept as a stub so that any
+    stale invocation prints a clear message instead of crashing.
     """
-    from rtfm.config import find_rtfm_root, load_config
-    from rtfm.core.library import Library
-    from rtfm.core.sync import sync, scan_directory
-    from rtfm.core.ocr_daemon import (
-        OCRState, _now_iso, write_state, clear_state,
+    sys.exit(
+        "ocr-worker has been retired in 0.16.x. Use:\n"
+        "  rtfm sync --ocr      # persists ocr_fallback + re-queues scans\n"
+        "  rtfm worker status   # watch progress"
     )
-
-    rtfm_root = find_rtfm_root()
-    if rtfm_root is None:
-        sys.exit("ocr-worker: no .rtfm/ project root in the cwd chain.")
-    rtfm_dir = rtfm_root / ".rtfm"
-    db_path = rtfm_dir / "library.db"
-
-    cfg = load_config(rtfm_root)
-    sources = cfg.get("sources") or [
-        {"path": str(rtfm_root), "corpus": cfg.get("corpus", "default")}
-    ]
-
-    # Count PDFs across all sources to give the user a meaningful total.
-    total_pdfs = 0
-    for src in sources:
-        src_path = Path(src.get("path", ".")).resolve()
-        try:
-            total_pdfs += len(scan_directory(src_path, extensions={".pdf"}))
-        except Exception:
-            pass
-
-    started = _now_iso()
-    state = OCRState(
-        pid=os.getpid(),
-        status="running",
-        total=total_pdfs,
-        done=0,
-        current_file="",
-        started_at=started,
-        last_update=started,
-    )
-    write_state(rtfm_dir, state)
-
-    try:
-        lib = Library(str(db_path))
-
-        for src in sources:
-            src_path = Path(src.get("path", ".")).resolve()
-            src_corpus = src.get("corpus", "default")
-            ext_set = None
-            if src.get("extensions"):
-                ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
-                           for e in src["extensions"].split(",")}
-
-            def _on_progress(action: str, fp: str, detail: str) -> None:
-                # Only count files that actually went through ingestion.
-                if action in ("add", "update") and fp:
-                    state.done += 1
-                    state.current_file = fp
-                    state.last_update = _now_iso()
-                    write_state(rtfm_dir, state)
-
-            sync(
-                library=lib,
-                root=src_path,
-                corpus=src_corpus,
-                extensions=ext_set,
-                ocr_fallback=True,
-                generate_embeddings=False,
-                on_progress=_on_progress,
-                progress_interval=None,
-            )
-
-        lib.close()
-        state.status = "finished"
-        state.last_update = _now_iso()
-        write_state(rtfm_dir, state)
-        clear_state(rtfm_dir)
-    except Exception as exc:
-        state.status = "crashed"
-        state.error = str(exc)
-        state.last_update = _now_iso()
-        write_state(rtfm_dir, state)
-        raise
 
 
 def _print_health_warnings(result, ocr_already_on: bool = False) -> None:
-    """Surface scan/empty-file warnings after a sync."""
+    """Format scan/empty-file warnings from a legacy ``SyncResult``.
+
+    No longer called by ``cmd_sync`` (sync is queue-driven and the
+    worker's scan/ingest handlers maintain ``seen_scans.json`` on their
+    own), but kept as a pure helper so :mod:`test_sync_health` and any
+    other consumer of the legacy ``sync()`` return value can still
+    format the report identically.
+    """
     if result.suspect_scans:
         print()
         print(f"⚠ {len(result.suspect_scans)} PDF probablement scannés "
@@ -1330,46 +1324,39 @@ def _print_health_warnings(result, ocr_already_on: bool = False) -> None:
             print(f"    ... et {len(result.empty_files) - 10} autre(s)")
 
 
-def _write_seen_scans(rtfm_root, suspects: list[str]) -> None:
-    """Replace .rtfm/seen_scans.json with the current still-suspect set.
+def _resolve_sources(rtfm_root: Path, args) -> list[dict]:
+    """Pick the right ``sources`` list for a sync run.
 
-    Called after a sync so the file reflects only PDFs that are still
-    broken — successfully OCR'd files (now with chunks > 0) drop off
-    the list automatically.
+    Honours an explicit ``--path`` / ``--corpus`` / ``--extensions`` on
+    the CLI; otherwise falls back to ``.rtfm/config.json``.
     """
-    if rtfm_root is None:
-        return
-    seen_file = rtfm_root / ".rtfm" / "seen_scans.json"
-    try:
-        if suspects:
-            seen_file.parent.mkdir(parents=True, exist_ok=True)
-            seen_file.write_text(json.dumps(sorted(set(suspects))))
-        elif seen_file.exists():
-            seen_file.unlink()
-    except Exception:
-        pass  # best-effort
+    from rtfm.config import load_config
+
+    explicit_path = getattr(args, "path", None)
+    explicit_corpus = getattr(args, "corpus", None)
+    explicit_ext = getattr(args, "extensions", None)
+    if explicit_path or explicit_corpus or explicit_ext:
+        return [{
+            "path": str(Path(explicit_path or ".").resolve()),
+            "corpus": explicit_corpus or "default",
+            "extensions": explicit_ext,
+        }]
+
+    cfg = load_config(rtfm_root)
+    sources = cfg.get("sources") or [
+        {"path": str(rtfm_root), "corpus": cfg.get("corpus", "default")}
+    ]
+    return sources
 
 
-def _cmd_sync_ocr_enqueue(args):
-    """Queue-mode ``rtfm sync --ocr`` (0.10.2+).
-
-    Does three things and returns:
-
-    1. Persists ``ocr_fallback: true`` in ``.rtfm/config.json`` so
-       every future P1 ingest that finds a zero-chunk PDF auto-enqueues
-       a P3 OCR job for it. This is the one-shot toggle the user
-       asked for.
-    2. Enqueues a P3 job for every PDF already known to be a scan
-       (from ``.rtfm/seen_scans.json``). They wait their turn behind
-       any P1 / P2 work.
-    3. Auto-spawns the worker daemon at low CPU + idle I/O priority.
-
-    The legacy detached ``ocr-worker`` daemon (with its own state file)
-    is still reachable via ``rtfm sync --inline --ocr`` for now, but
-    will be removed once the queue path covers every case.
+def _enqueue_sync_ocr(args) -> int:
+    """``rtfm sync --ocr`` — persist ``ocr_fallback: true`` in config,
+    enqueue a P0 OCR job for every previously-flagged scan, ensure the
+    worker is up, then watch progress. Replaces the old detached
+    ``ocr-worker`` daemon.
     """
     from rtfm.config import find_rtfm_root, load_config, save_config
-    from rtfm.core.queue import Queue
+    from rtfm.core.queue import Queue, P_USER
     from rtfm.cli_worker import ensure_worker_running
 
     rtfm_root = find_rtfm_root()
@@ -1379,18 +1366,16 @@ def _cmd_sync_ocr_enqueue(args):
     rtfm_dir = rtfm_root / ".rtfm"
     db_path = rtfm_dir / "library.db"
 
-    # 1. Persist the toggle. Idempotent — no-op if already on.
+    # 1. Persist the toggle. Idempotent.
     cfg = load_config(rtfm_root)
     if not cfg.get("ocr_fallback"):
         cfg["ocr_fallback"] = True
         save_config(rtfm_root, cfg)
         print("ocr_fallback: true persisted in .rtfm/config.json.")
-        print("  → from now on, every P1 ingest that finds a zero-chunk "
-              "PDF auto-enqueues a P3 OCR job for it.")
     else:
         print("ocr_fallback already enabled — re-queuing known scans.")
 
-    # 2. Re-enqueue every scan we already know about.
+    # 2. Re-enqueue every PDF flagged as a scan.
     seen_path = rtfm_dir / "seen_scans.json"
     known: list[str] = []
     if seen_path.exists():
@@ -1401,13 +1386,9 @@ def _cmd_sync_ocr_enqueue(args):
 
     if not known:
         print("\nNo previously-flagged scans in .rtfm/seen_scans.json.")
-        print("Run `rtfm sync` first — P1 will flag scans as it sees them, "
-              "and they'll be auto-OCR'd in the background.")
-        return
+        print("Run `rtfm sync` first — P1 will flag scans as it sees them.")
+        return 0
 
-    # We need to know which (root, corpus) each known scan belongs to.
-    # ``seen_scans.json`` only stores relative paths, so we map them
-    # back through the configured sources.
     sources = cfg.get("sources") or [
         {"path": str(rtfm_root), "corpus": cfg.get("corpus", "default")}
     ]
@@ -1418,462 +1399,162 @@ def _cmd_sync_ocr_enqueue(args):
     ]
 
     queue = Queue(db_path)
-    enqueued = unmatched = 0
+    enqueued_ids: set[int] = set()
+    unmatched = 0
     try:
         for rel in known:
-            # ``rel`` may be ``"<src_path_name>/sub/foo.pdf"`` or just
-            # ``"sub/foo.pdf"`` depending on which sync wrote it.
-            # Try each source root by prefix-match on the absolute path.
             matched = False
             for root, corpus in sources_resolved:
                 candidate = root / rel
                 if candidate.is_file():
                     rel_to_root = str(candidate.relative_to(root))
-                    if queue.enqueue("ocr", {
-                        "root": str(root), "corpus": corpus,
-                        "filepath": rel_to_root,
-                    }) is not None:
-                        enqueued += 1
+                    jid = queue.enqueue(
+                        "ocr",
+                        {"root": str(root), "corpus": corpus,
+                         "filepath": rel_to_root},
+                        priority=P_USER,
+                    )
+                    if jid is not None:
+                        enqueued_ids.add(jid)
                     matched = True
                     break
             if not matched:
                 unmatched += 1
+
+        print(f"\nQueued {len(enqueued_ids)} P0 OCR job(s)"
+              + (f", {unmatched} unmatched (file gone?)" if unmatched else "")
+              + ".")
+        if not enqueued_ids and not getattr(args, "background", False):
+            return 0
+
+        ensure_worker_running(rtfm_dir)
+        return _watch_jobs(
+            queue, enqueued_ids,
+            background=getattr(args, "background", False),
+            label="ocr",
+        )
     finally:
         queue.close()
-
-    print(f"\nQueued {enqueued} P3 OCR job(s)"
-          + (f", {unmatched} unmatched (file gone?)" if unmatched else "")
-          + ".")
-    pid = ensure_worker_running(rtfm_dir)
-    if pid:
-        print(f"Worker draining in background (PID {pid}). "
-              "Track: `rtfm queue stats` / `rtfm worker status`.")
-        print("Note: P3 OCR runs only when no P1 / P2 work is pending — "
-              "each PDF takes minutes (marker subprocess).")
-    else:
-        print("Worker already running — drain in progress.")
-
-
-def _cmd_sync_enqueue(args):
-    """Queue-mode sync (0.10.4+).
-
-    For every configured source:
-
-      1. Walk the filesystem and compute a *real* MD5-based diff
-         (``compute_diff`` — not the size+mtime quick_diff). On a
-         60-source corpus this is the dominant cost of ``rtfm sync``,
-         but it is what makes the queue avoid two failure modes that
-         silently waste work:
-           - ``same-corpus same-hash``: ``quick_diff`` flagged these
-             as ``modified`` on NTFS-via-WSL whenever the mtime moved
-             without the content moving, then the worker re-ingested
-             for nothing (~4% of the queue in measurements).
-           - ``cross-corpus same-hash``: a file that already exists
-             in another corpus with the same MD5 must be **moved**
-             via :meth:`Library.move_file`, not re-ingested — that
-             preserves chunks + embeddings + tags. Quick-diff missed
-             this entirely (~10% of the queue).
-      2. Apply cross-corpus moves **inline**, before any enqueue, so
-         the work survives immediately even if the worker crashes
-         before draining anything.
-      3. Enqueue one P1 ingest job per genuinely new/modified file.
-      4. Auto-spawn the worker daemon if none is running.
-
-    Removed files (in DB but no longer on disk) are still not handled
-    in queue mode and remain a follow-up.
-    """
-    from rtfm.config import find_rtfm_root, load_config
-    from rtfm.core.queue import Queue
-    from rtfm.core.sync import compute_diff, _path_to_slug
-    from rtfm.cli_worker import ensure_worker_running
-
-    rtfm_root = find_rtfm_root()
-    if rtfm_root is None:
-        sys.exit("rtfm sync: no .rtfm/ project root in the cwd chain. "
-                 "Run `rtfm init` first, or use `rtfm sync --inline <path>`.")
-    rtfm_dir = rtfm_root / ".rtfm"
-    db_path = rtfm_dir / "library.db"
-
-    cfg = load_config(rtfm_root)
-    sources = cfg.get("sources") or [
-        {"path": str(rtfm_root), "corpus": cfg.get("corpus", "default")}
-    ]
-
-    queue = Queue(db_path)
-    total_enqueued = 0
-    total_deduped = 0
-    total_cross_moved = 0
-    total_cross_move_errors = 0
-    try:
-        from rtfm.core.library import Library
-        from rtfm.core.sync import scan_directory
-        lib = Library(str(db_path))
-        try:
-            # Cross-corpus moves consult ``indexed_files`` across every
-            # corpus, so we load it once and pass it down — no
-            # per-source N+1 query.
-            indexed_global = lib.list_indexed_files()
-
-            for src in sources:
-                src_path = Path(src.get("path", ".")).resolve()
-                src_corpus = src.get("corpus", cfg.get("corpus", "default"))
-                if not src_path.is_dir():
-                    print(f"  ! [{src_corpus}] {src_path} (path missing — skipped)")
-                    continue
-                ext_set = None
-                if src.get("extensions"):
-                    ext_set = {
-                        e.strip() if e.strip().startswith(".") else f".{e.strip()}"
-                        for e in src["extensions"].split(",")
-                    }
-                files_on_disk = scan_directory(src_path, ext_set)
-                indexed = lib.list_indexed_files(corpus=src_corpus)
-                # Hash-based diff (slower than quick_diff, but the only
-                # way to detect cross-corpus moves and skip mtime FPs).
-                # Remember the sync root so MCP path resolution still
-                # works on the new corpus.
-                lib.set_sync_root(src_corpus, str(src_path))
-                diff = compute_diff(
-                    files_on_disk, indexed, src_path,
-                    indexed_global=indexed_global,
-                    current_corpus=src_corpus,
-                )
-
-                # 1. Apply cross-corpus moves **inline** — preserves
-                #    chunks, embeddings, tags. Done before any enqueue
-                #    so a worker crash mid-flight can't undo it.
-                moved = 0
-                for old_rel, old_corpus, new_path in diff.cross_moved:
-                    try:
-                        new_rel = str(new_path.relative_to(src_path))
-                    except ValueError:
-                        new_rel = str(new_path)
-                    try:
-                        new_slug = _path_to_slug(new_rel, src_corpus)
-                        if lib.move_file(old_rel, new_rel, new_slug,
-                                         new_corpus=src_corpus):
-                            moved += 1
-                    except Exception as exc:
-                        total_cross_move_errors += 1
-                        print(f"    ! cross-move [{old_corpus}]{old_rel} "
-                              f"-> [{src_corpus}]{new_rel}: {exc}")
-                total_cross_moved += moved
-
-                # 2. Enqueue P1 for what is genuinely new/modified.
-                payloads = []
-                for fpath in diff.added + diff.modified:
-                    try:
-                        rel = str(fpath.relative_to(src_path))
-                    except ValueError:
-                        rel = str(fpath)
-                    payloads.append({
-                        "root": str(src_path),
-                        "corpus": src_corpus,
-                        "filepath": rel,
-                    })
-                if not payloads and not moved:
-                    print(f"  [{src_corpus}] {src_path.name}: up to date "
-                          f"({diff.unchanged} unchanged)")
-                    continue
-                if payloads:
-                    # Force-commit the Library connection so it does
-                    # not hold an implicit transaction when the Queue
-                    # tries to ``BEGIN IMMEDIATE`` on its own
-                    # connection. Two connections to the same SQLite
-                    # DB from the same process otherwise see each
-                    # other as locked even in WAL mode.
-                    try:
-                        lib._get_conn().commit()
-                    except Exception:
-                        pass
-                    inserted, deduped = queue.enqueue_many("ingest", payloads)
-                    total_enqueued += inserted
-                    total_deduped += deduped
-                else:
-                    inserted = deduped = 0
-                msg = f"  [{src_corpus}] {src_path.name}:"
-                parts = []
-                if inserted:
-                    parts.append(f"+{inserted} queued")
-                if deduped:
-                    parts.append(f"{deduped} already pending")
-                if moved:
-                    parts.append(f"{moved} moved")
-                if diff.unchanged:
-                    parts.append(f"{diff.unchanged} unchanged")
-                print(msg + " " + ", ".join(parts))
-        finally:
-            lib.close()
-    finally:
-        queue.close()
-
-    print()
-    summary = [f"{total_enqueued} job(s) queued"]
-    if total_deduped:
-        summary.append(f"{total_deduped} dedup'd")
-    if total_cross_moved:
-        summary.append(f"{total_cross_moved} cross-corpus moved in place "
-                       "(embeddings preserved)")
-    if total_cross_move_errors:
-        summary.append(f"{total_cross_move_errors} move error(s)")
-    print("Total: " + ", ".join(summary) + ".")
-
-    if total_enqueued > 0:
-        pid = ensure_worker_running(rtfm_dir)
-        if pid:
-            print(f"Worker draining queue in background (PID {pid}). "
-                  "Track: `rtfm worker status` / `rtfm queue stats`.")
-        else:
-            print("Worker already running — drain in progress.")
-    else:
-        print("Nothing to do.")
 
 
 def cmd_sync(args):
     """Sync files into the library.
 
-    Default mode (0.10.0+): scan configured sources, enqueue P1 ingest
-    jobs for new/modified files, auto-spawn the worker daemon if needed,
-    return immediately. Progress is observable via ``rtfm queue stats``
-    and ``rtfm worker status``.
-
-    Legacy mode (--inline): run the full sync in-process, blocking
-    until done. Useful for CI, tests, and one-shot scripted runs.
+    Enqueues a P0 scan job for every configured source (or a P0 ingest
+    job per file under ``--files``), ensures the worker daemon is alive,
+    then polls queue stats until the work has drained. Use
+    ``--background`` to return as soon as the jobs are enqueued.
     """
-    from rtfm.core.sync import sync
-    from rtfm.config import find_rtfm_root, load_config, save_config
+    from rtfm.config import find_rtfm_root
+    from rtfm.core.queue import Queue, P_USER
+    from rtfm.cli_worker import ensure_worker_running
 
-    # New default: queue-based sync, unless --inline / --files / explicit
-    # path / --no-embeddings forces the legacy path. --no-embeddings is
-    # a script signal (CI, tests) that the caller wants to block until
-    # the work is done — the queue mode would return immediately and
-    # break those flows.
-    # --ocr now goes through the unified worker too: it persists
-    # ``ocr_fallback: true`` in config (so future P1 ingests auto-
-    # detect scans and enqueue P3), enqueues a P3 job for every PDF
-    # already known to be a scan, and exits. Legacy detached
-    # ocr-worker daemon is still reachable via --inline --ocr.
-    use_queue_ocr = (
-        getattr(args, "ocr", False)
-        and not getattr(args, "inline", False)
-    )
-    if use_queue_ocr:
-        return _cmd_sync_ocr_enqueue(args)
-
-    use_queue = (
-        not getattr(args, "inline", False)
-        and not getattr(args, "ocr", False)
-        and not getattr(args, "files", None)
-        and not getattr(args, "path", None)
-        and not getattr(args, "dry_run", False)
-        and not getattr(args, "force", False)
-        and not getattr(args, "no_embeddings", False)
-    )
-    if use_queue:
-        return _cmd_sync_enqueue(args)
-
-    lib = _get_lib(args)
-
-    symbols = {"add": "+", "update": "~", "remove": "-", "error": "!",
-               "embed": "*", "skip": ".", "progress": ">"}
-
-    def _progress(action: str, filepath: str, detail: str) -> None:
-        sym = symbols.get(action, "?")
-        if filepath:
-            print(f"  {sym} {filepath}  ({detail})")
-        else:
-            print(f"  {sym} {detail}")
-
-    # --ocr flips the persistent ocr_fallback flag in .rtfm/config.json
-    # and runs the OCR pass in a detached background daemon (otherwise
-    # a multi-hour OCR run dies with the terminal / Claude Code hook).
-    # Returns immediately to the user with the daemon's PID.
+    # --ocr takes its own dedicated path (persist flag + re-queue scans).
     if getattr(args, "ocr", False):
-        from rtfm.core.ocr_daemon import (
-            daemon_running, format_progress,
-        )
-        rtfm_root = find_rtfm_root()
-        if rtfm_root is None:
-            print("rtfm sync --ocr requires a .rtfm/ project root to "
-                  "persist state. Run `rtfm init` first or `cd` into "
-                  "an indexed project.")
-            sys.exit(1)
+        rc = _enqueue_sync_ocr(args)
+        sys.exit(rc)
 
-        # 1. Refuse to step on a daemon that is already running.
-        live = daemon_running(rtfm_root / ".rtfm")
-        if live is not None:
-            print(format_progress(live))
-            print("\nAn OCR daemon is already running. Wait for it to "
-                  "finish, or kill it manually before relaunching:")
-            print(f"  kill {live.pid}")
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("rtfm sync: no .rtfm/ project root in the cwd chain. "
+                 "Run `rtfm init` first.")
+    rtfm_dir = rtfm_root / ".rtfm"
+    db_path = rtfm_dir / "library.db"
+
+    dry_run = bool(getattr(args, "dry_run", False))
+    background = bool(getattr(args, "background", False))
+    force_remove = bool(getattr(args, "force_remove", False))
+    files = getattr(args, "files", None) or None
+
+    # --files: targeted ingest of specific paths, no scan.
+    if files:
+        sources = _resolve_sources(rtfm_root, args)
+        # Pick the single source to anchor the relative paths.
+        src = sources[0]
+        src_path = Path(src["path"]).resolve()
+        src_corpus = src.get("corpus", "default")
+
+        payloads = []
+        for fp in files:
+            fpath = Path(fp).resolve()
+            try:
+                rel = str(fpath.relative_to(src_path))
+            except ValueError:
+                rel = str(fpath)
+            payloads.append({
+                "root": str(src_path), "corpus": src_corpus, "filepath": rel,
+            })
+
+        if dry_run:
+            print(f"[dry-run] would enqueue {len(payloads)} P0 ingest job(s):")
+            for p in payloads:
+                print(f"  [{p['corpus']}] {p['filepath']}")
             return
 
-        # 2. Persist the ocr_fallback flag so future syncs (manual or
-        #    via the auto-sync hook) auto-OCR new scans.
-        cfg = load_config(rtfm_root)
-        already_on = cfg.get("ocr_fallback", False)
-        cfg["ocr_fallback"] = True
-        save_config(rtfm_root, cfg)
-        if already_on:
-            print("OCR fallback already enabled — relaunching OCR pass.")
-        else:
-            print("OCR fallback enabled (persisted to .rtfm/config.json).")
-            print("Future syncs will auto-OCR scanned PDFs.")
-
-        # 3. Invalidate the file_hash of every known scan so the worker's
-        #    incremental sync sees them as modified and re-ingests them.
-        #    Resumable: files that were OCR'd in a previous run already
-        #    have a real hash and won't be touched a second time.
-        scans_file = rtfm_root / ".rtfm" / "seen_scans.json"
-        if scans_file.exists():
-            try:
-                scans = json.loads(scans_file.read_text())
-                if scans:
-                    conn = lib._get_conn()
-                    placeholders = ",".join("?" * len(scans))
-                    conn.execute(
-                        f"UPDATE indexed_files SET file_hash = '' "
-                        f"WHERE filepath IN ({placeholders})",
-                        list(scans),
-                    )
-                    conn.commit()
-            except Exception as exc:
-                print(f"warning: could not invalidate scan hashes: {exc}",
-                      file=sys.stderr)
-
-        # 4. Close the library handle BEFORE forking — the child opens
-        #    its own SQLite connection, and SQLite does not enjoy a
-        #    shared FD across a process boundary.
-        lib.close()
-
-        # 5. Fork the detached worker and return.
-        import subprocess
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "rtfm.cli", "ocr-worker"],
-            cwd=str(rtfm_root),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,  # immune to parent SIGHUP / hook timeout
-        )
-        print(f"\nOCR daemon started in background (PID {proc.pid}).")
-        print("Track progress: `rtfm status` or `/rtfm.status`.")
+        queue = Queue(db_path)
+        try:
+            enqueued_ids: set[int] = set()
+            for p in payloads:
+                jid = queue.enqueue("ingest", p, priority=P_USER)
+                if jid is not None:
+                    enqueued_ids.add(jid)
+            print(f"Queued {len(enqueued_ids)} P0 ingest job(s).")
+            if not enqueued_ids and not background:
+                return
+            ensure_worker_running(rtfm_dir)
+            sys.exit(_watch_jobs(
+                queue, enqueued_ids,
+                background=background, label="ingest",
+            ))
+        finally:
+            queue.close()
         return
 
-    # Read persistent flag (if a .rtfm/ project is reachable).
-    ocr_fallback = False
-    rtfm_root = find_rtfm_root()
-    if rtfm_root:
-        ocr_fallback = load_config(rtfm_root).get("ocr_fallback", False)
+    # Default: one P0 scan job per configured source.
+    sources = _resolve_sources(rtfm_root, args)
+    scan_payloads: list[dict] = []
+    for src in sources:
+        src_path = Path(src.get("path", ".")).resolve()
+        src_corpus = src.get("corpus", "default")
+        if not src_path.is_dir():
+            print(f"  ! [{src_corpus}] {src_path} (path missing — skipped)")
+            continue
+        payload: dict = {
+            "root": str(src_path),
+            "corpus": src_corpus,
+            "force_remove": force_remove,
+        }
+        if src.get("extensions"):
+            payload["extensions"] = src["extensions"]
+        scan_payloads.append(payload)
 
-    # An explicit --ocr always wins for the current run — even when
-    # we couldn't locate a .rtfm/ project to persist it into. That makes
-    # `rtfm sync --ocr <path>` work from any directory.
-    if getattr(args, "ocr", False):
-        ocr_fallback = True
+    if not scan_payloads:
+        print("rtfm sync: nothing to do (no valid source).")
+        return
 
-    # Default progress heartbeat: 10 min during OCR runs, otherwise off.
-    progress_interval = args.progress_every
-    if progress_interval is None and ocr_fallback:
-        progress_interval = 600.0
+    if dry_run:
+        print(f"[dry-run] would enqueue {len(scan_payloads)} P0 scan job(s):")
+        for p in scan_payloads:
+            ext = f"  ext={p['extensions']}" if p.get("extensions") else ""
+            print(f"  [{p['corpus']}] {p['root']}{ext}")
+        return
 
-    # Accumulator for still-suspect scans across all sources, written
-    # back to .rtfm/seen_scans.json at the end so successful OCRs drop
-    # off the list automatically.
-    all_suspects: list[str] = []
-
-    # Detect if user provided explicit path or corpus
-    explicit_mode = args.path is not None or args.corpus is not None
-
-    if not explicit_mode:
-        # Config mode: sync all registered sources
-        root = find_rtfm_root()
-        if root:
-            config = load_config(root)
-            sources = config.get("sources", [])
-            if sources:
-                for src in sources:
-                    src_path = Path(src["path"]).resolve()
-                    src_corpus = src.get("corpus", "default")
-                    src_ext = None
-                    if src.get("extensions"):
-                        src_ext = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
-                                   for e in src["extensions"].split(",")}
-
-                    print(f"Syncing [{src_corpus}] {src_path} ...")
-                    result = sync(
-                        library=lib,
-                        root=src_path,
-                        corpus=src_corpus,
-                        extensions=src_ext,
-                        dry_run=args.dry_run,
-                        generate_embeddings=not args.no_embeddings,
-                        on_progress=_progress,
-                        force=args.force,
-                        force_remove=getattr(args, "force_remove", False),
-                        ocr_fallback=ocr_fallback,
-                        progress_interval=progress_interval,
-                    )
-
-                    prefix = "[dry-run] " if args.dry_run else ""
-                    print(f"{prefix}  Added: {result.added}  Modified: {result.modified}  "
-                          f"Removed: {result.removed}  Unchanged: {result.unchanged}")
-                    if result.errors:
-                        for e in result.errors:
-                            print(f"  ! {e}")
-                    _print_health_warnings(result, ocr_already_on=ocr_fallback)
-                    all_suspects.extend(result.suspect_scans)
-                    print()
-
-                _write_seen_scans(rtfm_root, all_suspects)
-                lib.close()
-                return
-
-    # Explicit mode (or no config found): original behavior
-    root = Path(args.path or ".").resolve()
-    corpus = args.corpus or "default"
-
-    extensions = None
-    if args.extensions:
-        extensions = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
-                      for e in args.extensions.split(",")}
-
-    files_list = None
-    if args.files:
-        files_list = args.files
-
-    if args.dry_run:
-        print(f"Dry run — scanning {root} ...")
-
-    result = sync(
-        library=lib,
-        root=root,
-        corpus=corpus,
-        extensions=extensions,
-        dry_run=args.dry_run,
-        generate_embeddings=not args.no_embeddings,
-        files=files_list,
-        on_progress=_progress,
-        force=args.force,
-        force_remove=getattr(args, "force_remove", False),
-        ocr_fallback=ocr_fallback,
-        progress_interval=progress_interval,
-    )
-
-    prefix = "[dry-run] " if args.dry_run else ""
-    print(f"{prefix}Added:     {result.added}")
-    print(f"{prefix}Modified:  {result.modified}")
-    print(f"{prefix}Removed:   {result.removed}")
-    print(f"{prefix}Unchanged: {result.unchanged}")
-    if result.errors:
-        print(f"Errors: {len(result.errors)}")
-        for e in result.errors:
-            print(f"  - {e}")
-    _print_health_warnings(result, ocr_already_on=ocr_fallback)
-    all_suspects.extend(result.suspect_scans)
-    _write_seen_scans(rtfm_root, all_suspects)
-
-    lib.close()
+    queue = Queue(db_path)
+    try:
+        enqueued_ids = set()
+        for p in scan_payloads:
+            jid = queue.enqueue("scan", p, priority=P_USER)
+            if jid is not None:
+                enqueued_ids.add(jid)
+        print(f"Queued {len(enqueued_ids)} P0 scan job(s) "
+              f"({len(scan_payloads) - len(enqueued_ids)} already pending).")
+        ensure_worker_running(rtfm_dir)
+        sys.exit(_watch_jobs(
+            queue, enqueued_ids,
+            background=background, label="sync",
+        ))
+    finally:
+        queue.close()
 
 
 def cmd_add(args):
@@ -2043,8 +1724,14 @@ def cmd_memory(args):
 
     Defaults to a global DB at ~/.rtfm/memory.db so every project's memory
     ends up in the same searchable cross-project index.
+
+    NOTE: this command still calls :func:`rtfm.core.sync.sync` directly
+    because the global memory DB has no ``.rtfm/`` project root and
+    therefore no worker daemon to drain a queue. The queue-based path
+    used by every other CLI command would have nowhere to enqueue to.
     """
-    from rtfm.core.sync import sync
+    from rtfm.core import sync as _sync_module
+    sync = _sync_module.sync
 
     if args.install_hook:
         from rtfm.plugin.hooks import install_memory_hook
@@ -2370,33 +2057,34 @@ def main():
     p_sync.add_argument("path", nargs="?", default=None, help="Directory to sync (auto: all sources from config)")
     p_sync.add_argument("--corpus", "-c", default=None, help="Corpus name (auto: from config)")
     p_sync.add_argument("--extensions", "-e", help="Comma-separated extensions (e.g. md,py,pdf)")
-    p_sync.add_argument("--dry-run", action="store_true", help="Show what would change")
-    p_sync.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
-    p_sync.add_argument("--force", action="store_true", help="Re-index all files (ignore hash cache)")
+    p_sync.add_argument("--dry-run", action="store_true",
+                        help="Print what would be enqueued, but do not queue anything.")
+    p_sync.add_argument("--no-embeddings", action="store_true",
+                        help=argparse.SUPPRESS)  # kept for back-compat; the worker manages embeds
+    p_sync.add_argument("--force", action="store_true",
+                        help=argparse.SUPPRESS)  # back-compat no-op (the scan handler diffs by hash)
     p_sync.add_argument(
         "--force-remove", action="store_true",
-        help="Override the mass-removal circuit breaker. By default sync "
-             "refuses to delete a large fraction of a corpus in one pass "
-             "(a sign of an incomplete scan); use this for deliberate bulk "
-             "deletes.")
-    p_sync.add_argument("--files", nargs="+", help="Specific files to sync (for git hooks)")
+        help="Override the mass-removal circuit breaker (scan jobs refuse "
+             "to delete a large fraction of a corpus in one pass — sign of "
+             "an incomplete scan). Use for deliberate bulk deletes.")
+    p_sync.add_argument("--files", nargs="+",
+                        help="Specific files to ingest (for git/Claude hooks). "
+                             "Enqueues P0 ingest jobs instead of a scan.")
     p_sync.add_argument(
         "--ocr", action="store_true",
-        help="Enable OCR fallback (marker backend) for scanned PDFs. "
-             "Persists in .rtfm/config.json so future syncs auto-OCR new "
-             "scans. The first run will re-index every PDF (fast for those "
-             "with a text layer, slow OCR only for true scans).",
+        help="Persist ocr_fallback=true in .rtfm/config.json and re-queue "
+             "every previously-flagged scan as a P0 OCR job. The worker "
+             "auto-enqueues OCR for fresh scans on subsequent syncs.",
     )
     p_sync.add_argument(
         "--progress-every", type=float, default=None, metavar="SECONDS",
-        help="Print a progress line every N seconds (default: auto — 600s "
-             "when --ocr is set, off otherwise).",
+        help=argparse.SUPPRESS,  # legacy — kept so old invocations don't break
     )
     p_sync.add_argument(
-        "--inline", action="store_true",
-        help="Run the sync in-process and block until done (legacy 0.9.x "
-             "behaviour). The default is to enqueue per-file ingest jobs "
-             "and let the worker daemon drain them in the background.",
+        "--background", action="store_true",
+        help="Enqueue and return immediately. Default: poll queue stats "
+             "until the work has drained.",
     )
     p_sync.set_defaults(func=cmd_sync)
 
@@ -2453,35 +2141,24 @@ def main():
                      help="Rows to keep when clear-done (default 100).")
     p_q.set_defaults(func=cmd_queue)
 
-    # backfill-pages — fill books.page_count for old PDFs + optionally
-    # enqueue OCR for the ones that are provably scans.
+    # backfill-pages — re-ingest PDFs missing books.page_count.
     p_bp = subparsers.add_parser(
         "backfill-pages",
-        help="Fill page_count for already-indexed PDFs (deterministic "
-             "scan detection); optionally enqueue OCR for scans.",
+        help="Re-ingest indexed PDFs whose page_count is missing (enqueues "
+             "P0 ingest jobs; OCR is auto-chained when ocr_fallback=true).",
     )
-    p_bp.add_argument(
-        "--enqueue-ocr", action="store_true",
-        help="After backfill, enqueue P3 OCR jobs for PDFs that are "
-             "provably scans (chars/page below threshold). Enables "
-             "ocr_fallback in config if needed.",
-    )
+    p_bp.add_argument("--background", action="store_true",
+                      help="Enqueue and return immediately.")
     p_bp.set_defaults(func=cmd_backfill_pages)
 
-    # doctor — full PDF health diagnosis (ok/scan/unreadable/wrong-format)
+    # doctor — diagnostic + full P0 pass (scan + reconcile).
     p_doc = subparsers.add_parser(
         "doctor",
-        help="Diagnose indexed PDFs (scan/corrupt/mislabeled) and optionally "
-             "fix: queue OCR for scans, rename mislabeled files.",
+        help="Report on indexed PDFs (scan/corrupt/mislabeled) and trigger a "
+             "full P0 pass: scan every source + reconcile.",
     )
-    p_doc.add_argument("--enqueue-ocr", action="store_true",
-                       help="Queue P3 OCR for readable scans.")
-    p_doc.add_argument("--fix-extensions", action="store_true",
-                       help="Rename mislabeled files (e.g. .pdf that is an EPUB) "
-                            "to their true extension on disk.")
-    p_doc.add_argument("--force", action="store_true",
-                       help="Run even if the worker is busy (accepts I/O "
-                            "contention on the same mount).")
+    p_doc.add_argument("--background", action="store_true",
+                       help="Enqueue and return immediately.")
     p_doc.set_defaults(func=cmd_doctor)
 
     # reindex — targeted re-ingestion after a parser change.
@@ -2494,6 +2171,8 @@ def main():
     p_re.add_argument("--ext", help="Comma-separated extensions, e.g. csv,tsv,xlsx,sqlite,db")
     p_re.add_argument("--parser", help="Re-ingest files handled by this parser (e.g. csv)")
     p_re.add_argument("--corpus", "-c", help="Limit to this corpus")
+    p_re.add_argument("--background", action="store_true",
+                      help="Enqueue and return immediately.")
     p_re.set_defaults(func=cmd_reindex)
 
     # gc — reconcile the index (purge orphan embeddings, re-queue
@@ -2504,10 +2183,19 @@ def main():
              "chunks missing an embedding.",
     )
     p_gc.add_argument("--vacuum", action="store_true",
-                      help="Run VACUUM after purging to reclaim disk space.")
-    p_gc.add_argument("--force", action="store_true",
-                      help="Run even if the worker is busy.")
+                      help="Also enqueue a VACUUM after reconciliation.")
+    p_gc.add_argument("--background", action="store_true",
+                      help="Enqueue and return immediately.")
     p_gc.set_defaults(func=cmd_gc)
+
+    # vacuum — explicit VACUUM to reclaim space.
+    p_vac = subparsers.add_parser(
+        "vacuum",
+        help="Run VACUUM on the library DB to reclaim free pages.",
+    )
+    p_vac.add_argument("--background", action="store_true",
+                       help="Enqueue and return immediately.")
+    p_vac.set_defaults(func=cmd_vacuum)
 
     # add (register a source)
     p_add = subparsers.add_parser("add", help="Register a source directory")
