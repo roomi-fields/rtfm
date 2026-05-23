@@ -7,6 +7,18 @@ description: >-
 
 # Changelog
 
+## [0.19.0] — 2026-05-23
+
+### Added — worker self-restarts after a version upgrade
+
+A long-running worker keeps the code it imported into memory at startup; a fresh `pip install --force-reinstall` (or `pipx install`) writes new files on disk but the running worker silently ignores them. Bit this project once already — workers from 0.15 era kept handling jobs while 0.17 / 0.18 lived on disk, so the new `handle_scan` never fired and ~1200 PDFs sat unindexed.
+
+Now at every idle tick the worker compares `importlib.metadata.version("rtfm-ai")` against the version it captured at startup. If they diverge, it logs `version changed on disk, exiting for restart` and exits cleanly. The next hook (UserPromptSubmit / PostToolUse) calls `ensure_worker_running`, which spawns a fresh worker with the up-to-date code. Source-checkout developers are unaffected — when either side reports `"unknown"` (no installed metadata) the check is a no-op.
+
+`rtfm check`, the CLI command introduced earlier today, also gains the `ocr_attempted` / `ocr_pending` / `ocr_failed` triplet (and the same `ingest_*` split) so consumers can route differently: `pending` → wait, `failed` → escalate to human, neither → fully done.
+
+Test suite: 566 passed.
+
 ## [0.18.0] — 2026-05-23
 
 ### Changed — every DB write now goes through the worker (no more inline path)

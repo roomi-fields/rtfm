@@ -25,7 +25,6 @@ import json
 import os
 import signal
 import socket
-import sys
 import time
 import traceback
 from dataclasses import dataclass, asdict
@@ -74,6 +73,21 @@ class WorkerState:
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _read_installed_version() -> str:
+    """Return the on-disk version of the ``rtfm-ai`` distribution.
+
+    Each call re-reads the dist-info metadata, so it picks up a version
+    bump done while the process is running (``pipx install --force``,
+    ``pip install --force-reinstall``, …). Returns ``"unknown"`` if the
+    distribution isn't installed (running from a source checkout).
+    """
+    try:
+        import importlib.metadata as _m
+        return _m.version("rtfm-ai")
+    except Exception:
+        return "unknown"
 
 
 def _state_path(rtfm_dir: Path) -> Path:
@@ -172,6 +186,14 @@ class Worker:
         self._log = log or (lambda msg: None)
         self._queue = Queue(db_path)
         self._started_at = _now_iso()
+        # Capture the on-disk package version at startup. When a new
+        # version lands (pipx install, pip install --force, etc.) the
+        # idle tick will see the version on disk diverge from this and
+        # exit cleanly — the next hook/CLI call respawns a fresh worker
+        # with the new code. Without this, a long-running worker keeps
+        # executing the code it loaded into memory at startup and silently
+        # ignores every subsequent install (bit the project once already).
+        self._our_version = _read_installed_version()
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -183,6 +205,16 @@ class Worker:
                   f"scan_interval={self.scan_interval}s")
         try:
             while not self._stop:
+                # Exit cleanly if a new version of the package landed on
+                # disk while we were running — the next hook will respawn
+                # us with the up-to-date code.
+                if self._version_changed():
+                    self._log(
+                        f"version changed on disk "
+                        f"({self._our_version} → {_read_installed_version()}), "
+                        f"exiting for restart"
+                    )
+                    break
                 job = self._queue.dequeue()
                 if job is None:
                     # Idle: fold-in the watcher tick + DB reconciliation.
@@ -311,6 +343,18 @@ class Worker:
         end = time.monotonic() + seconds
         while not self._stop and time.monotonic() < end:
             time.sleep(min(0.5, end - time.monotonic()))
+
+    def _version_changed(self) -> bool:
+        """True iff the on-disk ``rtfm-ai`` version differs from the one
+        we captured at startup. A long-running worker keeps the code it
+        imported into memory at startup; without this check it would
+        silently ignore every subsequent ``pipx install`` until killed.
+        Returns ``False`` when either side is ``unknown`` (running from
+        a source checkout — no metadata to compare)."""
+        current = _read_installed_version()
+        if current == "unknown" or self._our_version == "unknown":
+            return False
+        return current != self._our_version
 
     def _install_signal_handlers(self) -> None:
         def _handler(signum, _frame):

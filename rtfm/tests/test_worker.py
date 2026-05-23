@@ -142,6 +142,38 @@ def test_maybe_reconcile_enqueues_one_reconcile(tmp_path: Path):
     assert rec[0].payload == {}
 
 
+def test_version_changed_detects_upgrade(tmp_path: Path, monkeypatch):
+    """The version-drift check must flag a divergence between the
+    captured startup version and the on-disk one — so a long-running
+    worker exits cleanly after ``pipx install --force`` instead of
+    silently keeping the stale in-memory code.
+    """
+    rtfm_dir = tmp_path / ".rtfm"
+    rtfm_dir.mkdir(parents=True)
+    db = rtfm_dir / "library.db"
+    Library(str(db)).close()
+    from rtfm.core import worker as _wm
+
+    # Pretend disk reports 0.18.0 for the duration of the test.
+    current = {"v": "0.18.0"}
+    monkeypatch.setattr(_wm, "_read_installed_version", lambda: current["v"])
+
+    w = _wm.Worker(rtfm_dir=rtfm_dir, db_path=db, handlers=HANDLERS)
+    # Startup captured 0.18.0; disk still 0.18.0 → no drift.
+    assert w._version_changed() is False
+    # Disk bumps to 0.19.0 → drift.
+    current["v"] = "0.19.0"
+    assert w._version_changed() is True
+    # Source-checkout fallback ('unknown' on either side) disables
+    # the check so a developer running from a working tree isn't
+    # bothered.
+    w._our_version = "unknown"
+    assert w._version_changed() is False
+    current["v"] = "unknown"
+    w._our_version = "0.18.0"
+    assert w._version_changed() is False
+
+
 def test_maybe_scan_throttle_blocks_within_interval(tmp_path: Path):
     """A second call within ``scan_interval`` seconds of the first is a
     no-op — it never even reaches the queue, regardless of dedup."""
