@@ -118,6 +118,83 @@ class TestScanDirectory:
         for f in files:
             assert f.suffix == ".py"
 
+    def test_excludes_rtfm_state_dir(self, tmp_path):
+        """`.rtfm/` must never be scanned — it contains RTFM's own state
+        (library.db, logs, locks). Indexing it creates a self-feeding loop
+        where the index gets re-ingested as chunks on every sync, which
+        once grew some DBs to 8+ GB of pure recursion.
+        """
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('ok')\n")
+        rtfm = tmp_path / ".rtfm"
+        rtfm.mkdir()
+        # Plant fake state files that should NOT be scanned.
+        (rtfm / "library.db").write_bytes(b"SQLite format 3\x00...")
+        (rtfm / "library.db-wal").write_bytes(b"WAL")
+        (rtfm / "config.json").write_text("{}")
+
+        files = scan_directory(tmp_path, extensions={"py", "db", "json"})
+        names = [str(f.relative_to(tmp_path)) for f in files]
+        assert "src/main.py" in names
+        for noisy in (".rtfm/library.db", ".rtfm/config.json",
+                      ".rtfm/library.db-wal"):
+            assert noisy not in names, f"{noisy} leaked into the scan"
+
+    def test_excludes_cache_dir(self, tmp_path):
+        """`.cache/` is generic noise (import caches, build caches) and
+        should never be scanned by default."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('ok')\n")
+        cache = tmp_path / ".cache" / "thing"
+        cache.mkdir(parents=True)
+        (cache / "blob.json").write_text('{"x":1}')
+
+        files = scan_directory(tmp_path, extensions={"py", "json"})
+        names = [str(f.relative_to(tmp_path)) for f in files]
+        assert "src/main.py" in names
+        assert ".cache/thing/blob.json" not in names
+
+    def test_honors_root_gitignore(self, tmp_path):
+        """When a project declares patterns in its `.gitignore`, we treat
+        them as RTFM excludes too — the user has already said "this is
+        ignored artifact", no point re-asking.
+        """
+        try:
+            import pathspec  # noqa: F401
+        except ImportError:
+            import pytest
+            pytest.skip("pathspec not installed")
+
+        (tmp_path / ".gitignore").write_text(
+            "*.log\n"
+            "build/\n"
+            "secret.txt\n"
+        )
+        (tmp_path / "main.py").write_text("ok\n")
+        (tmp_path / "debug.log").write_text("noise\n")
+        (tmp_path / "secret.txt").write_text("shhh\n")
+        (tmp_path / "build").mkdir()
+        (tmp_path / "build" / "output.py").write_text("generated\n")
+
+        files = scan_directory(tmp_path, extensions={"py", "log", "txt"})
+        names = [str(f.relative_to(tmp_path)) for f in files]
+        assert "main.py" in names
+        assert "debug.log" not in names
+        assert "secret.txt" not in names
+        assert "build/output.py" not in names
+
+    def test_gitignore_can_be_disabled(self, tmp_path):
+        """`honor_gitignore=False` lets callers bypass the .gitignore
+        filter when they explicitly want to (e.g., reindex --force)."""
+        (tmp_path / ".gitignore").write_text("*.log\n")
+        (tmp_path / "main.py").write_text("ok\n")
+        (tmp_path / "debug.log").write_text("noise\n")
+
+        files = scan_directory(tmp_path, extensions={"py", "log"},
+                               honor_gitignore=False)
+        names = [str(f.relative_to(tmp_path)) for f in files]
+        assert "debug.log" in names
+
 
 # ── compute_diff ──────────────────────────────────────────────────────────
 

@@ -7,6 +7,18 @@ description: >-
 
 # Changelog
 
+## [0.17.0] — 2026-05-23
+
+### Fixed — stop indexing our own state directory (feedback loop)
+
+Some live DBs ballooned absurdly (RTFM 2.3 GB for 441 books, tradingbot 8.5 GB for 59 books). Forensics: the parser registry was happily ingesting `.rtfm/library.db` itself — every chunk of the index became more rows, which the next sync re-ingested, snowballing. New default excludes block this and other generic noise:
+
+- `.rtfm/` — RTFM's own state dir (library.db, logs, locks). Indexing it is always a bug.
+- `.cache/` — generic cache dirs (import caches, browser caches, build caches): always noise.
+- **Honor root `.gitignore`** — when `pathspec` is installed (now a core dep), `scan_directory()` filters out anything matched by the project's own `.gitignore`. Reuses what the user has already declared as ignored artifacts rather than maintaining a parallel exclude list. Nested `.gitignore` files in subdirs are not walked (root-only) — covers the vast majority of real-world setups while keeping the scan simple. Opt out with `honor_gitignore=False`.
+
+To purge the historical garbage on an already-polluted DB, run once: `rtfm sync --force-remove` (the mass-removal circuit breaker from 0.16 will otherwise block the cleanup since 90%+ of "files" disappear under the new excludes).
+
 ## [0.16.0] — 2026-05-21
 
 ### Fixed — sync no longer wipes a corpus on an incomplete scan (data-loss bug)

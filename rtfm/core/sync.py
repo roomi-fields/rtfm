@@ -68,7 +68,37 @@ DEFAULT_EXCLUDE_DIRS: set[str] = {
     ".tox", "dist", "build", ".egg-info", ".eggs",
     ".mypy_cache", ".pytest_cache", ".ruff_cache",
     "db",
+    # RTFM's own state directory — indexing it creates a feedback loop
+    # where library.db's content gets re-ingested as chunks every sync,
+    # which grew some indexes to 8+ GB of pure recursion.
+    ".rtfm",
+    # Generic cache dirs are noise: import caches, browser caches, build
+    # caches. Always many files, never load-bearing content.
+    ".cache",
 }
+
+
+def _load_gitignore_spec(root: Path):
+    """Return a PathSpec matcher for the root-level .gitignore, or None.
+
+    Honoring .gitignore means the user's already-declared "ignored
+    artifacts" (build outputs, caches, generated files) don't need to be
+    redeclared as RTFM excludes. Nested .gitignore files in subdirs are
+    not walked — root-level only — which covers the vast majority of
+    real-world setups while keeping the scan simple.
+    """
+    gi = root / ".gitignore"
+    if not gi.is_file():
+        return None
+    try:
+        import pathspec  # type: ignore
+    except ImportError:
+        return None
+    try:
+        with open(gi, encoding="utf-8", errors="ignore") as f:
+            return pathspec.PathSpec.from_lines("gitwildmatch", f)
+    except Exception:
+        return None
 
 # ── mass-removal circuit breaker ────────────────────────────────────────────
 # A full sync deletes every indexed file not seen on disk. That is only
@@ -203,21 +233,39 @@ def scan_directory(
     root: Path,
     extensions: set[str] | None = None,
     exclude_dirs: set[str] | None = None,
+    honor_gitignore: bool = True,
 ) -> list[Path]:
-    """Recursively scan *root* and return files matching *extensions*."""
+    """Recursively scan *root* and return files matching *extensions*.
+
+    Filters out anything under :data:`DEFAULT_EXCLUDE_DIRS`, and — when
+    *honor_gitignore* is on and ``pathspec`` is installed — anything matched
+    by the root ``.gitignore``. Honoring .gitignore reuses what the user
+    has already declared as "ignored artifacts" rather than maintaining a
+    parallel exclude list.
+    """
     extensions = extensions or DEFAULT_EXTENSIONS
     exclude_dirs = exclude_dirs or DEFAULT_EXCLUDE_DIRS
 
     # Normalise extensions to lower-case with leading dot
     extensions = {e if e.startswith(".") else f".{e}" for e in extensions}
 
+    gi_spec = _load_gitignore_spec(root) if honor_gitignore else None
+
     files: list[Path] = []
     for item in sorted(root.rglob("*")):
         # Skip excluded directories
         if any(part in exclude_dirs for part in item.parts):
             continue
-        if item.is_file() and item.suffix.lower() in extensions:
-            files.append(item)
+        if not (item.is_file() and item.suffix.lower() in extensions):
+            continue
+        if gi_spec is not None:
+            try:
+                rel = str(item.relative_to(root))
+            except ValueError:
+                rel = str(item)
+            if gi_spec.match_file(rel):
+                continue
+        files.append(item)
     return files
 
 
