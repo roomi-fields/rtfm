@@ -50,6 +50,26 @@ SCAN_INTERVAL_SECONDS = 30.0
 # only ever runs at rest, so a long interval is fine.
 RECONCILE_INTERVAL_SECONDS = 3600.0
 
+# Memory safety. A runaway allocation in a handler (a malformed PDF
+# that breaks pdfium, an embedder batch that explodes, a CSV row with
+# a 1 GB cell) once consumed ~13 GB of RSS and triggered the global
+# OOM-killer, which terminated the worker (and anything else fighting
+# for memory) without a graceful exit. Two layers of defence:
+#
+# 1. ``RLIMIT_AS`` (virtual-address-space cap) so the next allocation
+#    above the limit raises ``MemoryError`` — catchable by the per-job
+#    handler, which then marks the job ``failed`` and moves on. This
+#    converts a kernel SIGKILL into a normal Python exception.
+# 2. RSS polling at every idle tick: above ``WORKER_RSS_EXIT_MB`` the
+#    worker exits cleanly. Catches slow leaks that wouldn't trip a
+#    single-shot allocation guard.
+#
+# Opt out via ``RTFM_WORKER_MEMORY_LIMIT_GB=0`` (or any non-positive
+# value) when using marker-pdf, whose ML models legitimately need 3-8
+# GB of RSS.
+WORKER_MEMORY_LIMIT_GB = 8.0
+WORKER_RSS_EXIT_MB = 5 * 1024
+
 # Status snapshot lives next to the DB so ``rtfm status`` can find it
 # without re-reading config.
 STATE_FILENAME = "worker_state.json"
@@ -88,6 +108,73 @@ def _read_installed_version() -> str:
         return _m.version("rtfm-ai")
     except Exception:
         return "unknown"
+
+
+def _resolve_memory_limit_gb() -> float:
+    """Effective virtual-memory cap in GB for this worker.
+
+    Reads the ``RTFM_WORKER_MEMORY_LIMIT_GB`` environment variable so the
+    cap can be raised (or disabled with ``0``) per project — useful for
+    marker-pdf, whose ML models can need 3-8 GB. Defaults to
+    :data:`WORKER_MEMORY_LIMIT_GB`. Returns ``0`` to mean "no cap".
+    """
+    import os
+    raw = os.environ.get("RTFM_WORKER_MEMORY_LIMIT_GB")
+    if raw is None or raw.strip() == "":
+        return WORKER_MEMORY_LIMIT_GB
+    try:
+        v = float(raw)
+    except ValueError:
+        return WORKER_MEMORY_LIMIT_GB
+    return v if v > 0 else 0.0
+
+
+def _install_memory_limit(limit_gb: float) -> Optional[int]:
+    """Set ``RLIMIT_AS`` so a runaway allocation raises ``MemoryError``
+    instead of triggering the kernel OOM-killer. Returns the cap in
+    bytes that was actually applied, or ``None`` when no cap was set.
+
+    No-ops on platforms without ``resource.RLIMIT_AS`` (Windows), when
+    ``limit_gb <= 0`` (explicit opt-out), or when the existing hard
+    limit is already stricter than what we'd ask for.
+    """
+    if limit_gb <= 0:
+        return None
+    try:
+        import resource
+    except ImportError:
+        return None
+    cap = int(limit_gb * 1024 ** 3)
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    except (ValueError, OSError):
+        return None
+    new_hard = hard
+    if hard != resource.RLIM_INFINITY and hard < cap:
+        cap = hard  # never try to raise a hard limit, only tighten
+    else:
+        new_hard = cap
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (cap, new_hard))
+    except (ValueError, OSError):
+        return None
+    return cap
+
+
+def _read_rss_mb() -> float:
+    """Current process RSS in MB by reading ``/proc/self/status``.
+
+    Returns ``0`` when the file is unavailable (non-Linux). RSS rather
+    than VSZ because RSS reflects resident pages (what actually counts
+    against the system's available memory)."""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        pass
+    return 0.0
 
 
 def _state_path(rtfm_dir: Path) -> Path:
@@ -194,6 +281,11 @@ class Worker:
         # executing the code it loaded into memory at startup and silently
         # ignores every subsequent install (bit the project once already).
         self._our_version = _read_installed_version()
+        # Memory safety. A pathological PDF once ballooned the process to
+        # 13 GB RSS and triggered an OOM-kill. Cap the address space so
+        # the next runaway allocation raises MemoryError instead.
+        self._memory_limit_gb = _resolve_memory_limit_gb()
+        self._memory_cap_bytes = _install_memory_limit(self._memory_limit_gb)
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -213,6 +305,16 @@ class Worker:
                         f"version changed on disk "
                         f"({self._our_version} → {_read_installed_version()}), "
                         f"exiting for restart"
+                    )
+                    break
+                # Exit cleanly if our RSS has crept past the safety
+                # threshold (slow leak that wouldn't trip the per-alloc
+                # cap). The next hook respawns a fresh process.
+                if self._rss_over_threshold():
+                    rss = _read_rss_mb()
+                    self._log(
+                        f"RSS {rss:.0f}M exceeds threshold "
+                        f"{WORKER_RSS_EXIT_MB}M — exiting for restart"
                     )
                     break
                 job = self._queue.dequeue()
@@ -343,6 +445,15 @@ class Worker:
         end = time.monotonic() + seconds
         while not self._stop and time.monotonic() < end:
             time.sleep(min(0.5, end - time.monotonic()))
+
+    def _rss_over_threshold(self) -> bool:
+        """True iff the process RSS has exceeded the safety threshold.
+
+        Returns ``False`` when ``/proc/self/status`` isn't readable (e.g.
+        non-Linux) since we can't make a decision; the per-allocation
+        ``RLIMIT_AS`` cap is the fallback in that case."""
+        rss = _read_rss_mb()
+        return rss > 0 and rss > WORKER_RSS_EXIT_MB
 
     def _version_changed(self) -> bool:
         """True iff the on-disk ``rtfm-ai`` version differs from the one

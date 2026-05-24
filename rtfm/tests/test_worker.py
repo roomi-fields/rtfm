@@ -142,6 +142,41 @@ def test_maybe_reconcile_enqueues_one_reconcile(tmp_path: Path):
     assert rec[0].payload == {}
 
 
+def test_memory_limit_resolver_reads_env(monkeypatch):
+    """RTFM_WORKER_MEMORY_LIMIT_GB overrides the default; an empty or
+    non-positive value falls back / disables the cap."""
+    from rtfm.core import worker as _wm
+    monkeypatch.delenv("RTFM_WORKER_MEMORY_LIMIT_GB", raising=False)
+    assert _wm._resolve_memory_limit_gb() == _wm.WORKER_MEMORY_LIMIT_GB
+    monkeypatch.setenv("RTFM_WORKER_MEMORY_LIMIT_GB", "12")
+    assert _wm._resolve_memory_limit_gb() == 12.0
+    monkeypatch.setenv("RTFM_WORKER_MEMORY_LIMIT_GB", "0")
+    assert _wm._resolve_memory_limit_gb() == 0.0  # opt-out
+    monkeypatch.setenv("RTFM_WORKER_MEMORY_LIMIT_GB", "garbage")
+    assert _wm._resolve_memory_limit_gb() == _wm.WORKER_MEMORY_LIMIT_GB
+
+
+def test_rss_threshold_triggers_clean_exit(tmp_path: Path, monkeypatch):
+    """When RSS climbs past the safety threshold, the worker's check
+    flags it so the main loop exits cleanly (the next hook respawns)."""
+    rtfm_dir = tmp_path / ".rtfm"
+    rtfm_dir.mkdir(parents=True)
+    db = rtfm_dir / "library.db"
+    Library(str(db)).close()
+    from rtfm.core import worker as _wm
+
+    w = _wm.Worker(rtfm_dir=rtfm_dir, db_path=db, handlers=HANDLERS)
+    # Below threshold → no exit.
+    monkeypatch.setattr(_wm, "_read_rss_mb", lambda: 100.0)
+    assert w._rss_over_threshold() is False
+    # Above threshold → exit signal.
+    monkeypatch.setattr(_wm, "_read_rss_mb", lambda: float(_wm.WORKER_RSS_EXIT_MB + 1))
+    assert w._rss_over_threshold() is True
+    # /proc unavailable (returns 0) → no decision, no exit.
+    monkeypatch.setattr(_wm, "_read_rss_mb", lambda: 0.0)
+    assert w._rss_over_threshold() is False
+
+
 def test_version_changed_detects_upgrade(tmp_path: Path, monkeypatch):
     """The version-drift check must flag a divergence between the
     captured startup version and the on-disk one — so a long-running

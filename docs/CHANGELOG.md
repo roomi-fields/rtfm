@@ -7,6 +7,19 @@ description: >-
 
 # Changelog
 
+## [0.20.0] — 2026-05-24
+
+### Added — memory guard prevents OOM-kill of the whole worker
+
+A pathological PDF once made the worker consume ~13 GB of RSS, which triggered the kernel OOM-killer; the worker died without a graceful exit, lost in-flight state, and required manual recovery. Two layers of defence now:
+
+- **`RLIMIT_AS` cap at startup** (default 8 GB, configurable via `RTFM_WORKER_MEMORY_LIMIT_GB`). The next allocation past the cap raises `MemoryError` — catchable by the per-job handler, which marks the job `failed` and moves on. Converts a kernel `SIGKILL` into a normal Python exception.
+- **RSS polling at every idle tick**. Above `WORKER_RSS_EXIT_MB` (5 GB) the worker exits cleanly; the next hook respawns a fresh process. Catches slow leaks that wouldn't trip the per-alloc cap.
+
+Opt out with `RTFM_WORKER_MEMORY_LIMIT_GB=0` when running marker-pdf, whose ML models legitimately need 3-8 GB.
+
+Test suite: 568 passed.
+
 ## [0.19.0] — 2026-05-23
 
 ### Added — worker self-restarts after a version upgrade
