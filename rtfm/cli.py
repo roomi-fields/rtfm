@@ -186,6 +186,31 @@ def cmd_books(args):
     lib.close()
 
 
+def _failure_bucket(error: str | None) -> str:
+    """Categorise a worker-job error message into a short stable bucket.
+
+    Useful for ``rtfm check`` (per-file failure_reason) and ``rtfm
+    failed`` (group + count by bucket), and for the bibliography agent
+    that wants to route on "is this a transient problem (retry) or a
+    file-level problem (escalate to human)?".
+    """
+    if not error:
+        return "unknown"
+    if "PDFium: Data format error" in error:
+        return "pdf-format-invalid"
+    if "FileNotFoundError" in error or "no longer on disk" in error:
+        return "file-vanished"
+    if "UNIQUE constraint failed: chunks.chunk_id" in error:
+        return "duplicate-content"
+    if "MemoryError" in error:
+        return "memory-exceeded"
+    if "pdftext extraction failed" in error:
+        return "pdftext-other"
+    if "tesseract" in error.lower():
+        return "ocr-tesseract-error"
+    return "other"
+
+
 def cmd_check(args):
     """Report the searchability + processing state of one or more books.
 
@@ -295,6 +320,30 @@ def cmd_check(args):
             "WHERE type='embed' AND status='pending'"
         ).fetchone()[0]
 
+        def _last_failure(job_type: str) -> tuple[str, str] | tuple[None, None]:
+            """Return (bucket, error_excerpt) for the most recent failed
+            job of this type touching this file, or (None, None)."""
+            if not b["filename"]:
+                return None, None
+            like = f'%"filepath": "%{b["filename"]}%"%'
+            row = conn.execute(
+                """SELECT error FROM work_queue
+                   WHERE type = ? AND status = 'failed' AND payload LIKE ?
+                   ORDER BY finished_at DESC LIMIT 1""",
+                (job_type, like),
+            ).fetchone()
+            if not row or not row["error"]:
+                return None, None
+            err = row["error"].splitlines()[0][:200]
+            return _failure_bucket(row["error"]), err
+
+        ingest_bucket, ingest_error = (
+            _last_failure("ingest") if ingest_q["failed"] else (None, None)
+        )
+        ocr_bucket, ocr_error = (
+            _last_failure("ocr") if ocr_q["failed"] else (None, None)
+        )
+
         results.append({
             "slug": b["slug"],
             "title": b["title"],
@@ -307,9 +356,13 @@ def cmd_check(args):
             "embeddings_ready": n_chunks > 0 and n_embed >= n_chunks,
             "ingest_pending": ingest_q["pending"] + ingest_q["running"] > 0,
             "ingest_failed": ingest_q["failed"] > 0,
+            "ingest_failure_reason": ingest_bucket,
+            "ingest_failure_error": ingest_error,
             "ocr_attempted": (ocr_q["done"] + ocr_q["failed"]) > 0,
             "ocr_pending": ocr_q["pending"] + ocr_q["running"] > 0,
             "ocr_failed": ocr_q["failed"] > 0,
+            "ocr_failure_reason": ocr_bucket,
+            "ocr_failure_error": ocr_error,
             "embed_pending": (n_chunks - n_embed) > 0 and embed_q_pending > 0,
         })
     conn.close()
@@ -348,6 +401,87 @@ def cmd_check(args):
     not_ready = [r for r in results
                  if not (r["searchable"] and r["embeddings_ready"])]
     sys.exit(1 if not_ready else 0)
+
+
+def cmd_failed(args):
+    """List worker jobs in ``failed`` status with their error reason.
+
+    Designed for the bibliography agent: gives a flat machine-readable
+    list of every file whose ingest / OCR / embed went wrong, with the
+    raw error and a short stable bucket so the agent can route (e.g.
+    ``pdf-format-invalid`` → escalate to human, ``file-vanished`` →
+    drop, ``duplicate-content`` → no-op).
+
+    Filters: ``--type ingest|ocr|embed|…``, ``--corpus <name>``,
+    ``--bucket <bucket>``. Default output is JSON; ``-f text`` prints a
+    grouped human-readable view.
+    """
+    import sqlite3 as _sqlite3
+    db_path = resolve_db(args.db)
+    conn = _sqlite3.connect(db_path)
+    conn.row_factory = _sqlite3.Row
+
+    where = ["status = 'failed'"]
+    params: list = []
+    if getattr(args, "type", None):
+        where.append("type = ?")
+        params.append(args.type)
+    if getattr(args, "corpus", None):
+        where.append("payload LIKE ?")
+        params.append(f'%"corpus": "{args.corpus}"%')
+
+    sql = ("SELECT id, type, payload, error, finished_at FROM work_queue "
+           "WHERE " + " AND ".join(where) +
+           " ORDER BY finished_at DESC LIMIT ?")
+    params.append(getattr(args, "limit", 1000))
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    bucket_filter = getattr(args, "bucket", None)
+    failures: list[dict] = []
+    for r in rows:
+        bucket = _failure_bucket(r["error"])
+        if bucket_filter and bucket != bucket_filter:
+            continue
+        try:
+            payload = json.loads(r["payload"])
+        except Exception:
+            payload = {}
+        first_line = (r["error"] or "").splitlines()[0][:300]
+        failures.append({
+            "id": r["id"],
+            "type": r["type"],
+            "filepath": payload.get("filepath"),
+            "corpus": payload.get("corpus"),
+            "bucket": bucket,
+            "error": first_line,
+            "finished_at": r["finished_at"],
+        })
+
+    if getattr(args, "format", "json") == "text":
+        if not failures:
+            print("no failed jobs")
+        else:
+            by_bucket: dict[str, list[dict]] = {}
+            for f in failures:
+                by_bucket.setdefault(f["bucket"], []).append(f)
+            for bucket, items in sorted(
+                by_bucket.items(), key=lambda kv: -len(kv[1])
+            ):
+                print(f"\n=== {bucket}  ({len(items)} file(s)) ===")
+                for f in items[:50]:
+                    corpus = f"[{f['corpus']}] " if f.get("corpus") else ""
+                    print(f"  {corpus}{f['filepath']}")
+                    print(f"      {f['error']}")
+                if len(items) > 50:
+                    print(f"  … {len(items) - 50} more (use -f json to see all)")
+    else:
+        print(json.dumps(
+            {"total": len(failures), "failures": failures},
+            indent=2, ensure_ascii=False,
+        ))
+
+    sys.exit(1 if failures else 0)
 
 
 def cmd_corpora(args):
@@ -2104,6 +2238,27 @@ def main():
     p_books.add_argument("--corpus", "-c", help="Filter by corpus")
     p_books.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_books.set_defaults(func=cmd_books)
+
+    # failed — list every job in failed status with bucket + error
+    p_failed = subparsers.add_parser(
+        "failed",
+        help="List failed jobs (file + reason + bucket) — for agents",
+        parents=[db_parent],
+    )
+    p_failed.add_argument("--type", choices=["scan", "ingest", "remove",
+                                              "embed", "ocr",
+                                              "reconcile", "vacuum"],
+                          help="Filter by job type")
+    p_failed.add_argument("--corpus", "-c", help="Filter by corpus")
+    p_failed.add_argument("--bucket",
+                          help="Filter by failure category "
+                               "(pdf-format-invalid, file-vanished, "
+                               "duplicate-content, memory-exceeded, …)")
+    p_failed.add_argument("--limit", type=int, default=1000,
+                          help="Cap rows returned (default 1000)")
+    p_failed.add_argument("--format", "-f", choices=["text", "json"],
+                          default="json", help="Default: json")
+    p_failed.set_defaults(func=cmd_failed)
 
     # check — report searchability + processing state of a book
     p_check = subparsers.add_parser(

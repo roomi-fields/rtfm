@@ -7,6 +7,17 @@ description: >-
 
 # Changelog
 
+## [0.21.0] — 2026-05-24
+
+### Added — `rtfm failed` + richer `rtfm check` failure detail
+
+For bibliography-manager agents that need to route on **why** a file isn't searchable:
+
+- **`rtfm failed`** — flat machine-readable list of every job in `failed` status, with `bucket` (short stable category) + first line of the actual error + filepath + corpus. Filters: `--type`, `--corpus`, `--bucket`. Default format JSON; `-f text` groups by bucket for human reading. Exit 0 when nothing's failed, 1 otherwise — `rtfm failed && echo all-clean` works in shell pipelines.
+- **`rtfm check`** now adds `ingest_failure_reason` / `ingest_failure_error` and `ocr_failure_reason` / `ocr_failure_error` to its JSON output. Pulls the most recent failure for that file. Empty (null) when the file isn't in a failed state.
+
+Failure buckets so far: `pdf-format-invalid`, `file-vanished`, `duplicate-content`, `memory-exceeded`, `pdftext-other`, `ocr-tesseract-error`, `other`, `unknown`. New buckets are easy to add (single helper `_failure_bucket` in `rtfm/cli.py`).
+
 ## [0.20.0] — 2026-05-24
 
 ### Added — memory guard prevents OOM-kill of the whole worker
