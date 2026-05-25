@@ -1,13 +1,14 @@
 """CLI commands for the priority-queue worker (0.10.0+).
 
 Three user-facing subcommands:
-  - ``rtfm worker``      → start, stop, or report worker status
+  - ``rtfm worker``      → start, stop, restart-all, or report worker status
   - ``rtfm queue``       → inspect/manage the work queue
   - ``rtfm worker-daemon`` (hidden) → the actual long-running loop,
                                        invoked by ``ensure_worker_running``
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -21,6 +22,47 @@ from rtfm.core.worker import (
     SCAN_INTERVAL_SECONDS,
     pid_alive, read_state, worker_running, clear_state,
 )
+
+
+# ── Cross-project worker registry ───────────────────────────────────────
+# Tracks every ``.rtfm/`` dir that has ever had a worker spawned, so that
+# ``rtfm worker restart-all`` can find them all in one shot (the typical
+# post-``pip install`` operation — without a registry we'd have to walk
+# the filesystem looking for ``.rtfm/`` dirs).
+
+_REGISTRY = Path.home() / ".rtfm" / "workers.json"
+
+
+def _load_registry() -> list[str]:
+    if not _REGISTRY.exists():
+        return []
+    try:
+        data = json.loads(_REGISTRY.read_text(encoding="utf-8"))
+        return list(data.get("projects", []))
+    except Exception:
+        return []
+
+
+def _save_registry(projects: list[str]) -> None:
+    _REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    # Dedup + sort for stable on-disk diff.
+    cleaned = sorted({p for p in projects if p})
+    _REGISTRY.write_text(
+        json.dumps({"projects": cleaned}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _register_project(rtfm_dir: Path) -> None:
+    """Add this ``.rtfm/`` dir to the registry. Idempotent, best-effort."""
+    try:
+        path = str(rtfm_dir.resolve())
+        current = _load_registry()
+        if path not in current:
+            current.append(path)
+            _save_registry(current)
+    except Exception:
+        pass  # registry is best-effort; don't break the spawn
 
 
 # ── Logging helper (matches hook / ocr-worker log format) ────────────────
@@ -64,6 +106,7 @@ def ensure_worker_running(rtfm_dir: Path) -> int | None:
         stderr=subprocess.DEVNULL,
         start_new_session=True,  # immune to parent SIGHUP / hook timeout
     )
+    _register_project(rtfm_dir)
     return proc.pid
 
 
@@ -92,6 +135,7 @@ def _spawn_worker_direct(rtfm_dir: Path,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    _register_project(rtfm_dir)
     return proc.pid
 
 
@@ -132,12 +176,17 @@ def cmd_worker_daemon(args):
 # ── ``rtfm worker [start|stop|status]`` ─────────────────────────────────
 
 def cmd_worker(args):
+    action = getattr(args, "action", "status") or "status"
+
+    # restart-all is project-agnostic — it reads the registry instead of
+    # requiring the user to be inside a specific project root.
+    if action == "restart-all":
+        return _cmd_worker_restart_all()
+
     rtfm_root = find_rtfm_root()
     if rtfm_root is None:
         sys.exit("worker: no .rtfm/ project root in the cwd chain.")
     rtfm_dir = rtfm_root / ".rtfm"
-
-    action = getattr(args, "action", "status") or "status"
 
     if action == "status":
         state = worker_running(rtfm_dir)
@@ -209,7 +258,87 @@ def cmd_worker(args):
             clear_state(rtfm_dir)
         return
 
-    sys.exit(f"worker: unknown action {action!r}. Use start | stop | status.")
+    sys.exit(
+        f"worker: unknown action {action!r}. "
+        "Use start | stop | status | restart-all."
+    )
+
+
+def _cmd_worker_restart_all() -> None:
+    """Restart every registered worker. Called after ``pip install`` so
+    fresh code takes effect immediately, instead of waiting for the
+    next user prompt (which fires the only respawn hook today).
+
+    Reads ``~/.rtfm/workers.json`` for the project list. For each:
+
+    1. SIGTERM the running worker (the new self-restart logic from 0.19
+       would catch the version drift on its next tick anyway, but we
+       speed that up here);
+    2. Wait briefly for graceful shutdown;
+    3. SIGKILL if it's still alive after the grace period;
+    4. Drop the stale state file;
+    5. Spawn a fresh worker.
+
+    Reports per-project: old PID → new PID.
+    """
+    import signal
+
+    projects = _load_registry()
+    if not projects:
+        print("worker restart-all: no registered projects yet "
+              "(run `rtfm worker start` in each project at least once).")
+        return
+
+    print(f"worker restart-all: cycling {len(projects)} project(s)")
+    failures: list[str] = []
+    for path in projects:
+        rtfm_dir = Path(path)
+        label = str(rtfm_dir.parent)
+        if not rtfm_dir.is_dir():
+            print(f"  [missing]  {label}")
+            failures.append(label)
+            continue
+
+        # Stop the existing worker, if any.
+        old_pid = None
+        state = worker_running(rtfm_dir)
+        if state:
+            old_pid = state.pid
+            try:
+                os.kill(old_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            for _ in range(30):  # up to 3 seconds
+                time.sleep(0.1)
+                if not pid_alive(old_pid):
+                    break
+            if pid_alive(old_pid):
+                try:
+                    os.kill(old_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                time.sleep(0.5)
+            clear_state(rtfm_dir)
+
+        # Fresh start.
+        new_pid = ensure_worker_running(rtfm_dir)
+        if new_pid is None:
+            print(f"  [skip]     {label} — spawn failed")
+            failures.append(label)
+            continue
+        # Give the worker a moment to write its state.
+        for _ in range(20):
+            time.sleep(0.1)
+            if worker_running(rtfm_dir):
+                break
+
+        if old_pid is not None:
+            print(f"  [restart]  {label}  ({old_pid} → {new_pid})")
+        else:
+            print(f"  [start]    {label}  (new PID {new_pid})")
+
+    if failures:
+        sys.exit(1)
 
 
 # ── ``rtfm queue [stats|list|clear-done|retry-failed]`` ─────────────────

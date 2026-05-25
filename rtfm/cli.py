@@ -2437,10 +2437,13 @@ def main():
              "(priority queue + idle scan)",
     )
     p_w.add_argument(
-        "action", nargs="?", choices=["start", "stop", "status"],
+        "action", nargs="?",
+        choices=["start", "stop", "status", "restart-all"],
         default="status",
         help="start: spawn a detached worker. stop: SIGTERM the worker. "
-             "status (default): report on the running worker.",
+             "status (default): report on the running worker. "
+             "restart-all: cycle every registered project's worker — "
+             "use after `pip install` so fresh code takes effect.",
     )
     p_w.add_argument(
         "--scan-interval", type=float, default=None, metavar="SECONDS",

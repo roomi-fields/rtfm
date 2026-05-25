@@ -7,6 +7,22 @@ description: >-
 
 # Changelog
 
+## [0.22.0] — 2026-05-25
+
+### Added — `rtfm worker restart-all` for post-install respawn
+
+Since 0.19 the worker self-exits when a new version lands on disk, but nothing immediately respawns it — until the next user prompt fires `ensure_worker_running` via a hook. If you don't interact with the project for hours, the worker stays dead and the queue stalls. Bit us yesterday: musicology's worker exited at 22:14 on the 0.20 → 0.21 bump and sat idle until 11:00 the next day.
+
+- **New project registry** at `~/.rtfm/workers.json` — every `ensure_worker_running` / `_spawn_worker_direct` adds the project. Persistent across sessions.
+- **New action `rtfm worker restart-all`** — reads the registry, cycles every registered worker (SIGTERM → wait → SIGKILL fallback → drop stale state → respawn). Reports `old PID → new PID` per project. Use this as the standard post-`pip install` / post-`pipx install` step.
+
+After a deploy, the canonical sequence is now:
+
+```sh
+pip install --force-reinstall rtfm-ai==X.Y.Z
+rtfm worker restart-all
+```
+
 ## [0.21.0] — 2026-05-24
 
 ### Added — `rtfm failed` + richer `rtfm check` failure detail
