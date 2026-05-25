@@ -25,6 +25,7 @@ import json
 import os
 import signal
 import socket
+import sys
 import time
 import traceback
 from dataclasses import dataclass, asdict
@@ -89,6 +90,11 @@ class WorkerState:
     last_update: str
     jobs_done: int
     jobs_failed: int
+    # rtfm-ai version this worker imported at startup. Compared to the
+    # current on-disk version by the CLI's lazy-check (and the worker's
+    # own idle-tick check) to decide whether the in-memory code is
+    # stale and the worker should respawn.
+    installed_version: str = "unknown"
 
 
 def _now_iso() -> str:
@@ -159,6 +165,49 @@ def _install_memory_limit(limit_gb: float) -> Optional[int]:
     except (ValueError, OSError):
         return None
     return cap
+
+
+def _spawn_delayed_respawn(rtfm_dir: Path,
+                            log: Callable[[str], None]) -> None:
+    """Fork a small detached process that respawns this project's worker
+    in a few seconds.
+
+    Called from the worker's ``finally`` when it self-exits (version
+    drift, RSS threshold). The helper:
+
+    1. ``setsid`` away from us, ignores SIGHUP, double-forks so it's
+       owned by ``init``;
+    2. Sleeps long enough that the parent worker's flock has actually
+       been released;
+    3. ``ensure_worker_running`` is idempotent: if a hook beat the
+       helper to the punch, the helper exits cleanly.
+
+    This is what makes the worker truly self-managing: when it has to
+    exit for a good reason, it also schedules its own comeback. The
+    queue is paused only for the duration of the delay (a handful of
+    seconds), not until the next user prompt.
+    """
+    import subprocess
+    try:
+        cmd = [
+            sys.executable, "-c",
+            "import time, sys; time.sleep(6);"
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parent.parent.parent)!r});"
+            "from rtfm.cli_worker import ensure_worker_running;"
+            "from pathlib import Path;"
+            f"ensure_worker_running(Path({str(rtfm_dir)!r}))",
+        ]
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        log("scheduled respawn in ~6s")
+    except Exception as exc:
+        log(f"could not schedule respawn: {exc}")
 
 
 def _read_rss_mb() -> float:
@@ -286,6 +335,14 @@ class Worker:
         # the next runaway allocation raises MemoryError instead.
         self._memory_limit_gb = _resolve_memory_limit_gb()
         self._memory_cap_bytes = _install_memory_limit(self._memory_limit_gb)
+        # Set to True when the worker decides to exit on its own
+        # (version drift, RSS threshold) — distinguishes a self-managed
+        # exit from a user-requested SIGTERM. On a self-managed exit we
+        # fork a detached helper that respawns us a few seconds later so
+        # the queue never sits idle waiting for the next hook to fire.
+        # SIGTERM (rtfm worker stop / SIGINT) leaves this False — the
+        # user asked us to stop, so we stay stopped.
+        self._auto_respawn_on_exit = False
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -306,6 +363,7 @@ class Worker:
                         f"({self._our_version} → {_read_installed_version()}), "
                         f"exiting for restart"
                     )
+                    self._auto_respawn_on_exit = True
                     break
                 # Exit cleanly if our RSS has crept past the safety
                 # threshold (slow leak that wouldn't trip the per-alloc
@@ -316,6 +374,7 @@ class Worker:
                         f"RSS {rss:.0f}M exceeds threshold "
                         f"{WORKER_RSS_EXIT_MB}M — exiting for restart"
                     )
+                    self._auto_respawn_on_exit = True
                     break
                 job = self._queue.dequeue()
                 if job is None:
@@ -333,6 +392,11 @@ class Worker:
             self._snapshot("stopping", None)
             self._queue.close()
             clear_state(self.rtfm_dir)
+            # Self-managed exit (version drift / RSS): fork a detached
+            # helper that respawns us in ~5s. SIGTERM / explicit stop
+            # leaves _auto_respawn_on_exit False so we stay stopped.
+            if self._auto_respawn_on_exit:
+                _spawn_delayed_respawn(self.rtfm_dir, self._log)
 
     # ── Internals ───────────────────────────────────────────────────────
 
@@ -438,6 +502,7 @@ class Worker:
             last_update=_now_iso(),
             jobs_done=self._jobs_done,
             jobs_failed=self._jobs_failed,
+            installed_version=self._our_version,
         ))
 
     def _sleep(self, seconds: float) -> None:

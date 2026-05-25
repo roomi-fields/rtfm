@@ -65,6 +65,81 @@ def _register_project(rtfm_dir: Path) -> None:
         pass  # registry is best-effort; don't break the spawn
 
 
+# How often (seconds) the lazy-check CLI hook actually runs. The marker
+# file lives at ~/.rtfm/last-version-check so all CLI commands share
+# the throttle. We don't want every ``rtfm queue stats`` to scan every
+# worker_state.json.
+_LAZY_CHECK_INTERVAL_S = 60.0
+_LAZY_CHECK_MARKER = Path.home() / ".rtfm" / "last-version-check"
+
+
+def _maybe_lazy_restart_stale_workers() -> None:
+    """Throttled check: if any registered worker is running on a
+    different version of ``rtfm-ai`` than the one this CLI just loaded,
+    trigger ``restart-all`` once.
+
+    Called from ``cli.main`` at the start of every command. Best-effort:
+    any error is swallowed (we never block the user's actual command).
+    The throttle marker is updated on every call (success or not) to
+    avoid a thundering herd of restart-all calls when many commands
+    fire in quick succession (e.g. multiple hooks at once).
+    """
+    import importlib.metadata as _m
+    import time as _t
+
+    # Throttle.
+    try:
+        last = _LAZY_CHECK_MARKER.stat().st_mtime
+        if _t.time() - last < _LAZY_CHECK_INTERVAL_S:
+            return
+    except OSError:
+        pass
+    try:
+        _LAZY_CHECK_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        _LAZY_CHECK_MARKER.touch()
+    except OSError:
+        pass  # best-effort
+
+    try:
+        current_version = _m.version("rtfm-ai")
+    except _m.PackageNotFoundError:
+        return  # source checkout: nothing to compare against
+
+    stale: list[str] = []
+    for path in _load_registry():
+        rtfm_dir = Path(path)
+        if not rtfm_dir.is_dir():
+            continue  # project moved/deleted — registry cleanup is a separate concern
+        state = read_state(rtfm_dir)
+        if state is None or not pid_alive(state.pid):
+            # Registered but no live worker → respawn. Covers the
+            # post-SIGKILL / post-crash case, where the user expects
+            # the worker to come back the next time they touch the CLI.
+            stale.append(path)
+            continue
+        worker_v = getattr(state, "installed_version", None) or "unknown"
+        if worker_v == "unknown":
+            continue  # pre-0.22 state file; the worker will self-detect
+        if worker_v != current_version:
+            stale.append(path)
+
+    if not stale:
+        return
+
+    # At least one worker is on a different version. Trigger restart-all
+    # once. We don't print anything — this is meant to be invisible.
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "rtfm.cli", "worker", "restart-all"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
 # ── Logging helper (matches hook / ocr-worker log format) ────────────────
 
 def _log(rtfm_dir: Path, msg: str) -> None:

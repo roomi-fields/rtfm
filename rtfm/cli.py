@@ -2600,6 +2600,19 @@ def main():
         parser.print_help()
         sys.exit(1)
 
+    # Lazy: every CLI invocation does a quick (throttled) check that
+    # every registered worker is running on the same rtfm-ai version as
+    # the one we're loading right now. If any is stale (typically after
+    # ``pip install --force-reinstall``), we silently trigger the
+    # cross-project restart-all so the user never has to remember to
+    # run it manually. Best-effort: any failure is swallowed.
+    if args.command != "worker-daemon":  # the daemon process itself: skip
+        try:
+            from rtfm.cli_worker import _maybe_lazy_restart_stale_workers
+            _maybe_lazy_restart_stale_workers()
+        except Exception:
+            pass
+
     args.func(args)
 
 

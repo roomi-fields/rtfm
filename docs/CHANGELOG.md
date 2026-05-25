@@ -7,6 +7,19 @@ description: >-
 
 # Changelog
 
+## [0.23.0] — 2026-05-25
+
+### Added — worker respawn is now fully autonomous (no manual action)
+
+Up to 0.22 the worker self-exited cleanly on version drift or memory pressure, but the *respawn* still required a hook to fire (next user prompt in Claude Code) or an explicit `rtfm worker restart-all`. If the user installed an upgrade and walked away, the queue could sit idle for hours. Two new layers close the gap, both fully automatic:
+
+- **Fork-helper at clean exit.** When the worker self-exits (version drift / RSS over threshold), it forks a tiny detached process just before exiting. That helper sleeps ~6 s (enough for the worker's lock to be released) and calls `ensure_worker_running`, which spawns a fresh worker with the up-to-date code. SIGTERM (explicit `rtfm worker stop`) leaves the worker stopped — the helper only fires on self-managed exits.
+- **Lazy version check in every CLI command.** At the top of `cli.main()`, throttled to once per minute via a marker file at `~/.rtfm/last-version-check`, we scan every registered worker's `worker_state.json` for its `installed_version` and compare to the version the running CLI just loaded. Any mismatch silently triggers `rtfm worker restart-all` in the background. So the moment you run any `rtfm` command after `pip install`, every project's worker gets refreshed without you doing anything.
+
+`WorkerState` now includes `installed_version` (populated at worker startup) so the CLI can detect drift without spawning anything.
+
+New doc page **`docs/worker-lifecycle.md`** explaining the three respawn layers (fork-helper, lazy CLI check, session hooks), what stays manual (only a hard `kill -9` recovery), and where to look when something feels off. The doc is written for an end-user with no internals knowledge.
+
 ## [0.22.0] — 2026-05-25
 
 ### Added — `rtfm worker restart-all` for post-install respawn
