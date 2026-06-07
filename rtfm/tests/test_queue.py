@@ -259,3 +259,94 @@ def test_migration_from_legacy_3_type_check(tmp_path: Path):
         assert new2 is not None
     finally:
         q.close()
+
+
+# ── Reaper / zombie-detection tests ─────────────────────────────────────
+
+
+def test_reap_no_worker_marks_all_running_pending(queue: Queue):
+    """When no worker is alive, every ``running`` row is a zombie."""
+    j1 = queue.enqueue("ingest", {"f": "a"})
+    j2 = queue.enqueue("ingest", {"f": "b"})
+    queue.dequeue(); queue.dequeue()  # both now 'running'
+
+    # rtfm_dir=None → treat all running as zombies
+    result = queue.reap_zombies(rtfm_dir=None)
+    assert result["requeued"] == 2
+    assert result["failed"] == 0
+    assert queue.stats()["ingest"]["pending"] == 2
+    assert queue.stats()["ingest"].get("running", 0) == 0
+
+
+def test_reap_failed_after_max_attempts(queue: Queue):
+    """A zombie with ``attempts >= max_attempts`` bypasses pending and is
+    marked failed — guards against infinite crash-loops."""
+    queue.enqueue("ingest", {"f": "loops"})
+    # Three crashes: dequeue increments attempts, then we kill the worker
+    # so the row stays running.
+    for _ in range(3):
+        queue.dequeue()
+        # simulate crash mid-job: row stays 'running'; bring it back manually
+        queue._get_conn().execute(
+            "UPDATE work_queue SET status='pending' WHERE id=?",
+            (1,),
+        )
+    queue.dequeue()  # 4th dequeue, attempts now = 4, status='running'
+
+    result = queue.reap_zombies(rtfm_dir=None, max_attempts=3)
+    assert result["failed"] == 1
+    assert queue.stats()["ingest"].get("failed", 0) == 1
+
+
+def test_reap_dedups_running_twins(queue: Queue):
+    """Two ``running`` rows with the same (type, payload) — keep one,
+    drop the rest, so requeuing doesn't violate the dedup index."""
+    queue.enqueue("ingest", {"f": "x"})
+    queue.dequeue()
+    # Force a second running row with identical payload — only possible
+    # by hand-crafting; the dedup index only covers pending rows so this
+    # can occur after a partial crash.
+    queue._get_conn().execute(
+        "INSERT INTO work_queue (type, priority, payload, status, attempts) "
+        "VALUES ('ingest', 30, '{\"f\": \"x\"}', 'running', 1)"
+    )
+    assert queue.stats()["ingest"]["running"] == 2
+
+    result = queue.reap_zombies(rtfm_dir=None)
+    assert result["deduped"] >= 1
+    assert queue.stats()["ingest"]["pending"] == 1
+    assert queue.stats()["ingest"].get("running", 0) == 0
+
+
+def test_reap_preserves_current_worker_job(queue: Queue, tmp_path: Path):
+    """When a worker is alive and is on job X, X must NOT be reaped."""
+    import json, os
+    queue.enqueue("ingest", {"f": "active"})
+    queue.enqueue("ingest", {"f": "zombie"})
+    job_a = queue.dequeue()
+    job_b = queue.dequeue()
+
+    rtfm_dir = tmp_path / ".rtfm"
+    rtfm_dir.mkdir(exist_ok=True)
+    # Write a worker_state.json pointing to job_a; use our own PID as
+    # "alive". The reaper's pid_alive(os.getpid()) is True by definition.
+    state = {
+        "pid": os.getpid(),
+        "host": "test",
+        "status": "busy",
+        "current_job_id": job_a.id,
+        "current_job_type": "ingest",
+        "current_job_payload": {"f": "active"},
+        "started_at": "2026-01-01T00:00:00Z",
+        "last_update": "2026-01-01T00:00:00Z",
+        "jobs_done": 0,
+        "jobs_failed": 0,
+        "installed_version": "test",
+    }
+    (rtfm_dir / "worker_state.json").write_text(json.dumps(state))
+
+    result = queue.reap_zombies(rtfm_dir=rtfm_dir)
+    assert result["requeued"] == 1  # only job_b
+    # job_a still running, job_b back to pending
+    assert queue.stats()["ingest"]["running"] == 1
+    assert queue.stats()["ingest"]["pending"] == 1

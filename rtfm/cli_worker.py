@@ -471,6 +471,42 @@ def cmd_queue(args):
             print(f"queue: moved {n} failed row(s) back to pending.")
             return
 
+        if action == "reap":
+            # List zombies first so we can show what we touched.
+            conn = queue._get_conn()
+            zombies = list(conn.execute(
+                "SELECT id, type, priority, payload, attempts, started_at "
+                "FROM work_queue WHERE status = 'running' "
+                "ORDER BY started_at"
+            ).fetchall())
+            if not zombies:
+                print("queue: nothing to reap (no jobs in 'running' state).")
+                return
+            rtfm_dir = rtfm_root / ".rtfm"
+            result = queue.reap_zombies(rtfm_dir=rtfm_dir)
+            deduped_msg = (
+                f", {result.get('deduped', 0)} duplicates dropped"
+                if result.get("deduped") else ""
+            )
+            print(
+                f"queue: reaped {result['requeued']} job(s) back to pending, "
+                f"{result['failed']} marked failed (retry limit reached)"
+                f"{deduped_msg}."
+            )
+            print()
+            print(f"Details ({len(zombies)} candidate(s) before reap):")
+            for z in zombies:
+                try:
+                    payload = json.loads(z["payload"])
+                except Exception:
+                    payload = {}
+                fp = payload.get("filepath") or payload.get("root") or ""
+                print(
+                    f"  #{z['id']:<6} P{z['priority']} {z['type']:<10} "
+                    f"attempts={z['attempts']} started={z['started_at']} {fp}"
+                )
+            return
+
         sys.exit(f"queue: unknown action {action!r}.")
     finally:
         queue.close()

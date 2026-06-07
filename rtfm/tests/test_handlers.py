@@ -35,10 +35,12 @@ def _make_md(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
 
 
-def test_handlers_dispatch_table_lists_ingest_embed_ocr():
+def test_handlers_dispatch_table_lists_all_job_types():
     """Sanity: the dispatch table the worker reads exposes every
-    job type phases 1-3 ship."""
-    assert set(HANDLERS) == {"ingest", "embed", "ocr"}
+    job type the queue accepts."""
+    assert set(HANDLERS) == {
+        "scan", "remove", "ingest", "reconcile", "vacuum", "embed", "ocr",
+    }
 
 
 def test_handle_ingest_enqueues_followup_embed_jobs(tmp_path: Path):

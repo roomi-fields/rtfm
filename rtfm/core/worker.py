@@ -352,6 +352,19 @@ class Worker:
         self._snapshot("idle", None)
         self._log(f"worker started pid={os.getpid()} "
                   f"scan_interval={self.scan_interval}s")
+        # Reap zombies from a previous worker that died mid-job. Passing
+        # rtfm_dir=None means "no live worker yet" — every running row is
+        # treated as a zombie. The newly-spawned worker has not picked up
+        # anything yet, so this is safe.
+        try:
+            reaped = self._queue.reap_zombies(rtfm_dir=None)
+            if reaped["requeued"] or reaped["failed"]:
+                self._log(
+                    f"reaper (boot): requeued={reaped['requeued']} "
+                    f"failed={reaped['failed']}"
+                )
+        except Exception as exc:
+            self._log(f"reaper (boot) error: {exc}")
         try:
             while not self._stop:
                 # Exit cleanly if a new version of the package landed on

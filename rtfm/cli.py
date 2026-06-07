@@ -26,6 +26,9 @@ def _watch_jobs(
     poll_s: float = 1.0,
     background: bool = False,
     label: str = "",
+    rtfm_dir: Path | None = None,
+    timeout_s: float | None = None,
+    reap_every_s: float = 10.0,
 ) -> int:
     """Block until every pending/running job has reached a terminal
     state, polling ``queue.stats()`` every ``poll_s`` seconds.
@@ -36,13 +39,35 @@ def _watch_jobs(
     user expects ``rtfm sync`` to return only when all of that has
     drained.
 
-    Returns 0 if no failures, 1 if any job ended ``failed``. With
-    ``background=True``, returns 0 immediately.
+    To stay robust when a previous worker died mid-job (which leaves
+    ``running`` rows that no live worker is touching), we call
+    ``queue.reap_zombies(rtfm_dir)`` once before the loop and then every
+    ``reap_every_s`` seconds. The reaper consults the on-disk worker
+    state to decide what counts as a zombie, so a long-running OCR is
+    safe — only jobs without a live worker behind them get requeued.
+
+    ``timeout_s`` (optional) caps the total wait; on expiry the function
+    returns ``2`` and prints a notice (the worker keeps draining in the
+    background).
+
+    Returns 0 if no failures, 1 if any job ended ``failed``,
+    2 on timeout. With ``background=True``, returns 0 immediately.
     """
     if background:
         return 0
     start = time.time()
+    last_reap = 0.0
     try:
+        # One-shot reap before entering the loop: clears anything left
+        # over from a previous crash so the exit condition isn't
+        # poisoned from the start.
+        if rtfm_dir is not None:
+            try:
+                queue.reap_zombies(rtfm_dir=rtfm_dir)
+                last_reap = time.time()
+            except Exception:
+                pass
+
         while True:
             stats = queue.stats()
             pending = sum(s.get("pending", 0) for s in stats.values())
@@ -65,6 +90,21 @@ def _watch_jobs(
             if pending == 0 and running == 0:
                 sys.stderr.write("\n")
                 return 1 if failed else 0
+            if timeout_s is not None and elapsed >= timeout_s:
+                sys.stderr.write(
+                    f"\n(timeout after {int(elapsed)}s — worker keeps "
+                    f"draining in background; pending={pending} "
+                    f"running={running})\n"
+                )
+                return 2
+            # Periodic reap: catches zombies that appeared mid-wait
+            # (worker crashed while we were watching).
+            if rtfm_dir is not None and (time.time() - last_reap) >= reap_every_s:
+                try:
+                    queue.reap_zombies(rtfm_dir=rtfm_dir)
+                except Exception:
+                    pass
+                last_reap = time.time()
             time.sleep(poll_s)
     except KeyboardInterrupt:
         sys.stderr.write("\n(interrupted — worker keeps draining in background)\n")
@@ -1028,6 +1068,7 @@ def cmd_backfill_pages(args):
             queue, set(),
             background=getattr(args, "background", False),
             label="backfill",
+            rtfm_dir=rtfm_dir,
         ))
     finally:
         queue.close()
@@ -1071,6 +1112,7 @@ def cmd_gc(args):
             queue, {jid} if jid else set(),
             background=getattr(args, "background", False),
             label="gc",
+            rtfm_dir=rtfm_dir,
         )
 
         # Report the final outcome from the queue itself.
@@ -1196,6 +1238,7 @@ def cmd_reindex(args):
             queue, set(),
             background=getattr(args, "background", False),
             label="reindex",
+            rtfm_dir=rtfm_dir,
         ))
     finally:
         queue.close()
@@ -1233,6 +1276,7 @@ def cmd_vacuum(args):
             queue, {jid} if jid else set(),
             background=getattr(args, "background", False),
             label="vacuum",
+            rtfm_dir=rtfm_dir,
         )
         if not getattr(args, "background", False):
             after_mb = (db_path.stat().st_size / (1024 * 1024)
@@ -1347,6 +1391,7 @@ def cmd_doctor(args):
             queue, enqueued,
             background=getattr(args, "background", False),
             label="doctor",
+            rtfm_dir=rtfm_dir,
         ))
     finally:
         queue.close()
@@ -1726,6 +1771,7 @@ def _enqueue_sync_ocr(args) -> int:
             queue, enqueued_ids,
             background=getattr(args, "background", False),
             label="ocr",
+            rtfm_dir=rtfm_dir,
         )
     finally:
         queue.close()
@@ -1799,6 +1845,8 @@ def cmd_sync(args):
             sys.exit(_watch_jobs(
                 queue, enqueued_ids,
                 background=background, label="ingest",
+                rtfm_dir=rtfm_dir,
+                timeout_s=getattr(args, "timeout", None),
             ))
         finally:
             queue.close()
@@ -1846,6 +1894,8 @@ def cmd_sync(args):
         sys.exit(_watch_jobs(
             queue, enqueued_ids,
             background=background, label="sync",
+            rtfm_dir=rtfm_dir,
+            timeout_s=getattr(args, "timeout", None),
         ))
     finally:
         queue.close()
@@ -2416,6 +2466,11 @@ def main():
         help="Enqueue and return immediately. Default: poll queue stats "
              "until the work has drained.",
     )
+    p_sync.add_argument(
+        "--timeout", type=float, default=None, metavar="SECONDS",
+        help="Maximum wait time before returning (exit code 2). Worker "
+             "keeps draining in the background.",
+    )
     p_sync.set_defaults(func=cmd_sync)
 
     # ocr-worker (internal — invoked by `rtfm sync --ocr` as a detached
@@ -2461,11 +2516,11 @@ def main():
     p_q = subparsers.add_parser(
         "queue",
         help="Inspect or manage the work queue (stats / list / failed / "
-             "clear-done / retry-failed)",
+             "clear-done / retry-failed / reap)",
     )
     p_q.add_argument(
         "action", nargs="?",
-        choices=["stats", "list", "failed", "clear-done", "retry-failed"],
+        choices=["stats", "list", "failed", "clear-done", "retry-failed", "reap"],
         default="stats",
     )
     p_q.add_argument("--limit", type=int, default=20,

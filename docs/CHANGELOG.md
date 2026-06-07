@@ -7,6 +7,31 @@ description: >-
 
 # Changelog
 
+## [0.24.0] — 2026-06-07
+
+### Fixed — `rtfm sync` no longer hangs forever after a worker crash
+
+When a worker died mid-job (OOM-kill, WSL reboot, hard SIGKILL) the row stayed `running` in the queue forever, with no live worker behind it. `rtfm sync`'s exit condition was `pending == 0 AND running == 0`, so one zombie row meant the command waited indefinitely — a real cron once burned 4 h 24 min in this state before contributing to a host crash. Diagnosed and reproduced on this very repo (35 zombies accumulated since May 21).
+
+- **New zombie reaper** in `Queue.reap_zombies()`. Decides what's a zombie by reading `worker_state.json` rather than by timestamps: if no worker is alive, or if the live worker is on a different `current_job_id`, the row is a zombie. A 3 h `started_at` fallback covers the rarer case where the worker is alive but stuck. Zombies with `attempts >= 3` are marked `failed` instead of being requeued, so a single poisonous file can't loop forever.
+- **Auto-reap at worker boot** — first thing the worker does on startup, before draining anything.
+- **Auto-reap inside `_watch_jobs`** — one-shot before the wait loop + every 10 s during. So `rtfm sync` is now self-healing: if a worker dies while you watch, the next reap cycles its in-flight row.
+- **`--timeout <seconds>` flag on `rtfm sync`** — explicit ceiling. Returns exit code 2 on timeout (worker keeps draining in the background).
+- **`rtfm queue reap`** — manual remediation command with verbose per-row output (id, type, attempts, started_at, file path). Use after an unexpected hang.
+
+### Fixed — EPUBs with missing internal images now index instead of failing
+
+The `ebooklib` reader raised on the first manifest item missing from the ZIP (typically an interrupted-download EPUB with a missing image). 1329 EPUBs were stuck in `failed` on the viasophia repo for this reason. Now:
+
+- We detect the "no item named …" error specifically and fall back to a tolerant ZIP walker that iterates `.xhtml/.html` members directly, ignoring the manifest.
+- Chunks extracted via the fallback carry `source_status: "incomplete"` in their metadata, so callers can spot them.
+
+The Weil EPUB that triggered the issue extracts 191 chunks in the fallback path, instead of 0.
+
+### Schema
+
+No migration. The reaper uses the existing `started_at` column. The dedup logic handles edge cases where multiple zombie rows share the same `(type, payload)`: it keeps the one with the most attempts and deletes the duplicates, so the unique-pending index can't reject the requeue.
+
 ## [0.23.0] — 2026-05-25
 
 ### Added — worker respawn is now fully autonomous (no manual action)

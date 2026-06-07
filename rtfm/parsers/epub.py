@@ -39,6 +39,47 @@ def _require_deps():
         )
 
 
+def _looks_like_missing_asset(exc: Exception) -> bool:
+    """ebooklib raises ``KeyError`` (or wraps it) when the manifest
+    references a file that's not in the ZIP — typically an image
+    interrupted mid-download. Detect that case so we can fall back to a
+    tolerant text-only reader instead of failing the whole book.
+    """
+    msg = str(exc)
+    return "no item named" in msg or "There is no item" in msg
+
+
+def _tolerant_text_iter(path: Path):
+    """Yield ``(spine_index, html_bytes)`` for every XHTML/HTML resource
+    inside the EPUB, reading the file as a plain ZIP and ignoring the
+    manifest entirely. Used as a fallback when ``ebooklib.read_epub``
+    chokes on a missing asset.
+
+    Best-effort: silently skips members it cannot read. Returns nothing
+    when the ZIP itself is unreadable.
+    """
+    import zipfile
+
+    try:
+        zf = zipfile.ZipFile(str(path))
+    except (zipfile.BadZipFile, OSError):
+        return
+    try:
+        names = [n for n in zf.namelist()
+                 if n.lower().endswith((".xhtml", ".html", ".htm"))]
+        # Sort for deterministic order; spine ordering is unrecoverable
+        # without the manifest, but alphabetic ordering by path usually
+        # tracks chapter order in well-formed EPUBs.
+        names.sort()
+        for idx, name in enumerate(names):
+            try:
+                yield idx, zf.read(name)
+            except (KeyError, zipfile.BadZipFile, OSError):
+                continue
+    finally:
+        zf.close()
+
+
 def _html_to_text(html_bytes: bytes) -> str:
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(html_bytes, "html.parser")
@@ -85,22 +126,32 @@ class EPUBParser(BaseParser):
 
         metadata = metadata or {}
 
+        book = None
+        tolerant_mode = False
         try:
             book = epub.read_epub(str(path), options={"ignore_ncx": True})
         except Exception as e:
-            raise EPUBExtractionError(f"epub read failed: {e}")
+            if _looks_like_missing_asset(e):
+                # Manifest references a file that's not in the ZIP — most
+                # often a partially-downloaded EPUB with a missing image.
+                # Fall back to a tolerant text-only reader so we still
+                # index the chapters that ARE present.
+                tolerant_mode = True
+            else:
+                raise EPUBExtractionError(f"epub read failed: {e}")
 
         opf_title = ""
         opf_author = ""
-        try:
-            titles = book.get_metadata("DC", "title")
-            if titles:
-                opf_title = titles[0][0]
-            authors = book.get_metadata("DC", "creator")
-            if authors:
-                opf_author = authors[0][0]
-        except Exception:
-            pass
+        if book is not None:
+            try:
+                titles = book.get_metadata("DC", "title")
+                if titles:
+                    opf_title = titles[0][0]
+                authors = book.get_metadata("DC", "creator")
+                if authors:
+                    opf_author = authors[0][0]
+            except Exception:
+                pass
 
         book_title = metadata.get("title") or opf_title or extract_title_from_filename(path.stem)
         book_slug = metadata.get("book_slug") or slugify(book_title)
@@ -109,25 +160,37 @@ class EPUBParser(BaseParser):
         extended = dict(metadata.get("extended", {}))
         if opf_author and "author" not in extended:
             extended["author"] = opf_author
+        if tolerant_mode:
+            extended["source_status"] = "incomplete"
 
         chunk_counter = 0
         char_pos = 0
         chapter_num = 0
 
-        # Walk spine order if available, else iterate documents
-        spine_ids = [s[0] for s in book.spine] if book.spine else []
-        items = []
-        for sid in spine_ids:
-            item = book.get_item_with_id(sid)
-            if item is not None:
-                items.append(item)
-        if not items:
-            items = list(book.get_items_of_type(ITEM_DOCUMENT))
+        # Pick the iteration source: ebooklib spine when the manifest is
+        # usable, or the tolerant ZIP walker when it isn't.
+        if tolerant_mode:
+            def _html_iter():
+                for _, html in _tolerant_text_iter(path):
+                    yield html
+        else:
+            # Walk spine order if available, else iterate documents
+            spine_ids = [s[0] for s in book.spine] if book.spine else []
+            items = []
+            for sid in spine_ids:
+                item = book.get_item_with_id(sid)
+                if item is not None:
+                    items.append(item)
+            if not items:
+                items = list(book.get_items_of_type(ITEM_DOCUMENT))
 
-        for item in items:
-            html = item.get_content()
-            if not html:
-                continue
+            def _html_iter():
+                for item in items:
+                    html = item.get_content()
+                    if html:
+                        yield html
+
+        for html in _html_iter():
             text = _html_to_text(html)
             if not text.strip():
                 continue
