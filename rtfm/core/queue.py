@@ -377,10 +377,58 @@ class Queue:
         return cur.rowcount
 
     def retry_failed(self) -> int:
-        """Move ``failed`` rows back to ``pending``. Returns affected count.
-        The dedup index allows this because a failed row no longer
-        collides with a pending one."""
-        cur = self._get_conn().execute(
+        """Move ``failed`` rows back to ``pending``. Returns the number of
+        rows that ended up pending again.
+
+        Two dedup conditions must be honoured before the bulk UPDATE so
+        the unique-pending index can't reject:
+
+        - failed rows whose ``(type, payload)`` matches an already-pending
+          row are dropped (the pending one is good enough).
+        - failed rows that share ``(type, payload)`` with another failed
+          row are coalesced: only the one with the highest ``attempts``
+          (then lowest ``id``) survives, the rest are dropped.
+
+        Without these passes, retrying a pile of look-alike failures
+        (e.g. 1330 EPUBs with the same shape of error) raises
+        ``sqlite3.IntegrityError`` and nothing moves.
+        """
+        conn = self._get_conn()
+
+        # 1) failed rows that already have a pending twin.
+        conn.execute(
+            """DELETE FROM work_queue
+               WHERE id IN (
+                   SELECT f.id FROM work_queue f
+                   WHERE f.status = 'failed'
+                     AND EXISTS (
+                         SELECT 1 FROM work_queue p
+                         WHERE p.status = 'pending'
+                           AND p.type = f.type
+                           AND p.payload = f.payload
+                     )
+               )"""
+        )
+
+        # 2) duplicate failed rows — keep one per (type, payload).
+        conn.execute(
+            """DELETE FROM work_queue
+               WHERE id IN (
+                   SELECT id FROM (
+                       SELECT id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY type, payload
+                               ORDER BY attempts DESC, id ASC
+                           ) AS rn
+                       FROM work_queue
+                       WHERE status = 'failed'
+                   )
+                   WHERE rn > 1
+               )"""
+        )
+
+        # 3) requeue the survivors.
+        cur = conn.execute(
             """UPDATE work_queue
                SET status = 'pending',
                    started_at = NULL,

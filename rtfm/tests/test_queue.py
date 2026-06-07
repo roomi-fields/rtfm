@@ -350,3 +350,46 @@ def test_reap_preserves_current_worker_job(queue: Queue, tmp_path: Path):
     # job_a still running, job_b back to pending
     assert queue.stats()["ingest"]["running"] == 1
     assert queue.stats()["ingest"]["pending"] == 1
+
+
+def test_retry_failed_coalesces_duplicate_failures(queue: Queue):
+    """Multiple failed rows with the same (type, payload) — common when
+    a pile of similar files all errored — must coalesce on retry instead
+    of raising on the dedup index."""
+    # Three failed rows with identical payload (e.g. same EPUB enqueued
+    # repeatedly by successive scans).
+    for attempts in (1, 2, 3):
+        queue._get_conn().execute(
+            "INSERT INTO work_queue (type, priority, payload, status, attempts) "
+            "VALUES ('ingest', 30, '{\"f\": \"dup\"}', 'failed', ?)",
+            (attempts,),
+        )
+    # And a fourth, different payload, also failed.
+    queue._get_conn().execute(
+        "INSERT INTO work_queue (type, priority, payload, status, attempts) "
+        "VALUES ('ingest', 30, '{\"f\": \"other\"}', 'failed', 1)"
+    )
+    assert queue.stats()["ingest"]["failed"] == 4
+
+    n = queue.retry_failed()
+    # Only the highest-attempts duplicate survives + the other payload.
+    assert n == 2
+    assert queue.stats()["ingest"]["pending"] == 2
+    assert queue.stats()["ingest"].get("failed", 0) == 0
+
+
+def test_retry_failed_skips_when_pending_twin_exists(queue: Queue):
+    """A failed row whose twin is already pending must be dropped, not
+    requeued — otherwise the unique index rejects."""
+    queue._get_conn().execute(
+        "INSERT INTO work_queue (type, priority, payload, status) "
+        "VALUES ('ingest', 30, '{\"f\": \"both\"}', 'pending')"
+    )
+    queue._get_conn().execute(
+        "INSERT INTO work_queue (type, priority, payload, status, attempts) "
+        "VALUES ('ingest', 30, '{\"f\": \"both\"}', 'failed', 1)"
+    )
+    n = queue.retry_failed()
+    assert n == 0  # the failed twin was dropped; the pending one stays
+    assert queue.stats()["ingest"]["pending"] == 1
+    assert queue.stats()["ingest"].get("failed", 0) == 0

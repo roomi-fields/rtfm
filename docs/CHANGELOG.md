@@ -7,6 +7,19 @@ description: >-
 
 # Changelog
 
+## [0.24.1] — 2026-06-07
+
+### Fixed — `rtfm queue retry-failed` no longer raises on duplicate failures
+
+When a pile of similar files all fail with the same shape of error (the 1330 broken EPUBs on viasophia), `retry_failed` tried to move them all to `pending` in one `UPDATE` and the unique-pending index rejected the second twin. The whole operation rolled back and nothing was retried. Same class of bug as the reaper case in 0.24.0.
+
+`retry_failed` now coalesces before the bulk update:
+
+- failed rows whose twin is already pending → dropped (the pending one wins).
+- failed rows that share `(type, payload)` with another failed row → only the one with the highest `attempts` survives, the rest are dropped.
+
+Two regression tests added.
+
 ## [0.24.0] — 2026-06-07
 
 ### Fixed — `rtfm sync` no longer hangs forever after a worker crash
