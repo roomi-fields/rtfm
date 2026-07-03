@@ -3,13 +3,21 @@
 # ${CLAUDE_PLUGIN_DATA}/extras/venv/. Avoids polluting the user's
 # system Python and bypasses PEP 668 because venv ≠ system site.
 #
-# Usage: rtfm-install-extras embeddings|pdf|pdf-full|all
+# Usage: rtfm-install-extras embeddings|pdf|pdf-full|epub|office|mobi|ocr|all
 #
 #   embeddings  — FastEmbed ONNX (~85 MB), semantic + hybrid search.
 #   pdf         — pdftext only (~50 MB), fast text extraction from most PDFs.
 #   pdf-full    — pdftext + marker-pdf with CPU-only torch (~1.5 GB, no CUDA).
 #                 Needed for complex layouts (tables, figures, scanned docs).
-#   all         — embeddings + pdf (not pdf-full; opt-in for that one).
+#   epub        — ebooklib + beautifulsoup4 (~5 MB), EPUB reader.
+#   office      — python-docx + odfpy + striprtf (~2 MB), DOCX / ODT / RTF.
+#   mobi        — mobi + beautifulsoup4 (~2 MB), MOBI / AZW ebook reader.
+#   ocr         — pytesseract + pypdfium2 + Pillow (~30 MB), OCR for
+#                 scanned PDFs. Needs the tesseract binary on the host
+#                 (apt install tesseract-ocr tesseract-ocr-<lang>).
+#   xlsx        — openpyxl (~1 MB), XLSX spreadsheets.
+#   all         — everything above except pdf-full and the CPU torch tail.
+#                 (~130 MB total.)
 
 EXTRA="${1:-all}"
 
@@ -70,13 +78,40 @@ case "$EXTRA" in
         "$PIP" install --quiet --upgrade --index-url "$TORCH_CPU_INDEX" torch
         "$PIP" install --quiet --upgrade pdftext marker-pdf
         ;;
+    epub)
+        echo "Installing EPUB extras (ebooklib + beautifulsoup4, ~5 MB) ..."
+        "$PIP" install --quiet --upgrade ebooklib beautifulsoup4
+        ;;
+    office)
+        echo "Installing office extras (python-docx + odfpy + striprtf, ~2 MB) ..."
+        "$PIP" install --quiet --upgrade python-docx odfpy striprtf
+        ;;
+    mobi)
+        echo "Installing MOBI extras (mobi + beautifulsoup4, ~2 MB) ..."
+        "$PIP" install --quiet --upgrade mobi beautifulsoup4
+        ;;
+    ocr)
+        echo "Installing OCR extras (pytesseract + pypdfium2 + Pillow, ~30 MB) ..."
+        echo "  Needs the tesseract binary on the host (apt install tesseract-ocr)."
+        "$PIP" install --quiet --upgrade pytesseract pypdfium2 Pillow
+        ;;
+    xlsx)
+        echo "Installing XLSX extras (openpyxl, ~1 MB) ..."
+        "$PIP" install --quiet --upgrade openpyxl
+        ;;
     all)
-        echo "Installing embeddings + light PDF (fastembed + pdftext, ~135 MB) ..."
+        echo "Installing everything except pdf-full (embeddings + pdf + epub + office + mobi + ocr + xlsx, ~130 MB) ..."
         echo "  For marker-pdf (heavy, ~1.5 GB with CPU torch), run 'pdf-full' separately."
-        "$PIP" install --quiet --upgrade fastembed pdftext
+        "$PIP" install --quiet --upgrade \
+            fastembed pdftext \
+            ebooklib beautifulsoup4 \
+            python-docx odfpy striprtf \
+            mobi \
+            pytesseract pypdfium2 Pillow \
+            openpyxl
         ;;
     *)
-        echo "Unknown extra: $EXTRA (expected: embeddings, pdf, pdf-full, all)" >&2
+        echo "Unknown extra: $EXTRA (expected: embeddings, pdf, pdf-full, epub, office, mobi, ocr, xlsx, all)" >&2
         exit 1
         ;;
 esac

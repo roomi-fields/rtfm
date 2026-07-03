@@ -47,12 +47,28 @@ if /i "%EXTRA%"=="embeddings" (
     echo Installing full PDF extras ^(pdftext + marker-pdf + CPU-only torch, ~1.5 GB^) ...
     "%PIP%" install --quiet --upgrade --index-url "%TORCH_CPU_INDEX%" torch
     "%PIP%" install --quiet --upgrade pdftext marker-pdf
+) else if /i "%EXTRA%"=="epub" (
+    echo Installing EPUB extras ^(ebooklib + beautifulsoup4, ~5 MB^) ...
+    "%PIP%" install --quiet --upgrade ebooklib beautifulsoup4
+) else if /i "%EXTRA%"=="office" (
+    echo Installing office extras ^(python-docx + odfpy + striprtf, ~2 MB^) ...
+    "%PIP%" install --quiet --upgrade python-docx odfpy striprtf
+) else if /i "%EXTRA%"=="mobi" (
+    echo Installing MOBI extras ^(mobi + beautifulsoup4, ~2 MB^) ...
+    "%PIP%" install --quiet --upgrade mobi beautifulsoup4
+) else if /i "%EXTRA%"=="ocr" (
+    echo Installing OCR extras ^(pytesseract + pypdfium2 + Pillow, ~30 MB^) ...
+    echo   Needs the tesseract binary on the host.
+    "%PIP%" install --quiet --upgrade pytesseract pypdfium2 Pillow
+) else if /i "%EXTRA%"=="xlsx" (
+    echo Installing XLSX extras ^(openpyxl, ~1 MB^) ...
+    "%PIP%" install --quiet --upgrade openpyxl
 ) else if /i "%EXTRA%"=="all" (
-    echo Installing embeddings + light PDF ^(fastembed + pdftext, ~135 MB^) ...
+    echo Installing everything except pdf-full ^(~130 MB^) ...
     echo   For marker-pdf ^(heavy, ~1.5 GB with CPU torch^), run 'pdf-full' separately.
-    "%PIP%" install --quiet --upgrade fastembed pdftext
+    "%PIP%" install --quiet --upgrade fastembed pdftext ebooklib beautifulsoup4 python-docx odfpy striprtf mobi pytesseract pypdfium2 Pillow openpyxl
 ) else (
-    echo Unknown extra: %EXTRA% ^(expected: embeddings, pdf, pdf-full, all^) 1>&2
+    echo Unknown extra: %EXTRA% ^(expected: embeddings, pdf, pdf-full, epub, office, mobi, ocr, xlsx, all^) 1>&2
     exit /b 1
 )
 

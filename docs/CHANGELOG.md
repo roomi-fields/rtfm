@@ -7,6 +7,29 @@ description: >-
 
 # Changelog
 
+## [0.24.3] — 2026-07-03
+
+### Fixed — `rtfm-install-extras` now covers all optional formats
+
+The install script only knew `embeddings|pdf|pdf-full|all` — no way to install
+the EPUB, DOCX/ODT/RTF, MOBI, XLSX or OCR parsers via the official path. Users
+who hit an "ebooklib not installed" error had to fall back to a manual
+`pip install` inside the extras venv, and every fresh machine setup silently
+lost those formats. The migration WSL → native-Ubuntu on the viasophia corpus
+surfaced this: 124 EPUBs went from indexed to unparsable and nobody noticed
+until the search returned empty.
+
+`bin/rtfm-install-extras` (POSIX + `.cmd`) gains five new targets:
+
+- `epub` — ebooklib + beautifulsoup4
+- `office` — python-docx + odfpy + striprtf
+- `mobi` — mobi + beautifulsoup4
+- `ocr` — pytesseract + pypdfium2 + Pillow (needs `tesseract-ocr` on host)
+- `xlsx` — openpyxl
+
+And `all` now installs everything except `pdf-full` (the 1.5 GB torch tail
+stays opt-in).
+
 ## [0.24.2] — 2026-07-03
 
 ### Fixed — plugin hooks now see the extras venv (fixes silent PDF/EPUB skip)
