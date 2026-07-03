@@ -7,6 +7,30 @@ description: >-
 
 # Changelog
 
+## [0.24.4] — 2026-07-03
+
+### Fixed — CLI / worker daemon now see the plugin's extras venv
+
+The 0.24.2 fix wired the extras venv into `bin/rtfm-hook`, so
+Claude-Code-launched hook subprocesses could import optional parsers
+(pdftext, ebooklib, openpyxl, …) and fastembed. But the CLI itself
+(`rtfm sync`, `rtfm worker-daemon`, `rtfm ocr-worker`, …) runs from the
+pipx venv where those libs are typically absent, so any indexing done
+outside the plugin hook was still blind. Users had to export
+PYTHONPATH manually — the same workaround the viasophia agent shipped
+locally.
+
+`rtfm/__init__.py` now runs a tiny `_adopt_plugin_extras()` at import
+time: if `${CLAUDE_PLUGIN_DATA}/extras/venv` (or the default
+`~/.claude/plugins/data/rtfm/extras/venv`) exists, its site-packages is
+**appended** to `sys.path`. Any entry point that imports `rtfm` — CLI,
+worker daemon, MCP server, subprocess launched by a hook — automatically
+picks up the plugin's extras without user intervention. Appended (not
+prepended) so the current environment keeps priority: pipx-injected
+extras or a dev venv still win over the plugin fallback.
+
+No PYTHONPATH needed anywhere anymore.
+
 ## [0.24.3] — 2026-07-03
 
 ### Fixed — `rtfm-install-extras` now covers all optional formats
