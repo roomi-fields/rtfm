@@ -3,7 +3,10 @@
 # Usage: rtfm-hook <hook-script-basename>
 #        e.g. rtfm-hook rtfm_sync
 # Resolves Python via python3 / python / py and runs
-# ${PLUGIN_ROOT}/hooks/<script>.py.
+# ${PLUGIN_ROOT}/hooks/<script>.py. If an extras venv exists at
+# ${CLAUDE_PLUGIN_DATA}/extras/venv, its site-packages is exposed via
+# PYTHONPATH so hook code (sync, bootstrap) can import optional
+# parsers (pdftext, ebooklib, openpyxl, ...) and fastembed.
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$PLUGIN_ROOT/hooks/$1.py"
@@ -12,6 +15,27 @@ shift
 if [ ! -f "$SCRIPT" ]; then
     echo "rtfm-hook: script not found: $SCRIPT" >&2
     exit 1
+fi
+
+if [ -n "$CLAUDE_PLUGIN_DATA" ]; then
+    EXTRAS_DIR="$CLAUDE_PLUGIN_DATA/extras/venv"
+else
+    EXTRAS_DIR="$HOME/.claude/plugins/data/rtfm/extras/venv"
+fi
+
+EXTRAS_SITE=""
+if [ -d "$EXTRAS_DIR/lib" ]; then
+    for d in "$EXTRAS_DIR/lib"/python*/site-packages; do
+        [ -d "$d" ] && EXTRAS_SITE="$d" && break
+    done
+fi
+
+if [ -n "$EXTRAS_SITE" ]; then
+    if [ -n "$PYTHONPATH" ]; then
+        export PYTHONPATH="$EXTRAS_SITE:$PYTHONPATH"
+    else
+        export PYTHONPATH="$EXTRAS_SITE"
+    fi
 fi
 
 for PY in python3 python py; do

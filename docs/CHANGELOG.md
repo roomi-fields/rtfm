@@ -7,6 +7,14 @@ description: >-
 
 # Changelog
 
+## [0.24.2] — 2026-07-03
+
+### Fixed — plugin hooks now see the extras venv (fixes silent PDF/EPUB skip)
+
+`bin/rtfm-serve` already injected the plugin's extras venv (`~/.claude/plugins/data/rtfm/extras/venv`) into `sys.path` so the MCP server could import `pdftext`, `ebooklib`, `openpyxl`, `fastembed`, etc. `bin/rtfm-hook` did not — it launched `python3` naked. Which meant that when the SessionStart / Stop / UserPromptSubmit hooks called `rtfm.core.sync`, any PDF, EPUB or spreadsheet touched during the session was silently skipped (parser import failed → file marked unparsable, no visible error). Surfaced by the WSL → native-Ubuntu migration on the viasophia corpus: `rtfm-serve` could search extras-dependent files, but the hooks couldn't add new ones.
+
+Both `bin/rtfm-hook` (POSIX) and `bin/rtfm-hook.cmd` (Windows) now export `PYTHONPATH` pointing at the extras venv's `site-packages` before invoking the target hook script. Same detection logic as `rtfm-serve`. Zero behavior change when no extras venv exists.
+
 ## [0.24.1] — 2026-06-07
 
 ### Fixed — `rtfm queue retry-failed` no longer raises on duplicate failures
