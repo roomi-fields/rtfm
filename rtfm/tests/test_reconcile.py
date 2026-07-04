@@ -10,6 +10,7 @@ from rtfm.core.library import Library
 from rtfm.core.queue import Queue
 from rtfm.core.reconcile import (
     count_orphan_embeddings, purge_orphan_embeddings,
+    count_fossil_chunks, purge_fossil_chunks,
     count_unembedded_chunks, reconcile,
 )
 
@@ -22,10 +23,13 @@ def _seed(db: Path):
     conn = lib._get_conn()
     conn.execute("INSERT INTO books (slug, title, corpus) VALUES ('b','B','c')")
     bid = conn.execute("SELECT id FROM books WHERE slug='b'").fetchone()["id"]
+    # chunk_id must start with the book slug so reconcile's
+    # fossil-detector (chunk_id NOT LIKE book.slug || '%') doesn't
+    # sweep these seed rows away.
     for cid in (1, 2, 3):
         conn.execute(
             "INSERT INTO chunks (chunk_id, book_id, content, content_chars) "
-            "VALUES (?, ?, ?, ?)", (f"ck{cid}", bid, f"content {cid}", 9))
+            "VALUES (?, ?, ?, ?)", (f"b-ck{cid}", bid, f"content {cid}", 9))
     rows = conn.execute("SELECT id FROM chunks ORDER BY id").fetchall()
     ids = [r["id"] for r in rows]
     # embeddings for chunk ids[0] and ids[1]
@@ -114,3 +118,55 @@ def test_reconcile_purges_and_requeues(tmp_path):
         assert any(j.type == "embed" for j in pending)
     finally:
         q.close()
+
+
+def test_reconcile_purges_fossil_chunks(tmp_path):
+    """Chunks whose chunk_id prefix no longer matches their book.slug
+    are fossils left over from an old cross-corpus rename. Purge them
+    so the next ingest of the file no longer collides on UNIQUE.
+    """
+    db = tmp_path / "library.db"
+    lib = Library(str(db))
+    conn = lib._get_conn()
+    conn.execute("INSERT INTO books (slug, title, corpus) VALUES ('new-slug','B','c')")
+    bid = conn.execute("SELECT id FROM books WHERE slug='new-slug'").fetchone()["id"]
+    # 2 fossils (old slug) + 1 correct chunk
+    conn.execute(
+        "INSERT INTO chunks (chunk_id, book_id, content, content_chars) "
+        "VALUES (?, ?, ?, ?)", ("old-slug-p001-0001", bid, "a", 1))
+    conn.execute(
+        "INSERT INTO chunks (chunk_id, book_id, content, content_chars) "
+        "VALUES (?, ?, ?, ?)", ("old-slug-p001-0002", bid, "b", 1))
+    conn.execute(
+        "INSERT INTO chunks (chunk_id, book_id, content, content_chars) "
+        "VALUES (?, ?, ?, ?)", ("new-slug-p001-0001", bid, "c", 1))
+    conn.execute("UPDATE books SET chunk_count = 3 WHERE id = ?", (bid,))
+    conn.commit()
+
+    assert count_fossil_chunks(conn) == 2
+    deleted = purge_fossil_chunks(conn)
+    assert deleted == 2
+    assert count_fossil_chunks(conn) == 0
+    # chunk_count on the book was refreshed to the actual row count.
+    row = conn.execute("SELECT chunk_count FROM books WHERE id=?", (bid,)).fetchone()
+    assert row["chunk_count"] == 1
+    lib.close()
+
+
+def test_reconcile_includes_fossils_in_stats(tmp_path):
+    """The top-level ``reconcile()`` reports fossils_purged in its stats
+    dict so callers (handle_reconcile, doctor, tests) can react.
+    """
+    db = tmp_path / "library.db"
+    lib = Library(str(db))
+    conn = lib._get_conn()
+    conn.execute("INSERT INTO books (slug, title, corpus) VALUES ('new','B','c')")
+    bid = conn.execute("SELECT id FROM books WHERE slug='new'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO chunks (chunk_id, book_id, content, content_chars) "
+        "VALUES ('old-prefix-1', ?, 'x', 1)", (bid,))
+    conn.commit()
+    lib.close()
+
+    stats = reconcile(db)
+    assert stats["fossils_purged"] == 1

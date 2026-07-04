@@ -7,6 +7,26 @@ description: >-
 
 # Changelog
 
+## [0.24.8] — 2026-07-04
+
+### Fixed — `reconcile` now sweeps fossil chunks that trigger `UNIQUE constraint failed: chunks.chunk_id`
+
+A chunk's `chunk_id` is computed at parse time from its book's slug.
+When a cross-corpus move or an old rename updates the `book` row's
+slug without regenerating the chunks, the chunks keep their
+old-slug-prefixed `chunk_id` forever. Downstream symptom: every
+future ingest of a file whose current slug collides with those
+fossils fails with `IntegrityError: UNIQUE constraint failed:
+chunks.chunk_id`. On viasophia this stuck 258 ingest jobs on two
+files (`bibliographie-contemporaine.md`, `citations.json`) — the
+worker retried them at every scan tick.
+
+`reconcile()` now detects and purges fossil chunks (`chunk_id NOT
+LIKE book.slug || '%'`) as its second step, right after the orphan
+embedding pass. Refreshes `books.chunk_count` in the same pass so it
+stays consistent. Runs on every worker idle-reconcile tick, no user
+action needed. Stats dict gains a `fossils_purged` field.
+
 ## [0.24.7] — 2026-07-04
 
 ### Added — `.rtfmignore`, the missing exclude list

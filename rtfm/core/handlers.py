@@ -589,6 +589,7 @@ def handle_reconcile(job: Job, worker: "Worker") -> None:
     stats = reconcile(worker.db_path, log=worker._log)
     worker._log(
         f"reconcile: purged {stats['orphans_purged']} orphan(s), "
+        f"{stats.get('fossils_purged', 0)} fossil(s), "
         f"re-queued {stats['chunks_requeued']} chunk(s) "
         f"as {stats['embed_jobs']} P5 batch(es)"
     )
