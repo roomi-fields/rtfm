@@ -110,7 +110,12 @@ def handle_scan(job: Job, worker: "Worker") -> None:
           "root": "<absolute path of source root>",
           "corpus": "<corpus name>",
           "extensions": "csv,txt" | None,   # optional override
-          "force_remove": False              # optional, default False
+          "force_remove": False,             # optional, default False
+          "honor_gitignore": True            # optional, default True.
+                                             # Set to False to index files
+                                             # that are gitignored — useful
+                                             # for private corpora (copyrighted
+                                             # material kept out of git).
         }
     """
     from rtfm.core.sync import (
@@ -139,11 +144,13 @@ def handle_scan(job: Job, worker: "Worker") -> None:
         } or None
 
     force_remove = bool(payload.get("force_remove", False))
+    honor_gitignore = bool(payload.get("honor_gitignore", True))
 
     lib = Library(str(worker.db_path))
     try:
         lib.set_sync_root(corpus, str(root))
-        files_on_disk = scan_directory(root, ext_set)
+        files_on_disk = scan_directory(root, ext_set,
+                                       honor_gitignore=honor_gitignore)
         indexed = lib.list_indexed_files(corpus=corpus)
         indexed_global = lib.list_indexed_files()
         diff = compute_diff(

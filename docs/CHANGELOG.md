@@ -7,6 +7,32 @@ description: >-
 
 # Changelog
 
+## [0.24.5] — 2026-07-04
+
+### Fixed — private corpora ignored by RTFM because they were also .gitignored
+
+`scan_directory` respects the root `.gitignore` by default so build outputs
+and caches don't need to be redeclared as RTFM excludes. But that also swept
+up a legitimate use case: **a corpus of copyrighted PDFs / EPUBs kept out of
+git on purpose, but meant to be searchable locally**. On the viasophia repo,
+`corpus/contemporain/**/*.pdf` and `corpus/peuples-premiers/**/*.epub` were
+gitignored (author rights, private-use-only), so 162 books were silently
+skipped by every sync. Zero `.pdf` / `.epub` rows in `indexed_files`.
+
+Users can now opt out:
+
+- **Per-source** (persistent): add `"honor_gitignore": false` to any entry
+  under `sources[]` in `.rtfm/config.json`. Recommended for corpus roots
+  whose whole point is to hold private files.
+- **Per-run**: `rtfm sync --no-gitignore`. Applies to any source that
+  didn't explicitly set the field.
+
+Default stays `true` — pure backwards compatibility for every existing repo
+that relied on `.gitignore` to keep build outputs out of the index.
+
+Plumbed through `sync()`, `scan_directory()`, `handle_scan` (payload
+`honor_gitignore: bool`), and the CLI (`--no-gitignore`).
+
 ## [0.24.4] — 2026-07-03
 
 ### Fixed — CLI / worker daemon now see the plugin's extras venv

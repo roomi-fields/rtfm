@@ -593,6 +593,7 @@ def sync(
     ocr_fallback: bool = False,
     progress_interval: float | None = None,
     force_remove: bool = False,
+    honor_gitignore: bool = True,
 ) -> SyncResult:
     """Orchestrate a full incremental sync.
 
@@ -640,7 +641,8 @@ def sync(
             if p.is_file():
                 files_on_disk.append(p)
     else:
-        files_on_disk = scan_directory(root, extensions, exclude_dirs)
+        files_on_disk = scan_directory(root, extensions, exclude_dirs,
+                                       honor_gitignore=honor_gitignore)
 
     # 2. Get DB state (scoped to corpus to support multi-directory sync)
     indexed = library.list_indexed_files(corpus=corpus)

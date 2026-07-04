@@ -1805,6 +1805,10 @@ def cmd_sync(args):
     background = bool(getattr(args, "background", False))
     force_remove = bool(getattr(args, "force_remove", False))
     files = getattr(args, "files", None) or None
+    # --no-gitignore lets the scan see files listed in the project's
+    # .gitignore. Real-world need: a corpus of copyrighted PDFs kept
+    # out of git but meant to be indexed locally.
+    no_gitignore = bool(getattr(args, "no_gitignore", False))
 
     # --files: targeted ingest of specific paths, no scan.
     if files:
@@ -1868,6 +1872,14 @@ def cmd_sync(args):
         }
         if src.get("extensions"):
             payload["extensions"] = src["extensions"]
+        # Per-source honor_gitignore takes precedence over the CLI flag.
+        # Explicit `--no-gitignore` on the CLI overrides sources that
+        # didn't set the field (they default to True upstream).
+        src_hg = src.get("honor_gitignore")
+        if src_hg is not None:
+            payload["honor_gitignore"] = bool(src_hg)
+        elif no_gitignore:
+            payload["honor_gitignore"] = False
         scan_payloads.append(payload)
 
     if not scan_payloads:
@@ -2451,6 +2463,13 @@ def main():
     p_sync.add_argument("--files", nargs="+",
                         help="Specific files to ingest (for git/Claude hooks). "
                              "Enqueues P0 ingest jobs instead of a scan.")
+    p_sync.add_argument(
+        "--no-gitignore", action="store_true",
+        help="Index files listed in the project's .gitignore. Useful for a "
+             "private local corpus (copyrighted PDFs, etc.) that must not "
+             "be committed but should still be searchable. "
+             "Persist per-source by setting \"honor_gitignore\": false in "
+             ".rtfm/config.json.")
     p_sync.add_argument(
         "--ocr", action="store_true",
         help="Persist ocr_fallback=true in .rtfm/config.json and re-queue "
