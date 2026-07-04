@@ -7,6 +7,25 @@ description: >-
 
 # Changelog
 
+## [0.24.6] — 2026-07-04
+
+### Fixed — worker's periodic scan silently reverted `honor_gitignore=false` and mass-removed private corpora
+
+The 0.24.5 fix let a CLI `rtfm sync --no-gitignore` (or a source with
+`"honor_gitignore": false`) index a private corpus. That worked once —
+then the worker daemon's periodic scan tick (every 30 s by default)
+enqueued a fresh scan job **without** propagating `honor_gitignore`
+from the source config. The scan defaulted back to `true`, didn't see
+the gitignored PDFs anymore, decided they had disappeared from disk,
+and enqueued 172 `remove` jobs. On viasophia the whole PDF corpus
+(Tsing, Escobar, Deleuze, Nishida…) vanished from the index minutes
+after being indexed.
+
+`Worker._maybe_scan` now reads `honor_gitignore` from each source
+entry and passes it into the scan payload. Same wiring as
+`cmd_sync` uses in the CLI. Fixed forever, no more races between the
+one-shot fix and the automatic sweep.
+
 ## [0.24.5] — 2026-07-04
 
 ### Fixed — private corpora ignored by RTFM because they were also .gitignored

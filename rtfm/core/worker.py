@@ -450,6 +450,12 @@ class Worker:
                     "corpus": src_corpus,
                     "extensions": src.get("extensions") or None,
                 }
+                # Propagate the source's honor_gitignore setting. Without
+                # this, the periodic scan defaults to True and unfoundly
+                # removes every gitignored file that the CLI-triggered
+                # scan had indexed (the viasophia PDF corpus regression).
+                if src.get("honor_gitignore") is not None:
+                    payload["honor_gitignore"] = bool(src["honor_gitignore"])
                 job_id = self._queue.enqueue("scan", payload)
                 if job_id is not None:
                     enqueued += 1
