@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rtfm-ai"
-version = "0.24.6"
+version = "0.24.7"
 description = "RTFM — The open retrieval layer for AI agents. Indexes code, docs, legal, research, data. Extensible parser system. Serves surgical context via MCP."
 readme = "README.md"
 license = "MIT"

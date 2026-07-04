@@ -78,6 +78,25 @@ DEFAULT_EXCLUDE_DIRS: set[str] = {
 }
 
 
+def _load_pathspec(path: Path):
+    """Load a gitwildmatch PathSpec from *path*, or return None.
+
+    Silent no-op when the file is missing, ``pathspec`` isn't installed,
+    or the file is unreadable — the scan proceeds without that filter.
+    """
+    if not path.is_file():
+        return None
+    try:
+        import pathspec  # type: ignore
+    except ImportError:
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            return pathspec.PathSpec.from_lines("gitwildmatch", f)
+    except Exception:
+        return None
+
+
 def _load_gitignore_spec(root: Path):
     """Return a PathSpec matcher for the root-level .gitignore, or None.
 
@@ -87,18 +106,24 @@ def _load_gitignore_spec(root: Path):
     not walked — root-level only — which covers the vast majority of
     real-world setups while keeping the scan simple.
     """
-    gi = root / ".gitignore"
-    if not gi.is_file():
-        return None
-    try:
-        import pathspec  # type: ignore
-    except ImportError:
-        return None
-    try:
-        with open(gi, encoding="utf-8", errors="ignore") as f:
-            return pathspec.PathSpec.from_lines("gitwildmatch", f)
-    except Exception:
-        return None
+    return _load_pathspec(root / ".gitignore")
+
+
+def _load_rtfmignore_spec(root: Path):
+    """Return a PathSpec matcher for the root-level .rtfmignore, or None.
+
+    ``.rtfmignore`` is RTFM's own exclude list, always applied regardless
+    of ``honor_gitignore``. Same syntax as ``.gitignore``
+    (``gitwildmatch``). The intended use case is a project where a
+    private corpus lives under a directory that ``.gitignore`` also
+    covers: the user opts out of gitignore (``honor_gitignore: false``)
+    to make the corpus visible, then declares a ``.rtfmignore`` to keep
+    build outputs and caches out of the index. Also useful when a
+    project should re-index files that git wants gone
+    (e.g. generated docs) — leave ``.gitignore`` honored but override
+    with ``.rtfmignore``.
+    """
+    return _load_pathspec(root / ".rtfmignore")
 
 # ── mass-removal circuit breaker ────────────────────────────────────────────
 # A full sync deletes every indexed file not seen on disk. That is only
@@ -237,11 +262,17 @@ def scan_directory(
 ) -> list[Path]:
     """Recursively scan *root* and return files matching *extensions*.
 
-    Filters out anything under :data:`DEFAULT_EXCLUDE_DIRS`, and — when
-    *honor_gitignore* is on and ``pathspec`` is installed — anything matched
-    by the root ``.gitignore``. Honoring .gitignore reuses what the user
-    has already declared as "ignored artifacts" rather than maintaining a
-    parallel exclude list.
+    Three-layer filter, in order:
+
+    1. :data:`DEFAULT_EXCLUDE_DIRS` — always skipped (``.git``, ``.venv``,
+       ``node_modules``, …).
+    2. ``.gitignore`` at *root* — skipped when *honor_gitignore* is on
+       and ``pathspec`` is installed. Off means the user opted in to
+       indexing files git wants gone (private corpora, etc.).
+    3. ``.rtfmignore`` at *root* — **always** skipped when the file
+       exists. Same syntax as ``.gitignore``. The idea: a project can
+       set ``honor_gitignore=false`` to expose a private corpus, then
+       use ``.rtfmignore`` to keep noise (build outputs, caches) out.
     """
     extensions = extensions or DEFAULT_EXTENSIONS
     exclude_dirs = exclude_dirs or DEFAULT_EXCLUDE_DIRS
@@ -250,6 +281,7 @@ def scan_directory(
     extensions = {e if e.startswith(".") else f".{e}" for e in extensions}
 
     gi_spec = _load_gitignore_spec(root) if honor_gitignore else None
+    ri_spec = _load_rtfmignore_spec(root)  # always applied when present
 
     files: list[Path] = []
     for item in sorted(root.rglob("*")):
@@ -258,12 +290,14 @@ def scan_directory(
             continue
         if not (item.is_file() and item.suffix.lower() in extensions):
             continue
-        if gi_spec is not None:
+        if gi_spec is not None or ri_spec is not None:
             try:
                 rel = str(item.relative_to(root))
             except ValueError:
                 rel = str(item)
-            if gi_spec.match_file(rel):
+            if gi_spec is not None and gi_spec.match_file(rel):
+                continue
+            if ri_spec is not None and ri_spec.match_file(rel):
                 continue
         files.append(item)
     return files

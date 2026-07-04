@@ -195,6 +195,46 @@ class TestScanDirectory:
         names = [str(f.relative_to(tmp_path)) for f in files]
         assert "debug.log" in names
 
+    def test_rtfmignore_always_applied(self, tmp_path):
+        """`.rtfmignore` is RTFM's own exclude list. Applied whether
+        `.gitignore` is honored or not, so users can expose a private
+        corpus (honor_gitignore=false) and still keep build outputs out.
+        """
+        try:
+            import pathspec  # noqa: F401
+        except ImportError:
+            import pytest
+            pytest.skip("pathspec not installed")
+
+        (tmp_path / ".gitignore").write_text("*.log\n")
+        (tmp_path / ".rtfmignore").write_text(
+            "dist/\n"
+            "*.tmp.md\n"
+        )
+        (tmp_path / "main.py").write_text("ok\n")
+        (tmp_path / "notes.tmp.md").write_text("scratch\n")
+        (tmp_path / "dist").mkdir()
+        (tmp_path / "dist" / "out.py").write_text("built\n")
+        (tmp_path / "debug.log").write_text("noise\n")
+
+        # With honor_gitignore=True, both filters apply.
+        files = scan_directory(tmp_path, extensions={"py", "log", "md"},
+                               honor_gitignore=True)
+        names = [str(f.relative_to(tmp_path)) for f in files]
+        assert "main.py" in names
+        assert "debug.log" not in names          # .gitignore
+        assert "notes.tmp.md" not in names       # .rtfmignore
+        assert "dist/out.py" not in names        # .rtfmignore
+
+        # With honor_gitignore=False, .rtfmignore still applies.
+        files = scan_directory(tmp_path, extensions={"py", "log", "md"},
+                               honor_gitignore=False)
+        names = [str(f.relative_to(tmp_path)) for f in files]
+        assert "main.py" in names
+        assert "debug.log" in names              # .gitignore ignored
+        assert "notes.tmp.md" not in names       # .rtfmignore still applies
+        assert "dist/out.py" not in names        # .rtfmignore still applies
+
 
 # ── compute_diff ──────────────────────────────────────────────────────────
 

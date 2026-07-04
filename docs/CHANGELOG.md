@@ -7,6 +7,31 @@ description: >-
 
 # Changelog
 
+## [0.24.7] — 2026-07-04
+
+### Added — `.rtfmignore`, the missing exclude list
+
+A project can now drop a `.rtfmignore` at its root to exclude files
+from the index regardless of `.gitignore`. Same syntax as
+`.gitignore` (`gitwildmatch` via `pathspec`). Applied **always**, so
+it composes cleanly with the two modes of gitignore handling:
+
+- `honor_gitignore: true` (default) — both filters apply. A file
+  matched by either is skipped. Use `.rtfmignore` when you want to
+  index something git-tracked but keep noise (e.g. generated `.json`)
+  out of RTFM search.
+- `honor_gitignore: false` — `.gitignore` is bypassed to expose a
+  private corpus, but `.rtfmignore` still applies. That's the fix for
+  the ergonomics gap surfaced on viasophia: opting out of gitignore
+  to index copyrighted PDFs would drag in `dist/`, `node_modules/`,
+  `.astro/`, etc. A `.rtfmignore` listing those paths keeps them out.
+
+Also worth noting (already existed, better documented now): each
+source in `.rtfm/config.json` supports a per-source `"extensions"`
+key — comma-separated list of extensions to restrict the scan to.
+E.g. `{"path": "…/corpus", "extensions": "pdf,epub,md"}` to only
+index those three formats for that source.
+
 ## [0.24.6] — 2026-07-04
 
 ### Fixed — worker's periodic scan silently reverted `honor_gitignore=false` and mass-removed private corpora
