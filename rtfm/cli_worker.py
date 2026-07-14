@@ -153,6 +153,16 @@ def _log(rtfm_dir: Path, msg: str) -> None:
 
 # ── Spawn helper (called by producers: rtfm sync, hooks, MCP) ────────────
 
+def _spawn_env() -> dict:
+    """Env dict for a worker Popen: inherit the parent's env and layer in
+    the thread caps (OMP/MKL/OpenBLAS/NumExpr/tokenizers) so onnxruntime
+    initialises with a bounded intra-op pool. Without this, one active
+    worker eats ~5-6 cores of a 12-thread box and 16 workers can bring
+    the machine to its knees."""
+    from rtfm.core.throttle import thread_cap_env
+    return {**os.environ, **thread_cap_env()}
+
+
 def ensure_worker_running(rtfm_dir: Path) -> int | None:
     """Spawn a worker daemon if none is alive. Returns the PID, or
     ``None`` when spawning is impossible (e.g. another worker won the
@@ -180,6 +190,7 @@ def ensure_worker_running(rtfm_dir: Path) -> int | None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,  # immune to parent SIGHUP / hook timeout
+        env=_spawn_env(),
     )
     _register_project(rtfm_dir)
     return proc.pid
@@ -209,6 +220,7 @@ def _spawn_worker_direct(rtfm_dir: Path,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
+        env=_spawn_env(),
     )
     _register_project(rtfm_dir)
     return proc.pid
@@ -222,6 +234,13 @@ def cmd_worker_daemon(args):
     Holds an exclusive flock on ``.rtfm/worker.lock`` so a second
     invocation exits immediately rather than racing.
     """
+    # Cap embedding thread pools BEFORE any handler / fastembed import.
+    # onnxruntime's OpenMP init reads OMP_NUM_THREADS at first-use; if a
+    # user launched ``rtfm worker-daemon`` directly (bypassing our
+    # Popen-with-env spawn path), this catches them.
+    from rtfm.core.throttle import apply_thread_caps
+    apply_thread_caps()
+
     rtfm_root = find_rtfm_root()
     if rtfm_root is None:
         sys.exit("worker-daemon: no .rtfm/ project root in the cwd chain.")

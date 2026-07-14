@@ -320,6 +320,21 @@ class Queue:
             (job_id,),
         )
 
+    def mark_pending(self, job_id: int) -> None:
+        """Send a currently-``running`` job back to ``pending`` without
+        counting it as a failed attempt. Used when the worker is asked
+        to stop while waiting on an external resource (e.g. the global
+        embed-slot semaphore) — the job hasn't started yet, so we must
+        not consume one of its retry attempts."""
+        self._get_conn().execute(
+            """UPDATE work_queue
+               SET status = 'pending',
+                   started_at = NULL,
+                   attempts = MAX(attempts - 1, 0)
+               WHERE id = ?""",
+            (job_id,),
+        )
+
     def mark_failed(self, job_id: int, error: str) -> None:
         self._get_conn().execute(
             """UPDATE work_queue SET status = 'failed',

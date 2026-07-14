@@ -7,6 +7,34 @@ description: >-
 
 # Changelog
 
+## [0.24.9] — 2026-07-14
+
+### Fixed — worker no longer saturates the CPU on multi-project boxes
+
+On a machine hosting many `.rtfm/` projects (16 registered on PC2),
+a single active worker would open one intra-op thread per core in
+`onnxruntime` (~5-6 cores) and multiple concurrent embed jobs would
+push the load average past 30 — enough to make VS Code Remote-SSH
+disconnect and lose every open terminal.
+
+Two independent throttles, both opt-out:
+
+- **Per-worker thread cap** — every worker daemon is spawned with
+  `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
+  `NUMEXPR_NUM_THREADS` all set to `1` (belt-and-suspenders: also set
+  at daemon boot before any fastembed import). One active worker ⇒
+  one core, instead of one worker ⇒ six cores. Override with
+  `RTFM_EMBED_THREADS=<n>` (`0` disables the cap entirely).
+- **Cross-project semaphore** — file-lock pool in `~/.rtfm/slots/`
+  caps how many workers may run a *heavy* job (`ingest`, `embed`,
+  `ocr`) at the same time across all projects. Default `4`; override
+  with `RTFM_MAX_CONCURRENT_INDEXERS=<n>` (`0` = unlimited). Scan /
+  remove / reconcile stay unbounded so the queue never starves.
+
+Waiting on a slot is interruptible: `SIGTERM` to the worker sends
+the pending job back to `pending` (without consuming a retry attempt)
+and exits cleanly.
+
 ## [0.24.8] — 2026-07-04
 
 ### Fixed — `reconcile` now sweeps fossil chunks that trigger `UNIQUE constraint failed: chunks.chunk_id`

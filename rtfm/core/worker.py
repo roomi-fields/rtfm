@@ -499,8 +499,24 @@ class Worker:
             self._jobs_failed += 1
             self._log(f"job#{job.id} {job.type}: {err}")
             return
+        # Heavy jobs (parse+chunk, embed, OCR) go through the global
+        # cross-worker slot pool so N projects don't all fire embedding
+        # at once and saturate the box. Scan / remove / reconcile stay
+        # unbounded (I/O-cheap, blocking them would starve the queue).
+        from rtfm.core.throttle import acquire_slot, HEAVY_JOB_TYPES
+        needs_slot = job.type in HEAVY_JOB_TYPES
         try:
-            handler(job, self)
+            if needs_slot:
+                with acquire_slot(should_stop=lambda: self._stop) as got:
+                    if not got:
+                        # Worker was asked to stop while waiting for a
+                        # slot. Requeue the job (it hasn't started yet)
+                        # so the next worker picks it up.
+                        self._queue.mark_pending(job.id)
+                        return
+                    handler(job, self)
+            else:
+                handler(job, self)
             self._queue.mark_done(job.id)
             self._jobs_done += 1
         except Exception as e:
