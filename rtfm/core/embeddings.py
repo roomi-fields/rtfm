@@ -123,6 +123,26 @@ def warn_if_heavy(name_or_alias: str, non_interactive: bool = False) -> bool:
     return answer in ("", "y", "yes", "o", "oui")
 
 
+def _embed_threads() -> Optional[int]:
+    """Read ``RTFM_EMBED_THREADS`` — the onnxruntime intra-op thread cap
+    for the embedding session. Default ``1`` (one worker ⇒ one core, no
+    per-project overshoot on multi-project boxes). ``0`` returns
+    ``None`` so fastembed picks its own default (cpu_count / 2).
+
+    The env-var equivalents (``OMP_NUM_THREADS`` etc.) do NOT actually
+    bound onnxruntime's intra-op pool — that pool is only controlled
+    by ``SessionOptions.intra_op_num_threads``, which fastembed exposes
+    through its ``threads=`` constructor argument. Setting OMP alone
+    left workers running 12 intra-op threads and eating ~400 % CPU.
+    """
+    raw = os.environ.get("RTFM_EMBED_THREADS", "1")
+    try:
+        n = int(raw)
+    except ValueError:
+        return 1
+    return None if n <= 0 else n
+
+
 def get_model(model_name: str = DEFAULT_MODEL):
     """Get or load the FastEmbed text embedding model (cached in process)."""
     global _model, _model_name
@@ -131,7 +151,7 @@ def get_model(model_name: str = DEFAULT_MODEL):
     if _model is None or _model_name != hf_name:
         try:
             from fastembed import TextEmbedding
-            _model = TextEmbedding(model_name=hf_name)
+            _model = TextEmbedding(model_name=hf_name, threads=_embed_threads())
             _model_name = hf_name
         except ImportError:
             raise ImportError(

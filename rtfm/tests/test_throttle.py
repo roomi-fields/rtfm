@@ -156,6 +156,28 @@ def test_semaphore_stops_on_should_stop(monkeypatch, tmp_path):
         p.join(timeout=2.0)
 
 
+def test_embed_threads_default_is_one(monkeypatch):
+    """The onnxruntime intra-op cap defaults to 1 thread per worker.
+    OMP_NUM_THREADS alone does NOT bound onnxruntime's pool — we must
+    pass ``threads=`` to fastembed.TextEmbedding."""
+    from rtfm.core.embeddings import _embed_threads
+    monkeypatch.delenv("RTFM_EMBED_THREADS", raising=False)
+    assert _embed_threads() == 1
+
+
+def test_embed_threads_zero_yields_none(monkeypatch):
+    """Setting the env var to 0 lets fastembed pick its own default."""
+    from rtfm.core.embeddings import _embed_threads
+    monkeypatch.setenv("RTFM_EMBED_THREADS", "0")
+    assert _embed_threads() is None
+
+
+def test_embed_threads_respects_override(monkeypatch):
+    from rtfm.core.embeddings import _embed_threads
+    monkeypatch.setenv("RTFM_EMBED_THREADS", "4")
+    assert _embed_threads() == 4
+
+
 def test_heavy_job_types_are_the_expected_ones():
     """A regression guard — if someone adds a new job type they must
     consciously decide whether it belongs in the pool."""

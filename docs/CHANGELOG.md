@@ -7,6 +7,23 @@ description: >-
 
 # Changelog
 
+## [0.24.10] — 2026-07-14
+
+### Fixed — the thread cap actually reaches onnxruntime now
+
+0.24.9 shipped an env-var cap (`OMP_NUM_THREADS=1` etc.) and confirmed
+it landed in the worker process. But onnxruntime's intra-op thread
+pool is *not* controlled by OpenMP env vars — it is only bounded by
+`SessionOptions.intra_op_num_threads`. Verified live on PC2: workers
+running the 0.24.9 cap still spawned 12 intra-op threads and used
+~400 % CPU.
+
+fastembed exposes the knob via its `TextEmbedding(threads=…)`
+constructor argument. `get_model()` now reads `RTFM_EMBED_THREADS`
+(default `1`) and passes it through. One active worker ⇒ one core,
+as originally intended. `RTFM_EMBED_THREADS=0` restores fastembed's
+default (`cpu_count / 2`).
+
 ## [0.24.9] — 2026-07-14
 
 ### Fixed — worker no longer saturates the CPU on multi-project boxes
