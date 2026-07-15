@@ -7,9 +7,45 @@ description: >-
 
 # Changelog
 
+## [0.24.12] — 2026-07-15
+
+### Added — project-local Python parsers (`.rtfm/parsers/*.py`)
+
+The Python counterpart of the declarative `.rtfm/mappings/` system:
+drop a module that registers a parser (via
+`@ParserRegistry.register`) into a project's `.rtfm/parsers/`
+directory and RTFM loads it **for that project only** — no core
+release needed. This is what keeps format-specific parsers (a single
+dictionary, one company's export layout) out of the shipped package.
+
+Loading happens at `Library` init, right after mappings. Files whose
+name starts with `_` are skipped; a parser that raises at import is
+skipped so one bad drop-in never breaks a sync. It `exec`s Python
+from the project's own `.rtfm/` — the same trust level as the
+repository's own source that RTFM already runs.
+
+To claim a subset of files whose extension another parser also
+handles, a drop-in overrides `BaseParser.matches(path)` (content
+routing, added in 0.24.11) and declares `extensions = []` so it
+never clobbers the generic parser's extension fallback.
+
+### Removed — XMLittré parser moved out of core
+
+The `littre` parser shipped in 0.24.11 was format-specific (one
+French dictionary) and did not belong in the package everyone
+installs. It is removed from core and now lives as a project-local
+drop-in where it is used. The generic mechanisms that make that
+possible — content routing (`matches()`) and the local-parser loader
+above — stay in core.
+
 ## [0.24.11] — 2026-07-15
 
 ### Added — XMLittré parser (`littre-dictionnaire.xml`)
+
+> **Superseded by 0.24.12** — this parser was moved out of core into
+> the project-local `.rtfm/parsers/` mechanism. The content-routing
+> hook it introduced stays in core.
+
 
 The XMLittré dictionary distributed by François Gannaz concatenates
 26 per-letter blocks into a single `<littre-consolide>` wrapper, each

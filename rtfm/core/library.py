@@ -218,10 +218,16 @@ class Library:
         self._load_mappings()
 
     def _load_mappings(self):
-        """Load user-defined JSON schema mappings from <db_dir>/mappings/."""
+        """Load project-local extensions from the ``.rtfm/`` directory:
+        declarative JSON schema mappings (``mappings/``) and Python
+        parser drop-ins (``parsers/``). Both are per-project, so a
+        format-specific parser lives with the project instead of the
+        shipped package."""
         from rtfm.parsers.mappings import load_mappings_from_dir
-        mappings_dir = self.db_path.parent / "mappings"
-        load_mappings_from_dir(mappings_dir)
+        rtfm_dir = self.db_path.parent
+        load_mappings_from_dir(rtfm_dir / "mappings")
+        from rtfm.parsers.local import load_local_parsers
+        load_local_parsers(rtfm_dir / "parsers")
 
     def _get_conn(self) -> sqlite3.Connection:
         """Get database connection with proper settings."""

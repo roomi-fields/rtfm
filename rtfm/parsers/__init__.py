@@ -4,7 +4,6 @@ from rtfm.parsers.base import BaseParser, ParserRegistry
 
 # Import parsers to trigger registration (order = priority for overlapping extensions)
 from rtfm.parsers import markdown
-from rtfm.parsers import littre  # content-routed; must import before xml_legifrance
 from rtfm.parsers import xml_legifrance
 from rtfm.parsers import html_bofip
 from rtfm.parsers import python
