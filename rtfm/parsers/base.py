@@ -30,6 +30,19 @@ class BaseParser(ABC):
         """Check if this parser can handle the given file."""
         return path.suffix.lower() in [ext.lower() for ext in cls.extensions]
 
+    @classmethod
+    def matches(cls, path: Path) -> bool:
+        """Content-based routing hook. Override in a parser that needs
+        to win over another parser sharing the same extension (e.g. a
+        specialised dictionary XML vs the generic XML parser). The
+        registry tries every ``matches``-overriding parser first, in
+        registration order, before falling back to extension matching.
+
+        Default returns ``False`` so extension-only parsers stay out of
+        the content-check pass.
+        """
+        return False
+
     @abstractmethod
     def parse(
         self,
@@ -72,6 +85,11 @@ class ParserRegistry:
     """Registry of available parsers."""
 
     _parsers: dict[str, Type[BaseParser]] = {}
+    # Parsers that override ``matches()`` — tried before the extension
+    # lookup so a specialised parser (Littré dictionary XML) can win
+    # over the generic one (Legifrance XML). Preserves registration
+    # order so callers can reason about priority.
+    _content_parsers: list[Type[BaseParser]] = []
 
     @classmethod
     def register(cls, parser_class: Type[BaseParser]) -> Type[BaseParser]:
@@ -85,11 +103,25 @@ class ParserRegistry:
         """
         for ext in parser_class.extensions:
             cls._parsers[ext.lower()] = parser_class
+        # Only content-aware parsers (those that override matches())
+        # participate in the content-check pass; extension-only parsers
+        # stay out of it to keep get_parser cheap.
+        if parser_class.matches is not BaseParser.matches:
+            if parser_class not in cls._content_parsers:
+                cls._content_parsers.append(parser_class)
         return parser_class
 
     @classmethod
     def get_parser(cls, path: Path) -> Optional[BaseParser]:
-        """Get a parser instance for the given file."""
+        """Get a parser instance for the given file. Content-aware
+        parsers are consulted first; extension routing is the fallback."""
+        for pc in cls._content_parsers:
+            try:
+                if pc.matches(path):
+                    return pc()
+            except Exception:
+                # A misbehaving matches() must never block the fallback.
+                continue
         ext = path.suffix.lower()
         parser_class = cls._parsers.get(ext)
         if parser_class:

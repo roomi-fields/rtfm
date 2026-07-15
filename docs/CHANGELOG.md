@@ -7,6 +7,28 @@ description: >-
 
 # Changelog
 
+## [0.24.11] — 2026-07-15
+
+### Added — XMLittré parser (`littre-dictionnaire.xml`)
+
+The XMLittré dictionary distributed by François Gannaz concatenates
+26 per-letter blocks into a single `<littre-consolide>` wrapper, each
+carrying its own `<?xml ?>` declaration and `<!DOCTYPE>`. Standard
+XML parsers reject the result (`XML or text declaration not at start
+of entity`), which had the 93 MB Littré file spamming ~7000 failed
+ingest attempts in the viasophia queue.
+
+`rtfm.parsers.littre.LittreParser` strips the interior declarations
+before feeding the text to `xml.etree.ElementTree.iterparse`,
+streaming one chunk per `<entree>` element (78 599 entries in the
+current file) with peak memory bounded by aggressive `elem.clear()`.
+
+Registration also introduces a content-based routing hook: parsers
+that override `BaseParser.matches(path)` are consulted before the
+extension map, so Littré wins over the generic Legifrance XML parser
+on the one file it claims and every other `.xml` still routes to
+Legifrance unchanged.
+
 ## [0.24.10] — 2026-07-14
 
 ### Fixed — the thread cap actually reaches onnxruntime now
