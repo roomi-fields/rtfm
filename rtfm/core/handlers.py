@@ -24,7 +24,7 @@ from rtfm.core.library import Library
 from rtfm.core.queue import Queue, Job
 
 if TYPE_CHECKING:
-    from rtfm.core.worker import Worker
+    from rtfm.core.worker import JobContext
 
 
 # How many chunks fit into a single P2 embed job. Tuned so a batch
@@ -83,7 +83,7 @@ def _compute_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def handle_scan(job: Job, worker: "Worker") -> None:
+def handle_scan(job: Job, worker: "JobContext") -> None:
     """P1 — scan one source root and fan out per-file work to the queue.
 
     Replaces the legacy inline ``sync()`` for the worker path: instead of
@@ -247,7 +247,7 @@ def handle_scan(job: Job, worker: "Worker") -> None:
     )
 
 
-def handle_ingest(job: Job, worker: "Worker") -> None:
+def handle_ingest(job: Job, worker: "JobContext") -> None:
     """P1 — ingest a single file.
 
     Equivalent to the per-file path in :func:`rtfm.core.sync.sync`
@@ -418,7 +418,7 @@ def _ocr_config(db_path) -> tuple[str, str]:
     return backend, langs
 
 
-def handle_ocr(job: Job, worker: "Worker") -> None:
+def handle_ocr(job: Job, worker: "JobContext") -> None:
     """P3 — OCR a page range of a scanned PDF and append its chunks.
 
     Each P3 job covers one page tranche (page_start..page_end), so a
@@ -513,7 +513,7 @@ def handle_ocr(job: Job, worker: "Worker") -> None:
         lib.close()
 
 
-def handle_vacuum(job: Job, worker: "Worker") -> None:
+def handle_vacuum(job: Job, worker: "JobContext") -> None:
     """P4 — VACUUM the SQLite DB to reclaim space from deleted rows.
 
     VACUUM rebuilds the file, so it needs an EXCLUSIVE lock on the
@@ -545,7 +545,7 @@ def handle_vacuum(job: Job, worker: "Worker") -> None:
     worker._log(f"vacuum done — {before_mb:.0f}M → {after_mb:.0f}M ({reason})")
 
 
-def handle_remove(job: Job, worker: "Worker") -> None:
+def handle_remove(job: Job, worker: "JobContext") -> None:
     """P2 — remove a single file from the index.
 
     Inverse of :func:`handle_ingest`: drops the book row (its chunks
@@ -571,7 +571,7 @@ def handle_remove(job: Job, worker: "Worker") -> None:
         lib.close()
 
 
-def handle_reconcile(job: Job, worker: "Worker") -> None:
+def handle_reconcile(job: Job, worker: "JobContext") -> None:
     """P4 — self-heal pass: purge orphan embeddings, re-queue un-embedded
     chunks.
 
@@ -601,7 +601,7 @@ def handle_reconcile(job: Job, worker: "Worker") -> None:
             queue.close()
 
 
-def handle_embed(job: Job, worker: "Worker") -> None:
+def handle_embed(job: Job, worker: "JobContext") -> None:
     """P2 — embed a batch of chunks identified by id.
 
     The batch size is bounded by :data:`EMBED_BATCH_SIZE` at enqueue

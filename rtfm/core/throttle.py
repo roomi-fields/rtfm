@@ -76,17 +76,51 @@ _SLOT_DIR = Path.home() / ".rtfm" / "slots"
 _DEFAULT_MAX_CONCURRENT = 4
 _ACQUIRE_POLL_SECONDS = 0.5
 
+#: Machine-local RTFM config, read for a durable concurrency setting that
+#: survives worker respawns. ``.bashrc`` does NOT: non-interactive and
+#: hook-spawned shells never source it, so an ``export`` there is invisible
+#: to a respawned supervisor. A value here is the reliable per-machine knob.
+_GLOBAL_CONFIG = Path.home() / ".rtfm" / "config.json"
+
+
+def _config_max_concurrent() -> Optional[int]:
+    """Read ``max_concurrent_indexers`` from ``~/.rtfm/config.json``.
+
+    Returns ``None`` when the file is absent, unreadable, or the key is
+    missing — the caller then falls back to the built-in default.
+    """
+    try:
+        import json
+        data = json.loads(_GLOBAL_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    v = data.get("max_concurrent_indexers")
+    if v is None:
+        return None
+    try:
+        return max(0, int(v))
+    except (TypeError, ValueError):
+        return None
+
 
 def _max_concurrent() -> int:
-    """Read ``RTFM_MAX_CONCURRENT_INDEXERS`` (default 4). ``0`` = disabled."""
+    """Effective concurrency cap for heavy indexing.
+
+    Precedence: ``RTFM_MAX_CONCURRENT_INDEXERS`` env var (highest — lets a
+    one-off override everything) → ``max_concurrent_indexers`` in
+    ``~/.rtfm/config.json`` (the durable per-machine knob) → built-in
+    default (:data:`_DEFAULT_MAX_CONCURRENT`). ``0`` = unlimited.
+    """
     raw = os.environ.get("RTFM_MAX_CONCURRENT_INDEXERS")
-    if raw is None or raw.strip() == "":
-        return _DEFAULT_MAX_CONCURRENT
-    try:
-        n = int(raw)
-    except ValueError:
-        return _DEFAULT_MAX_CONCURRENT
-    return max(0, n)
+    if raw is not None and raw.strip() != "":
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    cfg = _config_max_concurrent()
+    if cfg is not None:
+        return cfg
+    return _DEFAULT_MAX_CONCURRENT
 
 
 def _try_acquire_one(n: int) -> Optional[int]:

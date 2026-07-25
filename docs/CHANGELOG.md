@@ -7,6 +7,56 @@ description: >-
 
 # Changelog
 
+## [0.25.0] — 2026-07-25
+
+### Changed — one mutualised worker replaces the per-project daemon fleet
+
+RTFM ran **one background daemon per project** — 16 resident processes
+on a 6-core laptop, each idle-scanning every 30 s, each an independent
+writer to its own `library.db`. That model had three problems this
+release fixes at the root:
+
+- **DB corruption.** Nothing guaranteed a single writer through a
+  respawn/hard-kill window: a `SIGKILL` (from `restart-all`'s 3 s grace,
+  or the OOM-killer) landing mid-write could corrupt a DB. Once corrupt,
+  the worker could no longer tell which files were indexed and re-ingested
+  everything on every scan — one project looped that way for weeks,
+  growing a 2 GB DB and a 2.4 GB log.
+- **Load spikes.** All workers scanned on the same 30 s tick; a burst of
+  file churn made every project re-hash at once.
+- **16 resident processes** each loading their own embedding model.
+
+The new **supervisor** (`rtfm.core.supervisor`) is a single process that
+services every registered project's queue with a bounded thread pool and
+**never runs two jobs for the same project at once** — so each DB has
+exactly one writer at any instant, eliminating the corruption class.
+Scans are staggered across projects, the embedding model is loaded once
+and shared, and on shutdown in-flight jobs finish cleanly (no interrupted
+writes). `rtfm worker start|stop|status|restart-all` now drive the one
+supervisor; `ensure_worker_running()` still works unchanged for every
+producer (CLI, hooks, MCP) — it registers the project and ensures the
+supervisor is up.
+
+### Added — hardening (`rtfm.core.dbcare`)
+
+- **Integrity guard.** Every project DB is `PRAGMA quick_check`-ed before
+  it is serviced; a corrupt file is quarantined (`library.db.corrupt-*`,
+  kept for salvage) and rebuilt once from source — never looped on.
+- **Log rotation.** The worker log is capped (default 5 MB, one backup) so
+  a chatty or looping worker can't fill the disk.
+
+### Added — durable concurrency setting
+
+`max_concurrent_indexers` in `~/.rtfm/config.json` sets the concurrency
+cap persistently (survives respawns, unlike a `.bashrc` export that
+non-interactive shells never source). Precedence:
+`RTFM_MAX_CONCURRENT_INDEXERS` env → config file → built-in default.
+
+### Removed
+
+The per-project `Worker` loop, its `WorkerLock`, and the per-project
+delayed-respawn helper — replaced wholesale by the supervisor.
+
 ## [0.24.12] — 2026-07-15
 
 ### Added — project-local Python parsers (`.rtfm/parsers/*.py`)
