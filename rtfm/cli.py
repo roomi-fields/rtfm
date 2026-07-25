@@ -1496,12 +1496,12 @@ def cmd_status(args):
     # used the queue path.
     try:
         from rtfm.config import find_rtfm_root as _frr
-        from rtfm.core.worker import worker_running as _wr
+        from rtfm.core.supervisor import supervisor_running as _sr
         from rtfm.core.queue import Queue as _Q
         _root_for_worker = _frr()
         if _root_for_worker is not None:
             _rtfm_dir = _root_for_worker / ".rtfm"
-            _wstate = _wr(_rtfm_dir)
+            _sstate = _sr()
             # Queue stats (cheap; reads from the same library.db)
             _q = _Q(str(_rtfm_dir / "library.db"))
             try:
@@ -1509,7 +1509,7 @@ def cmd_status(args):
             finally:
                 _q.close()
 
-            _has_active = _wstate is not None
+            _has_active = _sstate is not None
             _has_pending = any(
                 _qstats.get(t, {}).get("pending", 0) for t in ("ingest", "embed", "ocr")
             )
@@ -1519,22 +1519,18 @@ def cmd_status(args):
 
             if _has_active or _has_pending or _has_failed:
                 print("\nWorker / Queue:")
-                if _wstate:
-                    line = f"  worker:  running (PID {_wstate.pid}, {_wstate.status})"
-                    print(line)
-                    if _wstate.current_job_id is not None:
-                        _payload = _wstate.current_job_payload or {}
-                        _fp = _payload.get("filepath") or _payload.get("chunk_ids")
-                        _detail = f" — {_fp}" if _fp else ""
-                        if isinstance(_fp, list):
-                            _detail = f" — {len(_fp)} chunk(s)"
-                        print(f"           job #{_wstate.current_job_id} "
-                              f"[{_wstate.current_job_type}]{_detail}")
-                    print(f"           {_wstate.jobs_done} done, "
-                          f"{_wstate.jobs_failed} failed since "
-                          f"{_wstate.started_at}")
+                if _sstate:
+                    print(f"  supervisor: running (PID {_sstate.pid}, "
+                          f"{_sstate.projects} project(s), "
+                          f"{_sstate.in_flight} in flight)")
+                    _proj = (_sstate.per_project or {}).get(_root_for_worker.name)
+                    if _proj:
+                        _busy = "busy" if _proj.get("active") else "idle"
+                        print(f"           this project: {_busy}, "
+                              f"{_proj.get('done', 0)} done, "
+                              f"{_proj.get('failed', 0)} failed")
                 else:
-                    print("  worker:  not running"
+                    print("  supervisor: not running"
                           + (" — run `rtfm worker start` (or any `rtfm sync`)"
                              if _has_pending else ""))
                 # Compact per-type breakdown (only types with rows)
@@ -2507,28 +2503,23 @@ def main():
     from rtfm.cli_worker import cmd_worker, cmd_worker_daemon, cmd_queue
     p_w = subparsers.add_parser(
         "worker",
-        help="Start/stop/inspect the RTFM background worker "
-             "(priority queue + idle scan)",
+        help="Start/stop/inspect the mutualised RTFM worker (one supervisor "
+             "serving every project's queue)",
     )
     p_w.add_argument(
         "action", nargs="?",
         choices=["start", "stop", "status", "restart-all"],
         default="status",
-        help="start: spawn a detached worker. stop: SIGTERM the worker. "
-             "status (default): report on the running worker. "
-             "restart-all: cycle every registered project's worker — "
-             "use after `pip install` so fresh code takes effect.",
-    )
-    p_w.add_argument(
-        "--scan-interval", type=float, default=None, metavar="SECONDS",
-        help="How often (idle) the worker re-scans sources for new files. "
-             "Default 30s.",
+        help="start: ensure the supervisor is running. stop: SIGTERM it "
+             "(in-flight jobs finish cleanly). status (default): report on "
+             "the supervisor and its projects. restart-all: recycle the "
+             "supervisor — use after `pip install` so fresh code takes effect.",
     )
     p_w.set_defaults(func=cmd_worker)
 
-    # worker-daemon (hidden — invoked by ensure_worker_running()).
+    # worker-daemon (hidden — the supervisor loop, spawned by
+    # ensure_supervisor_running()).
     p_wd = subparsers.add_parser("worker-daemon", help=argparse.SUPPRESS)
-    p_wd.add_argument("--scan-interval", type=float, default=None)
     p_wd.set_defaults(func=cmd_worker_daemon)
 
     # queue — inspect / manage the work queue.

@@ -182,3 +182,29 @@ def test_heavy_job_types_are_the_expected_ones():
     """A regression guard — if someone adds a new job type they must
     consciously decide whether it belongs in the pool."""
     assert throttle.HEAVY_JOB_TYPES == frozenset({"ingest", "embed", "ocr"})
+
+
+def test_config_max_concurrent_reads_global_config(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.json"
+    monkeypatch.setattr(throttle, "_GLOBAL_CONFIG", cfg)
+    assert throttle._config_max_concurrent() is None          # absent
+    cfg.write_text('{"max_concurrent_indexers": 2}', encoding="utf-8")
+    assert throttle._config_max_concurrent() == 2
+    cfg.write_text('{"other": 1}', encoding="utf-8")
+    assert throttle._config_max_concurrent() is None          # key missing
+    cfg.write_text("not json at all", encoding="utf-8")
+    assert throttle._config_max_concurrent() is None          # unreadable
+
+
+def test_max_concurrent_precedence_env_over_config_over_default(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.json"
+    monkeypatch.setattr(throttle, "_GLOBAL_CONFIG", cfg)
+    monkeypatch.delenv("RTFM_MAX_CONCURRENT_INDEXERS", raising=False)
+    # Nothing set → built-in default.
+    assert throttle._max_concurrent() == throttle._DEFAULT_MAX_CONCURRENT
+    # Durable config overrides the default.
+    cfg.write_text('{"max_concurrent_indexers": 2}', encoding="utf-8")
+    assert throttle._max_concurrent() == 2
+    # Env var overrides everything (one-off escape hatch).
+    monkeypatch.setenv("RTFM_MAX_CONCURRENT_INDEXERS", "5")
+    assert throttle._max_concurrent() == 5
