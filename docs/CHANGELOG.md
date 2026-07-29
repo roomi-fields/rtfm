@@ -7,6 +7,23 @@ description: >-
 
 # Changelog
 
+## [0.26.1] — 2026-07-29
+
+### Changed — no integrity scan at every startup
+
+The boot-time integrity guard ran a full `PRAGMA quick_check` on **every**
+project DB at **every** supervisor start, serially. On a multi-GB index that
+is minutes of work before anything gets indexed (a 10 GB DB took ~4 min), and
+it repeated on every restart/upgrade/recycle.
+
+A DB can only be corrupted by a hard kill landing mid-write, so the deep scan
+is only ever needed after an **unclean** exit. The supervisor now records a
+clean-shutdown marker at the end of a graceful stop (all in-flight jobs
+finished, all DBs closed) and consumes it at boot: present ⇒ last exit was
+clean ⇒ skip the scans (near-instant start); absent ⇒ crash / SIGKILL / OOM /
+first run ⇒ deep-check everything, exactly as before. The quarantine-and-
+rebuild-once safety net is unchanged for the case that actually needs it.
+
 ## [0.26.0] — 2026-07-29
 
 ### Changed — global arrival-order scheduling, all idle cores, per-project write concurrency
