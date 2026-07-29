@@ -8,11 +8,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from rtfm.core import dbcare
 from rtfm.core.dbcare import (
     check_integrity, quarantine_db, ensure_healthy_db,
     rotate_log_if_large, make_rotating_logger,
-    mark_clean_shutdown, consume_clean_shutdown,
 )
 
 
@@ -22,34 +20,6 @@ def _make_valid_db(path: Path) -> None:
     conn.execute("INSERT INTO t VALUES (1)")
     conn.commit()
     conn.close()
-
-
-def test_ensure_healthy_db_verify_false_skips_scan(tmp_path: Path):
-    """With verify=False a corrupt DB is left untouched (no scan, no
-    quarantine) — the fast path after a clean shutdown."""
-    db = tmp_path / "library.db"
-    db.write_bytes(b"not a sqlite database" * 50)
-    assert ensure_healthy_db(db, verify=False) is False
-    assert db.exists()  # untouched
-    # With verify=True (default) it is detected and quarantined.
-    assert ensure_healthy_db(db, verify=True) is True
-    assert not db.exists()
-    assert list(tmp_path.glob("library.db.corrupt-*"))
-
-
-def test_clean_shutdown_marker_roundtrip(tmp_path: Path, monkeypatch):
-    marker = tmp_path / "clean-shutdown"
-    monkeypatch.setattr(dbcare, "CLEAN_SHUTDOWN_MARKER", marker)
-    # Absent → last exit not clean.
-    assert consume_clean_shutdown() is False
-    # Marked → present.
-    mark_clean_shutdown()
-    assert marker.exists()
-    # Consumed once → True, and the marker is cleared so the next boot
-    # (after a hypothetical crash) sees it absent.
-    assert consume_clean_shutdown() is True
-    assert not marker.exists()
-    assert consume_clean_shutdown() is False
 
 
 def test_check_integrity_healthy_and_missing(tmp_path: Path):

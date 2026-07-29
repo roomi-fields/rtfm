@@ -81,27 +81,18 @@ def quarantine_db(db_path: str | Path) -> Optional[Path]:
 def ensure_healthy_db(
     db_path: str | Path,
     log: Optional[Callable[[str], None]] = None,
-    *,
-    verify: bool = True,
 ) -> bool:
     """Guard a DB before it is opened for work.
 
     Runs :func:`check_integrity`; if the DB is corrupt, quarantines it via
     :func:`quarantine_db` so the caller's next open creates a clean file.
-
-    ``verify=False`` skips the (expensive on a multi-GB file) integrity scan
-    entirely and assumes the DB is healthy. The supervisor passes this after
-    a **clean shutdown**: a corruption only ever comes from a hard kill
-    landing mid-write, so a graceful previous exit means no DB can have been
-    left inconsistent — re-scanning every large DB on every restart is pure
-    waste (a 10 GB DB took ~4 min at boot). Only an unclean previous exit
-    (crash / SIGKILL / OOM) forces the deep check.
+    Runs on **every** supervisor start — the deep scan is the price of never
+    letting a hard-kill-mid-write corruption go undetected (it once looped a
+    project for weeks).
 
     Returns ``True`` when a corrupt DB was quarantined (the caller should
-    trigger a full re-index), ``False`` when the DB was healthy or unchecked.
+    trigger a full re-index), ``False`` when the DB was already healthy.
     """
-    if not verify:
-        return False
     if check_integrity(db_path):
         return False
     dest = quarantine_db(db_path)
@@ -109,40 +100,6 @@ def ensure_healthy_db(
         log(f"integrity: corrupt DB quarantined → {dest.name if dest else '?'}; "
             f"rebuilding from source")
     return True
-
-
-# ── Clean-shutdown sentinel ─────────────────────────────────────────────
-#
-# The integrity scan above only needs to run after an *unclean* exit. We
-# record a clean exit with a marker file: the supervisor touches it at the
-# very end of a graceful shutdown (all in-flight jobs finished, all DBs
-# closed) and consumes it at boot. Present at boot ⇒ last exit was clean ⇒
-# skip the scans. Absent ⇒ crash / SIGKILL / OOM ⇒ deep-check everything.
-
-CLEAN_SHUTDOWN_MARKER = Path.home() / ".rtfm" / "clean-shutdown"
-
-
-def mark_clean_shutdown() -> None:
-    """Record that this supervisor exited gracefully. Best-effort."""
-    try:
-        CLEAN_SHUTDOWN_MARKER.parent.mkdir(parents=True, exist_ok=True)
-        CLEAN_SHUTDOWN_MARKER.touch()
-    except OSError:
-        pass
-
-
-def consume_clean_shutdown() -> bool:
-    """Return ``True`` iff the previous exit was clean, and clear the marker.
-
-    Cleared unconditionally so that a crash (which never re-creates it) leaves
-    it absent for the following boot, forcing a deep integrity check then.
-    """
-    try:
-        existed = CLEAN_SHUTDOWN_MARKER.exists()
-        CLEAN_SHUTDOWN_MARKER.unlink(missing_ok=True)
-        return existed
-    except OSError:
-        return False
 
 
 # ── Log rotation ─────────────────────────────────────────────────────────

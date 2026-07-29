@@ -7,6 +7,17 @@ description: >-
 
 # Changelog
 
+## [0.26.2] — 2026-07-29
+
+### Reverted — integrity scan runs at every startup again
+
+0.26.1 skipped the boot-time `PRAGMA quick_check` after a clean shutdown to
+speed up restarts. Reverted at the operator's request: the full integrity
+scan now runs on **every** supervisor start, as it did through 0.26.0. The
+guarantee (never let a hard-kill-mid-write corruption go undetected) is worth
+the slower boot on multi-GB indexes. The clean-shutdown marker mechanism is
+removed entirely.
+
 ## [0.26.1] — 2026-07-29
 
 ### Changed — no integrity scan at every startup

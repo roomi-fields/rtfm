@@ -43,10 +43,7 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from rtfm.core.dbcare import (
-    ensure_healthy_db, make_rotating_logger,
-    mark_clean_shutdown, consume_clean_shutdown,
-)
+from rtfm.core.dbcare import ensure_healthy_db, make_rotating_logger
 from rtfm.core.queue import Queue, Job
 from rtfm.core.throttle import _max_concurrent
 from rtfm.core.worker import (
@@ -235,14 +232,10 @@ class _Slot:
         """True while at least one of this project's jobs is in the pool."""
         return self.inflight > 0
 
-    def open(self, log: Callable[[str], None], *, verify: bool = True) -> bool:
+    def open(self, log: Callable[[str], None]) -> bool:
         """Integrity-guard the DB, then open the queue. Returns ``True`` if
-        a rebuild was triggered (caller should force an immediate scan).
-
-        ``verify=False`` skips the integrity scan (see
-        :func:`~rtfm.core.dbcare.ensure_healthy_db`) — used when the previous
-        supervisor exit was clean, so no DB can be inconsistent."""
-        rebuilt = ensure_healthy_db(self.db_path, log=self.log, verify=verify)
+        a rebuild was triggered (caller should force an immediate scan)."""
+        rebuilt = ensure_healthy_db(self.db_path, log=self.log)
         self.queue = Queue(self.db_path)
         # Reap zombies left by a previous supervisor/worker that died
         # mid-job — every ``running`` row is orphaned now.
@@ -268,13 +261,9 @@ class Supervisor:
         max_concurrent: Optional[int] = None,
         scan_interval: float = SCAN_INTERVAL_SECONDS,
         reconcile_interval: float = RECONCILE_INTERVAL_SECONDS,
-        verify_integrity: bool = True,
     ):
         self._registry_path = registry_path
         self._log = log or (lambda m: None)
-        # Whether to run the per-DB integrity scan when opening a project.
-        # False after a clean previous shutdown (nothing can be corrupt).
-        self._verify_integrity = verify_integrity
         # 0 (unlimited) is meaningless for a thread pool; clamp to a sane
         # minimum of 1 so the supervisor always makes progress.
         cap = _max_concurrent() if max_concurrent is None else max_concurrent
@@ -355,7 +344,7 @@ class Supervisor:
             if path in self._slots:
                 continue
             slot = _Slot(Path(path))
-            rebuilt = slot.open(self._log, verify=self._verify_integrity)
+            rebuilt = slot.open(self._log)
             # Stagger first scans across the interval so N projects don't
             # all scan at once (the storm we're eliminating). A rebuilt DB
             # scans ASAP to repopulate.
@@ -625,10 +614,6 @@ class Supervisor:
         for slot in self._slots.values():
             slot.close()
         clear_supervisor_state()
-        # All in-flight jobs finished and every DB is closed: this exit is
-        # clean, so the next boot may skip the integrity scans. Written last,
-        # so a kill mid-shutdown leaves it absent → next boot deep-checks.
-        mark_clean_shutdown()
         if self._auto_respawn:
             _spawn_delayed_supervisor(self._log)
 
@@ -673,14 +658,8 @@ def run_supervisor() -> None:
     apply_thread_caps()
     _RTFM_HOME.mkdir(parents=True, exist_ok=True)
     log = make_rotating_logger(SUPERVISOR_LOG, prefix="supervisor")
-    # Consume the clean-shutdown marker: present ⇒ last exit was graceful ⇒
-    # skip the per-DB integrity scans this boot. Absent (crash/kill/first run)
-    # ⇒ deep-check everything.
-    clean_last_exit = consume_clean_shutdown()
-    if not clean_last_exit:
-        log("previous exit was not clean (or first run) — verifying DB integrity")
     try:
         with SupervisorLock():
-            Supervisor(log=log, verify_integrity=not clean_last_exit).run()
+            Supervisor(log=log).run()
     except SupervisorLockHeld:
         return

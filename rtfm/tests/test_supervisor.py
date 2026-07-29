@@ -177,29 +177,6 @@ def test_slot_open_quarantines_corrupt_db(tmp_path: Path):
         slot.close()
 
 
-def test_slot_open_verify_false_skips_integrity(tmp_path: Path, monkeypatch):
-    """After a clean shutdown the supervisor opens projects with verify=False:
-    the integrity scan is not run at all (proven by making check_integrity
-    blow up if called), and the queue still opens."""
-    rtfm_dir = tmp_path / "proj" / ".rtfm"
-    rtfm_dir.mkdir(parents=True)
-    Library(str(rtfm_dir / "library.db")).close()  # a real, healthy DB
-
-    def _boom(*a, **k):
-        raise AssertionError("check_integrity must not run when verify=False")
-    monkeypatch.setattr(sup_mod, "ensure_healthy_db",
-                        lambda *a, verify=True, **k: False if not verify else _boom())
-
-    slot = _Slot(rtfm_dir)
-    rebuilt = slot.open(log=lambda m: None, verify=False)
-    try:
-        assert rebuilt is False
-        assert slot.queue is not None
-        assert not list(rtfm_dir.glob("library.db.corrupt-*"))
-    finally:
-        slot.close()
-
-
 # ── dispatch / reap ──────────────────────────────────────────────────────
 
 
