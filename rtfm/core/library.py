@@ -587,6 +587,12 @@ class Library:
             (book_id, page_lo, page_hi),
         )
 
+        # Other tranches' chunks remain, so seed the de-dup set with the
+        # book's surviving ids to keep this tranche's ids unique against them.
+        seen_ids: set[str] = {
+            r["chunk_id"] for r in conn.execute(
+                "SELECT chunk_id FROM chunks WHERE book_id = ?", (book_id,))
+        }
         added = 0
         for chunk in chunks:
             tags_json = json.dumps(chunk.tags) if chunk.tags else None
@@ -597,7 +603,8 @@ class Library:
                     page_start, page_end, paragraph, content, content_chars,
                     content_hash, line_start, line_end, tags, metadata)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (chunk.id, book_id, None, chunk.chapter_num, chunk.chapter_title,
+                (self._unique_chunk_id(book_slug, chunk.id, seen_ids),
+                 book_id, None, chunk.chapter_num, chunk.chapter_title,
                  chunk.page_start, chunk.page_end, chunk.paragraph,
                  chunk.content, chunk.content_chars, chunk.content_hash,
                  chunk.line_start, chunk.line_end, tags_json, metadata_json),
@@ -616,6 +623,28 @@ class Library:
         )
         conn.commit()
         return {"chunks": added}
+
+    @staticmethod
+    def _unique_chunk_id(book_slug: str, raw_id: str, seen: set[str]) -> str:
+        """Return a globally-unique ``chunk_id`` for storage.
+
+        Parsers derive a chunk's id from its content alone (``md5(text)[:12]``),
+        but the ``chunks.chunk_id`` column is UNIQUE across the whole DB — so
+        two chunks with identical text (a PDF's blank/boilerplate pages, or the
+        same passage in two books) collided and aborted the entire ingest with
+        ``UNIQUE constraint failed: chunks.chunk_id``. Scoping the id to the
+        book (``slug:rawid``) removes cross-book collisions; a ``#n`` suffix
+        removes duplicates within one book. ``seen`` accumulates the ids
+        already used for this book (pre-seed it with the book's existing rows
+        when appending rather than replacing)."""
+        cid = f"{book_slug}:{raw_id}"
+        if cid in seen:
+            base, n = cid, 1
+            while cid in seen:
+                cid = f"{base}#{n}"
+                n += 1
+        seen.add(cid)
+        return cid
 
     def _index_chunks(
         self,
@@ -667,6 +696,9 @@ class Library:
         page_count = metadata.get("page_count")
         stats = {"chunks": 0, "chars": 0, "pages": page_count}
 
+        # Old chunks for this book were just deleted, so ids only need to be
+        # unique within this batch.
+        seen_ids: set[str] = set()
         for chunk in chunks:
             # Get or create chapter
             ch_num = chunk.chapter_num or chunk.part_num or 0
@@ -694,14 +726,15 @@ class Library:
             tags_json = json.dumps(chunk.tags) if chunk.tags else None
             metadata_json = json.dumps(chunk.metadata) if chunk.metadata else None
 
-            # Insert chunk
+            # Insert chunk (id scoped to the book + de-duplicated).
             conn.execute(
                 """INSERT INTO chunks
                    (chunk_id, book_id, chapter_id, chapter_num, chapter_title,
                     page_start, page_end, paragraph, content, content_chars,
                     content_hash, line_start, line_end, tags, metadata)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (chunk.id, book_id, chapter_id, chunk.chapter_num,
+                (self._unique_chunk_id(book_slug, chunk.id, seen_ids),
+                 book_id, chapter_id, chunk.chapter_num,
                  chunk.chapter_title, chunk.page_start, chunk.page_end,
                  chunk.paragraph, chunk.content, chunk.content_chars,
                  chunk.content_hash, chunk.line_start, chunk.line_end,

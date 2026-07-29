@@ -196,3 +196,31 @@ class TestLibraryStats:
         assert stats["chunks"] == 2
         assert stats["books"] == 1
         assert stats["corpora"] == 1
+
+
+class TestChunkIdUniqueness:
+    """Regression: content-hash chunk ids must not collide on the global
+    UNIQUE(chunk_id) constraint (once aborted whole ingests — 69k on one repo)."""
+
+    def test_duplicate_content_within_book_does_not_collide(self, library):
+        dup = "identical boilerplate footer"
+        chunks = [
+            Chunk(id="abc123def456", content=dup, book_title="B", book_slug="b",
+                  page_start=1, page_end=1, content_chars=len(dup)),
+            Chunk(id="abc123def456", content=dup, book_title="B", book_slug="b",
+                  page_start=2, page_end=2, content_chars=len(dup)),
+        ]
+        res = library.ingest_chunks(chunks, corpus="t")
+        assert res["chunks"] == 2  # both stored — no IntegrityError
+
+    def test_same_content_across_books_does_not_collide(self, library):
+        dup = "a shared quotation"
+        library.ingest_chunks(
+            [Chunk(id="hh", content=dup, book_title="One", book_slug="one",
+                   page_start=1, page_end=1, content_chars=len(dup))], corpus="t")
+        library.ingest_chunks(
+            [Chunk(id="hh", content=dup, book_title="Two", book_slug="two",
+                   page_start=1, page_end=1, content_chars=len(dup))], corpus="t")
+        conn = library._get_conn()
+        ids = [r[0] for r in conn.execute("SELECT chunk_id FROM chunks")]
+        assert len(ids) == 2 and len(set(ids)) == 2  # distinct, scoped by slug

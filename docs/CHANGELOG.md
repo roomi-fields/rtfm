@@ -7,6 +7,19 @@ description: >-
 
 # Changelog
 
+## [0.26.3] — 2026-07-29
+
+### Fixed — chunk_id collisions aborted whole ingests
+
+Parsers derive a chunk's id from its content alone (`md5(text)[:12]`), but
+`chunks.chunk_id` is UNIQUE across the whole DB. Any two chunks with identical
+text — a PDF's blank/boilerplate pages, or the same passage in two books —
+collided and aborted the entire ingest with `UNIQUE constraint failed:
+chunks.chunk_id`. One repo accumulated ~69 k such failures. Stored chunk ids
+are now scoped to the book (`slug:rawid`) with a `#n` suffix for genuine
+within-book duplicates, so identical content never collides. Content-hash
+semantics (dedup, search) are unchanged.
+
 ## [0.26.2] — 2026-07-29
 
 ### Reverted — integrity scan runs at every startup again
