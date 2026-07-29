@@ -17,6 +17,7 @@ P3 OCR    : OCR a page range of a scanned PDF and append its chunks.
 from __future__ import annotations
 
 import hashlib
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,13 @@ EMBED_BATCH_SIZE = 64
 # chars per page; scans yield ~0. This replaces the old "0 chunks"
 # heuristic, which missed scans that produced 1-2 junk chunks.
 SCAN_CHARS_PER_PAGE = 20
+
+# A file modified within this many seconds is young enough that it might
+# still be in the middle of being written (a download landing, an rsync,
+# an editor's atomic save that isn't atomic on this filesystem). Only for
+# such young files do we pay the cost of the stability double-stat below;
+# anything older is settled and ingested straight away.
+INGEST_SETTLE_GRACE_SECONDS = 30
 
 # A scanned book is OCR'd in tranches of this many pages — one P3 job
 # each — so a 600-page book becomes ~12 short, independently-resumable
@@ -73,6 +81,35 @@ def enqueue_ocr_jobs(queue: "Queue", root: str, corpus: str, filepath: str,
             enq += 1
         start = end + 1
     return enq
+
+
+def _looks_like_partial_write(path: Path, since_mtime: float,
+                              since_size: int) -> bool:
+    """True if *path* looks like it was still being written when we parsed it.
+
+    Called only after a parse actually failed, so it costs nothing on the
+    (overwhelmingly common) success path. A download or ``rsync`` that lands
+    mid-scan yields a truncated file — the parser raises (e.g. ``PDFium:
+    Data format error``) and the job is marked failed for good even though
+    the file is perfect seconds later. Two signals say "still in flight":
+    the file changed since we started, or it was last modified within
+    :data:`INGEST_SETTLE_GRACE_SECONDS` and is *still* changing across a
+    short observation.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    if st.st_mtime != since_mtime or st.st_size != since_size:
+        return True  # changed under us mid-parse
+    if time.time() - st.st_mtime > INGEST_SETTLE_GRACE_SECONDS:
+        return False  # settled well before we touched it — a genuine failure
+    time.sleep(0.6)
+    try:
+        st2 = path.stat()
+    except OSError:
+        return False
+    return st2.st_size != st.st_size or st2.st_mtime != st.st_mtime
 
 
 def _compute_hash(path: Path) -> str:
@@ -271,6 +308,15 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
     from rtfm.core.sync import _path_to_slug
     book_slug = _path_to_slug(rel, corpus)
 
+    # Remember the file's stamp before we parse it, so that if the parse
+    # fails we can tell a genuinely-broken file from one that was still
+    # being written under us (see the except below).
+    try:
+        _st_before = abs_path.stat()
+        _mtime_before, _size_before = _st_before.st_mtime, _st_before.st_size
+    except OSError:
+        _mtime_before, _size_before = 0.0, -1
+
     lib = Library(str(worker.db_path))
     try:
         # Persist the corpus root once per (corpus, root) so future
@@ -294,10 +340,29 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
                 lib.delete_book(old_slug)
 
         file_hash = _compute_hash(abs_path)
-        stats = lib.ingest(
-            abs_path, corpus=corpus,
-            metadata={"book_slug": book_slug, "source_file": rel},
-        )
+        try:
+            stats = lib.ingest(
+                abs_path, corpus=corpus,
+                metadata={"book_slug": book_slug, "source_file": rel},
+            )
+        except Exception:
+            # A parse failure on a file that's still being written (a
+            # download/rsync finishing mid-scan) is not a real failure —
+            # re-queue it to try again once it settles instead of marking
+            # it failed for good. A genuinely-broken file re-raises.
+            if _looks_like_partial_write(abs_path, _mtime_before, _size_before):
+                q = Queue(str(worker.db_path))
+                try:
+                    q.enqueue("ingest", {
+                        "root": str(root), "corpus": corpus, "filepath": rel,
+                    })
+                finally:
+                    q.close()
+                worker._log(
+                    f"ingest [{corpus}] {rel}: file still being written — "
+                    f"re-queued")
+                return
+            raise
         lib.update_indexed_file(
             filepath=rel,
             file_hash=file_hash,

@@ -292,6 +292,26 @@ class Queue:
 
     # ── Consumer ─────────────────────────────────────────────────────────
 
+    def peek(self) -> Optional[tuple[int, str, str]]:
+        """Return ``(priority, created_at, type)`` of the head pending job
+        without claiming it, or ``None`` if the queue is empty.
+
+        Used by the supervisor to compare each project's next job across
+        projects and dispatch in **global arrival order** — the ``created_at``
+        stamps are UTC ISO strings in a fixed format, so they compare
+        correctly across different project databases. The ``type`` lets the
+        dispatcher tell an exclusive job (vacuum/reconcile/scan) from a
+        parallelisable one (embed/ingest/remove). Read-only: it never flips a
+        row to ``running`` (only :meth:`dequeue` does).
+        """
+        row = self._get_conn().execute(
+            """SELECT priority, created_at, type FROM work_queue
+               WHERE status = 'pending'
+               ORDER BY priority ASC, created_at ASC
+               LIMIT 1"""
+        ).fetchone()
+        return (row["priority"], row["created_at"], row["type"]) if row else None
+
     def dequeue(self) -> Optional[Job]:
         """Atomically pick the highest-priority pending job and mark it
         ``running``. Returns ``None`` when the queue is empty."""

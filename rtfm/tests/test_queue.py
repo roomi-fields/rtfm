@@ -93,6 +93,24 @@ def test_dequeue_breaks_ties_by_created_at(queue: Queue):
     assert b.id == second
 
 
+def test_peek_returns_head_without_claiming(queue: Queue):
+    """peek() reports the head job's (priority, created_at) but leaves it
+    pending — only dequeue() flips a row to running."""
+    assert queue.peek() is None
+    queue.enqueue("ocr", {"f": "low.pdf"})
+    queue.enqueue("ingest", {"f": "high.md"})  # higher priority
+
+    head = queue.peek()
+    assert head is not None
+    prio, created, jtype = head
+    assert prio == 30 and jtype == "ingest"  # P_INGEST wins over P_OCR
+    # Nothing was claimed: the row is still pending and a dequeue returns it.
+    stats = queue.stats()
+    assert stats.get("ingest", {}).get("running", 0) == 0
+    j = queue.dequeue()
+    assert j is not None and j.type == "ingest" and j.created_at == created
+
+
 def test_dequeue_marks_running_atomically(queue: Queue):
     job_id = queue.enqueue("ingest", {"f": "a"})
     job = queue.dequeue()

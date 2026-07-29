@@ -7,6 +7,62 @@ description: >-
 
 # Changelog
 
+## [0.26.0] — 2026-07-29
+
+### Changed — global arrival-order scheduling, all idle cores, per-project write concurrency
+
+Real-world use of the 0.25.0 supervisor surfaced a scheduling bug and a
+liveness-reporting bug that together left a freshly-added corpus un-indexed
+for 24 h. The scheduler is reworked, concurrency raised, and the
+single-writer rule refined so one project can use several cores:
+
+- **Global arrival order.** The dispatcher served projects in a fixed
+  alphabetical order, so the first projects with backlog occupied every
+  lane forever — a project low in the alphabet never got a turn. Dispatch
+  now processes documents in the **order they were queued, across all
+  projects**: it peeks each project's head job and serves the globally
+  oldest by `(priority, created_at)`. Explicit P0 work still preempts.
+- **Uses all idle cores.** The concurrency default is now the machine's
+  core count instead of 4, so background indexing fills otherwise-idle CPU
+  across every core. Each job stays capped to one embedding thread and the
+  supervisor runs `nice 19` + `ionice`, so there is no oversubscription and
+  interactive work is never starved. Override per machine via
+  `max_concurrent_indexers` in `~/.rtfm/config.json` or
+  `RTFM_MAX_CONCURRENT_INDEXERS`.
+- **Per-project write concurrency.** 0.25.0 ran at most one job per project
+  (strict single writer). A single big import therefore used one core while
+  the rest sat idle. Now the parallelisable job types — `ingest`, `embed`,
+  `remove` — run **concurrently within a project** (they touch disjoint
+  rows; SQLite WAL serialises the actual writes), so one import fills every
+  core. Whole-index / exclusive-lock jobs (`scan`, `reconcile`, `vacuum`)
+  still run alone per project. The corruption class 0.25.0 closed stays
+  closed: in-flight jobs are never hard-killed on shutdown, and the
+  integrity guard quarantines-and-rebuilds once should a DB ever go bad.
+  The RSS recycle ceiling is now clamped to 60 % of physical RAM so it
+  stays meaningful at a core-sized pool.
+- **False liveness → `stop` no-op, double supervisors.** `worker status`
+  read the lazily-written state file, which is absent during the
+  multi-second model preload right after a restart — so it reported "not
+  running" while the daemon was up, `stop` killed nothing, and `start`
+  spawned a *second* supervisor. Liveness now comes from the global
+  `flock` (the kernel-authoritative signal), and the state snapshot is
+  written before the preload.
+
+### Fixed — files still being written, and quieter failure modes
+
+- **Partial-write ingest.** A file whose download/rsync finished
+  mid-scan was parsed truncated, failed with a format error, and stayed
+  failed for good. A parse failure on a file that changed under us (or is
+  still changing) now re-queues the ingest instead of failing it; a
+  genuinely broken, settled file still fails as before.
+- **Silent `sync` hang.** `rtfm sync` now says so when jobs are pending
+  but no lane is serving the project (supervisor busy elsewhere or down),
+  instead of blocking mutely until timeout.
+- **`status` optional extras.** The extras section now reports every
+  optional reader — epub, mobi, xlsx, docx/odt/rtf (office), djvu — so a
+  supported extension whose reader is missing is visible up front rather
+  than failing file-by-file at ingest.
+
 ## [0.25.0] — 2026-07-25
 
 ### Changed — one mutualised worker replaces the per-project daemon fleet

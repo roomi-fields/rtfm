@@ -73,7 +73,12 @@ def apply_thread_caps() -> None:
 # ── Global concurrency semaphore ────────────────────────────────────────
 
 _SLOT_DIR = Path.home() / ".rtfm" / "slots"
-_DEFAULT_MAX_CONCURRENT = 4
+#: Default number of projects the supervisor services concurrently. One core
+#: per lane (each job is thread-capped to 1 via :func:`thread_cap_env`), so
+#: defaulting to the core count lets background indexing use all otherwise-idle
+#: CPU while ``nice 19`` + ``ionice`` keep it out of the way of interactive
+#: work. Override per machine via ``~/.rtfm/config.json`` or the env var.
+_DEFAULT_MAX_CONCURRENT = os.cpu_count() or 4
 _ACQUIRE_POLL_SECONDS = 0.5
 
 #: Machine-local RTFM config, read for a durable concurrency setting that

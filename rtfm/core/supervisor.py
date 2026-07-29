@@ -54,8 +54,8 @@ from rtfm.core.worker import (
     WORKER_RSS_EXIT_MB,
     _now_iso,
     _read_installed_version,
+    _read_mem_total_mb,
     _read_rss_mb,
-    pid_alive,
 )
 
 
@@ -95,17 +95,61 @@ def read_supervisor_state() -> Optional[SupervisorState]:
         return None
 
 
+def _lock_holder_pid() -> Optional[int]:
+    """PID of the process holding the supervisor lock, or ``None`` if free.
+
+    This is the **authoritative** liveness signal — it probes the ``flock``
+    itself rather than trusting the lazily-written state file. The kernel
+    releases a ``flock`` automatically when its holder dies, so "the lock is
+    held" is exactly equivalent to "a live supervisor exists", with no window
+    where a running-but-not-yet-snapshotted supervisor looks dead (the bug
+    that made ``status`` lie, ``stop`` a no-op, and ``start`` spawn a double).
+    """
+    if not SUPERVISOR_LOCK.exists():
+        return None
+    try:
+        fd = os.open(SUPERVISOR_LOCK, os.O_RDWR)
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Held by a live supervisor — read the PID it stamped in.
+            try:
+                raw = os.pread(fd, 32, 0).decode().strip()
+                return int(raw) if raw else None
+            except (OSError, ValueError):
+                return None
+        else:
+            # We acquired it → nobody was holding it. Release immediately;
+            # any PID still in the file is stale (a dead holder).
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return None
+    finally:
+        os.close(fd)
+
+
 def supervisor_running() -> Optional[SupervisorState]:
     """Return the live supervisor state, or ``None`` if none is running.
 
-    A state file whose PID is dead is treated as no supervisor.
+    Liveness comes from the global lock (see :func:`_lock_holder_pid`), not
+    the state file. When the lock is held but the state snapshot is missing
+    or stale (e.g. during the multi-second model preload right after a
+    restart), a minimal live state carrying just the real PID is returned so
+    callers never misread a running supervisor as down.
     """
+    pid = _lock_holder_pid()
+    if pid is None:
+        return None
     state = read_supervisor_state()
-    if state is None:
-        return None
-    if not pid_alive(state.pid):
-        return None
-    return state
+    if state is not None and state.pid == pid:
+        return state
+    # Lock held by a live supervisor whose snapshot isn't on disk yet.
+    return SupervisorState(
+        pid=pid, host=socket.gethostname(), started_at="", last_update="",
+        concurrency=0, projects=0, in_flight=0, jobs_done=0, jobs_failed=0,
+    )
 
 
 def clear_supervisor_state() -> None:
@@ -146,6 +190,14 @@ class SupervisorLock:
                 self._fd = None
 
 
+# Job types that must run alone within a project: they read-modify the whole
+# index (scan, reconcile) or need an exclusive lock on the DB file (vacuum).
+# Everything else (embed/ingest/remove) touches disjoint rows and may run
+# concurrently for the same project — that is how a single big import fills
+# every core instead of one.
+EXCLUSIVE_JOB_TYPES = frozenset({"scan", "reconcile", "vacuum"})
+
+
 # ── Per-project bookkeeping ──────────────────────────────────────────────
 
 class _Slot:
@@ -163,12 +215,22 @@ class _Slot:
         self.db_path = rtfm_dir / "library.db"
         self.log = make_rotating_logger(rtfm_dir / "rtfm.log", prefix="worker")
         self.queue: Optional[Queue] = None
-        self.active = False            # a job is in flight in the pool
+        # Number of this project's jobs in flight in the pool. >1 is allowed
+        # for parallelisable types (embed/ingest/remove touch disjoint rows;
+        # SQLite WAL serialises the actual writes). ``exclusive`` is set while
+        # a scan/reconcile/vacuum runs, and forces that job to run alone.
+        self.inflight = 0
+        self.exclusive = False
         self.next_scan_at = 0.0        # monotonic
         self.next_reconcile_at = 0.0   # monotonic; 0 until seeded
         self.reconcile_seeded = False
         self.jobs_done = 0
         self.jobs_failed = 0
+
+    @property
+    def active(self) -> bool:
+        """True while at least one of this project's jobs is in the pool."""
+        return self.inflight > 0
 
     def open(self, log: Callable[[str], None]) -> bool:
         """Integrity-guard the DB, then open the queue. Returns ``True`` if
@@ -227,6 +289,11 @@ class Supervisor:
         self._install_signal_handlers()
         self._log(f"supervisor started pid={os.getpid()} "
                   f"concurrency={self._max_concurrent}")
+        # Publish a snapshot *before* the (multi-second) model preload so
+        # ``rtfm worker status`` reports real counters the instant the
+        # process is up, not only after preload. Liveness itself already
+        # comes from the lock, but the counters live here.
+        self._snapshot()
         self._preload_model()
         try:
             while not self._stop:
@@ -303,31 +370,81 @@ class Supervisor:
     def _free(self) -> int:
         return self._max_concurrent - len(self._inflight)
 
-    def _dispatch(self) -> bool:
-        """Fill free pool slots with the next job from eligible projects.
+    def _slot_can_accept(self, slot: "_Slot", head_type: str) -> bool:
+        """Whether *slot* may take its head job right now.
 
-        Eligible = has an open queue, is not already running a job. Iterated
-        in a rotating order so no single project monopolises the pool.
+        A slot running an exclusive job (scan/reconcile/vacuum) takes nothing
+        more until it finishes. An exclusive head may only start when the
+        project has nothing else in flight, so it runs alone. Parallelisable
+        heads (embed/ingest/remove) may stack up to the pool's free lanes.
+        """
+        if slot.queue is None or slot.exclusive:
+            return False
+        if head_type in EXCLUSIVE_JOB_TYPES:
+            return slot.inflight == 0
+        return True
+
+    def _dispatch(self) -> bool:
+        """Fill free pool lanes in **global arrival order**.
+
+        Documents are served in the order they were queued, regardless of
+        which project they belong to: at each free lane we peek every
+        project's head job and pick the globally oldest by ``(priority,
+        created_at)``. ``priority`` still wins first — an explicit P0 always
+        preempts background work.
+
+        A project may hold **several** lanes at once for parallelisable job
+        types (embed/ingest/remove write disjoint rows; SQLite WAL serialises
+        the actual writes), so a single big import can fill every core.
+        Scan/reconcile/vacuum still run alone per project (see
+        :meth:`_slot_can_accept`). With no per-project lane cap, the oldest
+        work naturally occupies the pool and newer work from other projects
+        queues behind it — exactly arrival order across the whole machine.
+
         Returns ``True`` if at least one job was dispatched.
         """
-        if self._free() <= 0:
-            return False
         dispatched = False
-        # Rotate the project order by wall tick so busy projects share fairly.
-        slots = [s for s in self._slots.values() if s.queue is not None and not s.active]
-        for slot in slots:
-            if self._free() <= 0:
-                break
+        skip: set[int] = set()  # slots to ignore for the rest of this pass
+        while self._free() > 0:
+            # Pick the globally-oldest dispatchable head across all projects.
+            best_slot: Optional[_Slot] = None
+            best_key: Optional[tuple[int, str]] = None
+            for slot in self._slots.values():
+                if id(slot) in skip:
+                    continue
+                try:
+                    head = slot.queue.peek() if slot.queue is not None else None
+                except Exception as exc:
+                    self._log(f"{slot.rtfm_dir.parent.name}: peek error: {exc}")
+                    skip.add(id(slot))
+                    continue
+                if head is None:
+                    continue
+                priority, created_at, head_type = head
+                if not self._slot_can_accept(slot, head_type):
+                    continue
+                key = (priority, created_at)
+                if best_key is None or key < best_key:
+                    best_key, best_slot = key, slot
+            if best_slot is None:
+                break  # nothing dispatchable anywhere
+
             try:
-                job = slot.queue.dequeue()
+                job = best_slot.queue.dequeue()
             except Exception as exc:
-                self._log(f"{slot.rtfm_dir.parent.name}: dequeue error: {exc}")
+                self._log(f"{best_slot.rtfm_dir.parent.name}: dequeue error: {exc}")
+                skip.add(id(best_slot))  # don't re-pick it this pass
                 continue
             if job is None:
+                # Race: head vanished between peek and dequeue. Single
+                # dispatcher makes this unexpected; skip the slot this pass.
+                skip.add(id(best_slot))
                 continue
-            slot.active = True
-            fut = self._pool.submit(self._run_job, slot, job)
-            self._inflight[fut] = (slot, job)
+            best_slot.inflight += 1
+            if job.type in EXCLUSIVE_JOB_TYPES:
+                best_slot.exclusive = True
+            fut = self._pool.submit(self._run_job, best_slot, job)
+            self._inflight[fut] = (best_slot, job)
             dispatched = True
         return dispatched
 
@@ -348,7 +465,9 @@ class Supervisor:
         done = [f for f in self._inflight if f.done()]
         for fut in done:
             slot, job = self._inflight.pop(fut)
-            slot.active = False
+            slot.inflight = max(0, slot.inflight - 1)
+            if job.type in EXCLUSIVE_JOB_TYPES:
+                slot.exclusive = False
             try:
                 fut.result()
             except Exception as exc:
@@ -439,7 +558,13 @@ class Supervisor:
             self._log(f"version changed ({self._our_version} → {cur}), exiting for restart")
             return True
         rss = _read_rss_mb()
+        # Scale the leak ceiling with the pool size, but never above ~60 % of
+        # physical RAM — at a core-count-sized pool the naive per-lane × lanes
+        # product can exceed total RAM and would never fire.
         ceiling = WORKER_RSS_EXIT_MB * self._max_concurrent
+        total = _read_mem_total_mb()
+        if total > 0:
+            ceiling = min(ceiling, 0.6 * total)
         if rss > 0 and rss > ceiling:
             self._log(f"RSS {rss:.0f}M over ceiling {ceiling}M — exiting for restart")
             return True

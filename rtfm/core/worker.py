@@ -171,6 +171,22 @@ def _install_memory_limit(limit_gb: float) -> Optional[int]:
     return cap
 
 
+def _read_mem_total_mb() -> float:
+    """Total physical RAM in MB from ``/proc/meminfo`` (0 when unavailable).
+
+    Used to bound the supervisor's RSS recycle ceiling: with the pool sized
+    to the core count the naive ``per-lane × lanes`` ceiling can exceed
+    physical RAM, so it is clamped to a fraction of this value."""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        pass
+    return 0.0
+
+
 def _read_rss_mb() -> float:
     """Current process RSS in MB by reading ``/proc/self/status``.
 

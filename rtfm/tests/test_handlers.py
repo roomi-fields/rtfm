@@ -11,6 +11,8 @@ the contract pieces that matter for the queue:
 """
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -82,6 +84,119 @@ def test_handle_ingest_enqueues_followup_embed_jobs(tmp_path: Path):
         assert sorted(all_ids) == sorted(chunk_ids)
     finally:
         q.close()
+
+
+def test_looks_like_partial_write_detects_change(tmp_path: Path):
+    """A file whose size changed since the recorded stamp was still being
+    written under us — a parse failure on it is not a real failure."""
+    from rtfm.core import handlers
+    p = tmp_path / "dl.pdf"
+    p.write_bytes(b"partial")
+    st = p.stat()
+    p.write_bytes(b"partial-and-more")  # grew
+    assert handlers._looks_like_partial_write(p, st.st_mtime, st.st_size) is True
+
+
+def test_looks_like_partial_write_false_for_settled(tmp_path: Path, monkeypatch):
+    """A file untouched long before we parsed it is a genuine failure — and
+    we must not even pay the observation sleep for it."""
+    from rtfm.core import handlers
+    p = tmp_path / "old.pdf"
+    p.write_bytes(b"complete")
+    old = time.time() - (handlers.INGEST_SETTLE_GRACE_SECONDS + 10)
+    os.utime(p, (old, old))
+    st = p.stat()
+    monkeypatch.setattr(
+        handlers.time, "sleep",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not sleep")))
+    assert handlers._looks_like_partial_write(p, st.st_mtime, st.st_size) is False
+
+
+def test_looks_like_partial_write_detects_growth_during_observation(
+        tmp_path: Path, monkeypatch):
+    """Unchanged at first stat but still growing across the short
+    observation window → still being written."""
+    from rtfm.core import handlers
+    p = tmp_path / "recent.pdf"
+    p.write_bytes(b"partial")
+    st = p.stat()  # fresh mtime, within grace
+
+    def grow(_seconds):
+        p.write_bytes(b"partial-plus-more")
+
+    monkeypatch.setattr(handlers.time, "sleep", grow)
+    assert handlers._looks_like_partial_write(p, st.st_mtime, st.st_size) is True
+
+
+def test_handle_ingest_requeues_on_partial_write(tmp_path: Path, monkeypatch):
+    """A parse error on a file that changed mid-parse re-queues the ingest
+    instead of raising (which would mark it failed for good)."""
+    from rtfm.core import handlers
+    db = tmp_path / "library.db"
+    Library(str(db)).close()
+    root = tmp_path / "src"; root.mkdir()
+    f = root / "book.pdf"
+    f.write_bytes(b"%PDF-partial")
+
+    class _FakeLib:
+        def __init__(self, *a, **k): pass
+        def set_sync_root(self, *a, **k): pass
+        def list_indexed_files(self, *a, **k): return {}
+        def ingest(self, *a, **k):
+            f.write_bytes(b"%PDF-partial-and-then-more")  # completes mid-parse
+            raise ValueError("PDFium: Data format error")
+        def close(self): pass
+
+    monkeypatch.setattr(handlers, "Library", _FakeLib)
+
+    logs: list[str] = []
+    worker = SimpleNamespace(db_path=db, _log=logs.append)
+    job = Job(id=1, type="ingest", priority=1, payload={
+        "root": str(root), "corpus": "t", "filepath": "book.pdf",
+    }, status="running", created_at="", started_at=None,
+       finished_at=None, error=None, attempts=1)
+
+    handle_ingest(job, worker)  # must NOT raise
+
+    q = Queue(db)
+    try:
+        pend = [j for j in q.list_pending(limit=100) if j.type == "ingest"]
+        assert len(pend) == 1
+        assert pend[0].payload["filepath"] == "book.pdf"
+    finally:
+        q.close()
+    assert any("re-queued" in m for m in logs)
+
+
+def test_handle_ingest_reraises_genuine_failure(tmp_path: Path, monkeypatch):
+    """A parse error on a settled (unchanged) file propagates — it is a real
+    failure the queue must record."""
+    from rtfm.core import handlers
+    db = tmp_path / "library.db"
+    Library(str(db)).close()
+    root = tmp_path / "src"; root.mkdir()
+    f = root / "book.pdf"
+    f.write_bytes(b"%PDF-broken")
+    old = time.time() - (handlers.INGEST_SETTLE_GRACE_SECONDS + 10)
+    os.utime(f, (old, old))
+
+    class _FakeLib:
+        def __init__(self, *a, **k): pass
+        def set_sync_root(self, *a, **k): pass
+        def list_indexed_files(self, *a, **k): return {}
+        def ingest(self, *a, **k):
+            raise ValueError("PDFium: Data format error")
+        def close(self): pass
+
+    monkeypatch.setattr(handlers, "Library", _FakeLib)
+    worker = SimpleNamespace(db_path=db, _log=lambda m: None)
+    job = Job(id=1, type="ingest", priority=1, payload={
+        "root": str(root), "corpus": "t", "filepath": "book.pdf",
+    }, status="running", created_at="", started_at=None,
+       finished_at=None, error=None, attempts=1)
+
+    with pytest.raises(ValueError):
+        handle_ingest(job, worker)
 
 
 def test_handle_embed_empty_payload_is_noop(tmp_path: Path):

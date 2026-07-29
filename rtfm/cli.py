@@ -29,6 +29,7 @@ def _watch_jobs(
     rtfm_dir: Path | None = None,
     timeout_s: float | None = None,
     reap_every_s: float = 10.0,
+    stall_bail_s: float = 45.0,
 ) -> int:
     """Block until every pending/running job has reached a terminal
     state, polling ``queue.stats()`` every ``poll_s`` seconds.
@@ -50,13 +51,22 @@ def _watch_jobs(
     returns ``2`` and prints a notice (the worker keeps draining in the
     background).
 
+    ``stall_bail_s`` guards against a silent hang: if there is pending work
+    but nothing is running and no job has reached a terminal state for that
+    many seconds, the project isn't being served (supervisor busy on other
+    projects, or not running) — we say so explicitly and return ``2`` instead
+    of blocking mutely until the caller's timeout. This is the message whose
+    absence once cost a full day of a corpus sitting un-indexed.
+
     Returns 0 if no failures, 1 if any job ended ``failed``,
-    2 on timeout. With ``background=True``, returns 0 immediately.
+    2 on timeout / stall. With ``background=True``, returns 0 immediately.
     """
     if background:
         return 0
     start = time.time()
     last_reap = 0.0
+    last_progress = -1
+    last_progress_at = start
     try:
         # One-shot reap before entering the loop: clears anything left
         # over from a previous crash so the exit condition isn't
@@ -90,6 +100,25 @@ def _watch_jobs(
             if pending == 0 and running == 0:
                 sys.stderr.write("\n")
                 return 1 if failed else 0
+
+            # Stall detection: is any work actually being served? Track the
+            # terminal-state count; whenever it advances, the project is
+            # progressing. If it hasn't advanced and nothing is running while
+            # jobs pile up pending, no lane is serving this project.
+            progress = done + failed
+            if progress != last_progress:
+                last_progress = progress
+                last_progress_at = time.time()
+            elif (running == 0 and pending > 0
+                  and (time.time() - last_progress_at) >= stall_bail_s):
+                sys.stderr.write(
+                    f"\n({pending} job(s) pending but none being served — the "
+                    f"supervisor is busy on other projects or not running. "
+                    f"They'll drain in the background; check `rtfm worker "
+                    f"status`.)\n"
+                )
+                return 2
+
             if timeout_s is not None and elapsed >= timeout_s:
                 sys.stderr.write(
                     f"\n(timeout after {int(elapsed)}s — worker keeps "
@@ -1448,7 +1477,10 @@ def cmd_status(args):
     print(f"\nParsers:       {len(set(ParserRegistry.list_parsers().values()))} registered")
     print(f"Extensions:    {', '.join(sorted(exts))}")
 
-    # Optional extras — visible install state + actionable next step
+    # Optional extras — visible install state + actionable next step. Covers
+    # every parser whose reader is an optional dependency, so a supported
+    # extension (listed above) whose reader is missing is flagged here rather
+    # than only failing silently, file by file, at ingest time.
     def _check(mod: str) -> bool:
         try:
             __import__(mod)
@@ -1456,9 +1488,20 @@ def cmd_status(args):
         except ImportError:
             return False
 
+    def _check_bin(name: str) -> bool:
+        from shutil import which
+        return which(name) is not None
+
     extras = [
-        ("embeddings", _check("fastembed"), "semantic search",       "rtfm-ai[embeddings]"),
-        ("pdf",        _check("pdftext"),   "PDF parsing",          "rtfm-ai[pdf]"),
+        ("embeddings", _check("fastembed"), "semantic search",   "rtfm-ai[embeddings]"),
+        ("pdf",        _check("pdftext"),   "PDF parsing",        "rtfm-ai[pdf]"),
+        ("epub",       _check("ebooklib"),  ".epub ebooks",       "rtfm-ai[epub]"),
+        ("mobi",       _check("mobi"),      ".mobi/.azw ebooks",  "rtfm-ai[mobi]"),
+        ("xlsx",       _check("openpyxl"),  ".xlsx spreadsheets", "rtfm-ai[xlsx]"),
+        ("docx",       _check("docx"),      ".docx documents",    "rtfm-ai[office]"),
+        ("odt",        _check("odf"),       ".odt documents",     "rtfm-ai[office]"),
+        ("rtf",        _check("striprtf"),  ".rtf documents",     "rtfm-ai[office]"),
+        ("djvu",       _check_bin("djvutxt"), ".djvu (system djvutxt)", "djvulibre (apt/brew)"),
     ]
     print("\nOptional extras:")
     for name, installed, purpose, pkg in extras:

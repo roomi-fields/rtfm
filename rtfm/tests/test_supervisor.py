@@ -12,6 +12,7 @@ the invariants that make the single-process model safe:
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -220,9 +221,12 @@ def test_dispatch_runs_handler_and_marks_done(tmp_path: Path, monkeypatch):
         sup._pool.shutdown(wait=True)
 
 
-def test_single_writer_never_two_jobs_per_project(tmp_path: Path, monkeypatch):
-    """The core corruption-proofing invariant: even with free pool slots and
-    several pending jobs, a project never has two jobs in flight at once."""
+def test_project_parallelises_writes_but_serialises_exclusive(
+        tmp_path: Path, monkeypatch):
+    """Parallelisable jobs (ingest/remove/embed) of one project run
+    concurrently — that is how a single project fills several cores — while
+    scan/reconcile/vacuum run alone (exclusive) so the whole-index operations
+    never race a concurrent writer."""
     rtfm_dir = tmp_path / "proj" / ".rtfm"
     src = tmp_path / "src"; src.mkdir()
     rtfm_dir.mkdir(parents=True)
@@ -234,33 +238,41 @@ def test_single_writer_never_two_jobs_per_project(tmp_path: Path, monkeypatch):
         gate.wait(timeout=5.0)
 
     import rtfm.core.handlers as handlers_mod
-    monkeypatch.setitem(handlers_mod.HANDLERS, "reconcile", blocking)
-    monkeypatch.setitem(handlers_mod.HANDLERS, "scan", blocking)
+    for t in ("ingest", "remove", "reconcile", "scan"):
+        monkeypatch.setitem(handlers_mod.HANDLERS, t, blocking)
 
-    sup = _make_sup(_registry(tmp_path, [rtfm_dir]), max_concurrent=2)
+    sup = _make_sup(_registry(tmp_path, [rtfm_dir]), max_concurrent=4)
     try:
         sup._sync_registry()
         slot = _only_slot(sup)
-        # Two distinct pending jobs for the *same* project.
-        slot.queue.enqueue("reconcile", {})
-        slot.queue.enqueue("scan", {"root": str(src), "corpus": "x"})
 
-        # Pool has 2 free slots, but the project may only run one at a time.
-        assert sup._dispatch() is True
-        assert len(sup._inflight) == 1
-        # Dispatching again while the first is in flight must not start a
-        # second job for this project.
-        assert sup._dispatch() is False
-        assert len(sup._inflight) == 1
-
-        gate.set()
-        _drain(sup)
-        # After the first drains, the second finally runs.
+        # Two parallelisable jobs for the SAME project → both run at once.
+        slot.queue.enqueue("remove", {"filepath": "a", "corpus": "x"})
+        slot.queue.enqueue("ingest", {"root": str(src), "corpus": "x",
+                                      "filepath": "b"})
         sup._dispatch()
-        _drain(sup)
+        assert len(sup._inflight) == 2
+        assert slot.inflight == 2 and slot.exclusive is False
+
+        gate.set(); _drain(sup)
+        assert slot.inflight == 0
+
+        # Two exclusive jobs → only one in flight at a time.
+        gate.clear()
+        slot.queue.enqueue("reconcile", {"n": 1})
+        slot.queue.enqueue("scan", {"root": str(src), "corpus": "x"})
+        sup._dispatch()
+        assert len(sup._inflight) == 1
+        assert slot.exclusive is True
+
+        gate.set(); _drain(sup)
+        sup._dispatch(); _drain(sup)   # the second exclusive now runs alone
+
         q = Queue(rtfm_dir / "library.db")
         try:
             stats = q.stats()
+            assert stats.get("ingest", {}).get("done", 0) == 1
+            assert stats.get("remove", {}).get("done", 0) == 1
             assert stats.get("reconcile", {}).get("done", 0) == 1
             assert stats.get("scan", {}).get("done", 0) == 1
         finally:
@@ -298,6 +310,74 @@ def test_registry_sync_add_and_remove(tmp_path: Path):
         assert set(sup._slots) == {str(b)}
     finally:
         sup._pool.shutdown(wait=False)
+
+
+def test_dispatch_serves_global_arrival_order(tmp_path: Path, monkeypatch):
+    """Documents run in the order they were queued, across projects — the
+    oldest pending job anywhere goes first, regardless of project name. Here
+    the alphabetically-last project ('zzz') queued first, so it must be
+    served before 'aaa' which queued later."""
+    served: list[str] = []
+
+    def record(job, ctx):
+        served.append(Path(ctx.db_path).parent.parent.name)
+
+    import rtfm.core.handlers as handlers_mod
+    monkeypatch.setitem(handlers_mod.HANDLERS, "reconcile", record)
+
+    dirs = {}
+    for name in ("aaa", "zzz"):
+        d = tmp_path / name / ".rtfm"
+        d.mkdir(parents=True)
+        Library(str(d / "library.db")).close()
+        dirs[name] = d
+
+    sup = _make_sup(_registry(tmp_path, [dirs["aaa"], dirs["zzz"]]),
+                    max_concurrent=1)
+    try:
+        sup._sync_registry()
+        by_name = {Path(p).parent.name: s for p, s in sup._slots.items()}
+        by_name["zzz"].queue.enqueue("reconcile", {"n": 1})   # oldest
+        time.sleep(0.01)                                       # distinct stamp
+        by_name["aaa"].queue.enqueue("reconcile", {"n": 1})   # newer
+
+        for _ in range(10):
+            sup._dispatch()
+            _drain(sup)
+            if len(served) >= 2:
+                break
+
+        assert served == ["zzz", "aaa"]  # arrival order, not alphabetical
+    finally:
+        sup._pool.shutdown(wait=True)
+
+
+# ── lock-authoritative liveness (status / stop / no double-spawn) ────────
+
+
+def test_supervisor_running_is_lock_authoritative(tmp_path: Path, monkeypatch):
+    """Liveness comes from the flock, not the lazily-written state file — so a
+    supervisor that holds the lock but hasn't snapshotted yet (the preload
+    window) still reads as running. This is what makes ``stop`` actually stop
+    and prevents ``start`` from spawning a second supervisor."""
+    lock = tmp_path / "supervisor.lock"
+    state = tmp_path / "supervisor_state.json"
+    monkeypatch.setattr(sup_mod, "SUPERVISOR_LOCK", lock)
+    monkeypatch.setattr(sup_mod, "SUPERVISOR_STATE", state)
+
+    # Nothing held, no state file → not running.
+    assert sup_mod._lock_holder_pid() is None
+    assert sup_mod.supervisor_running() is None
+
+    with sup_mod.SupervisorLock():
+        # Held, but no snapshot on disk (mimics the preload window).
+        assert sup_mod._lock_holder_pid() == os.getpid()
+        st = sup_mod.supervisor_running()
+        assert st is not None and st.pid == os.getpid()
+
+    # Released → free again.
+    assert sup_mod._lock_holder_pid() is None
+    assert sup_mod.supervisor_running() is None
 
 
 def test_concurrency_clamped_to_at_least_one(tmp_path: Path):
