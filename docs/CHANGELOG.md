@@ -7,6 +7,23 @@ description: >-
 
 # Changelog
 
+## [0.26.4] — 2026-08-03
+
+### Fixed — runtime DB corruption hot-looped the dispatcher for days
+
+The boot-time integrity guard only runs when a project's slot is opened. A DB
+that went **malformed while the supervisor was already running** (a hard kill
+or OOM landing mid-write) was never re-checked: every dispatch pass called
+`peek`, caught `file is not a database`, logged it, and moved on — then did it
+all again on the next pass, dozens of times a second. One project (`un-chemin`)
+spun that loop for four days, burning a full core (338 % CPU) and destabilising
+the shared service for every other project. The dispatcher now recognises a
+corruption-class error at `peek`/`dequeue` and self-heals the slot in place:
+quarantine the malformed file, reopen a fresh DB, and schedule an immediate
+rebuild scan from source — the same recovery the boot guard performs, but
+triggered at runtime. Transient `database is locked`/`busy` is explicitly *not*
+treated as corruption, so a live DB is never quarantined by mistake.
+
 ## [0.26.3] — 2026-07-29
 
 ### Fixed — chunk_id collisions aborted whole ingests

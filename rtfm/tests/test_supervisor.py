@@ -177,6 +177,64 @@ def test_slot_open_quarantines_corrupt_db(tmp_path: Path):
         slot.close()
 
 
+# ── runtime corruption self-heal ─────────────────────────────────────────
+
+
+def test_is_db_corruption_matches_only_corruption():
+    from rtfm.core.supervisor import _is_db_corruption
+    import sqlite3
+    assert _is_db_corruption(sqlite3.DatabaseError("database disk image is malformed"))
+    assert _is_db_corruption(sqlite3.DatabaseError("file is not a database"))
+    # Transient lock/busy must NOT be treated as corruption.
+    assert not _is_db_corruption(sqlite3.OperationalError("database is locked"))
+    assert not _is_db_corruption(ValueError("some unrelated error"))
+
+
+def test_recover_slot_quarantines_and_reopens(tmp_path: Path):
+    rtfm_dir = tmp_path / "proj" / ".rtfm"
+    rtfm_dir.mkdir(parents=True)
+    # A DB that was healthy at boot then went malformed under the running
+    # supervisor: quarantine it, reopen a fresh one, schedule a rebuild scan.
+    (rtfm_dir / "library.db").write_bytes(b"corrupt bytes " * 500)
+
+    sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
+    try:
+        slot = _Slot(rtfm_dir)
+        slot.next_scan_at = 1e18            # far future; recovery must reset it
+        sup._recover_slot(slot)
+        assert list(rtfm_dir.glob("library.db.corrupt-*"))   # quarantined
+        assert slot.queue is not None                        # fresh queue open
+        assert slot.queue.peek() is None                     # empty, no more errors
+        assert slot.next_scan_at < 1e17                      # rebuild scheduled ASAP
+    finally:
+        sup._pool.shutdown(wait=False)
+
+
+def test_dispatch_heals_runtime_peek_corruption(tmp_path: Path, monkeypatch):
+    """A malformed DB surfacing at ``peek`` triggers recovery, not a hot loop."""
+    rtfm_dir = tmp_path / "proj" / ".rtfm"
+    rtfm_dir.mkdir(parents=True)
+    Library(str(rtfm_dir / "library.db")).close()
+
+    sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
+    try:
+        sup._sync_registry()
+        slot = _only_slot(sup)
+
+        import sqlite3
+        healed: list[_Slot] = []
+        monkeypatch.setattr(sup, "_recover_slot", lambda s: healed.append(s))
+
+        def boom():
+            raise sqlite3.DatabaseError("database disk image is malformed")
+        monkeypatch.setattr(slot.queue, "peek", boom)
+
+        sup._dispatch()
+        assert healed == [slot]             # recovery invoked exactly once
+    finally:
+        sup._pool.shutdown(wait=False)
+
+
 # ── dispatch / reap ──────────────────────────────────────────────────────
 
 

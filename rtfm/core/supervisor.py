@@ -59,6 +59,29 @@ from rtfm.core.worker import (
 )
 
 
+# ── Corruption detection ─────────────────────────────────────────────────
+
+#: Substrings SQLite uses for on-disk corruption (as opposed to a transient
+#: "database is locked"/"busy", which must NOT trigger quarantine). Matched
+#: case-insensitively against the exception message.
+_CORRUPTION_MARKERS = (
+    "malformed",
+    "file is not a database",
+    "disk image",
+    "database corruption",
+)
+
+
+def _is_db_corruption(exc: BaseException) -> bool:
+    """True when *exc* signals structural corruption of the DB file.
+
+    Message-based on purpose: ``sqlite3.DatabaseError`` also covers benign
+    lock/busy conditions, which must self-clear, not quarantine a live DB.
+    """
+    msg = str(exc).lower()
+    return any(m in msg for m in _CORRUPTION_MARKERS)
+
+
 # ── Paths ────────────────────────────────────────────────────────────────
 
 _RTFM_HOME = Path.home() / ".rtfm"
@@ -417,6 +440,8 @@ class Supervisor:
                 except Exception as exc:
                     self._log(f"{slot.rtfm_dir.parent.name}: peek error: {exc}")
                     skip.add(id(slot))
+                    if _is_db_corruption(exc):
+                        self._recover_slot(slot)
                     continue
                 if head is None:
                     continue
@@ -434,6 +459,8 @@ class Supervisor:
             except Exception as exc:
                 self._log(f"{best_slot.rtfm_dir.parent.name}: dequeue error: {exc}")
                 skip.add(id(best_slot))  # don't re-pick it this pass
+                if _is_db_corruption(exc):
+                    self._recover_slot(best_slot)
                 continue
             if job is None:
                 # Race: head vanished between peek and dequeue. Single
@@ -447,6 +474,36 @@ class Supervisor:
             self._inflight[fut] = (best_slot, job)
             dispatched = True
         return dispatched
+
+    def _recover_slot(self, slot: _Slot) -> None:
+        """Self-heal a DB that turned corrupt **while the supervisor ran**.
+
+        The boot integrity guard only runs at ``slot.open``; a corruption
+        that lands mid-run (hard kill / OOM in a write) makes ``peek``/
+        ``dequeue`` raise on every dispatch pass — the dispatcher then
+        hot-loops, logging forever and burning a core (one project did this
+        for days). Here we close the slot, re-run the integrity guard
+        (quarantines the malformed file), reopen a fresh DB, and schedule an
+        immediate rebuild scan from source. If quarantine/reopen itself
+        fails, the slot is parked (``queue = None``) so it is skipped until
+        the next restart rather than looped on.
+        """
+        name = slot.rtfm_dir.parent.name
+        try:
+            slot.close()
+        except Exception:
+            pass
+        try:
+            rebuilt = slot.open(self._log)
+        except Exception as exc:  # pragma: no cover - defensive
+            slot.queue = None
+            self._log(f"{name}: runtime-corruption recovery failed, parking "
+                      f"until restart: {exc}")
+            return
+        slot.next_scan_at = time.monotonic()  # rebuild from source ASAP
+        self._log(f"{name}: runtime DB corruption healed"
+                  + (" (quarantined + rebuilding from source)" if rebuilt
+                     else " (reopened)"))
 
     def _run_job(self, slot: _Slot, job: Job) -> None:
         """Pool-thread body: run the handler with a minimal context.
