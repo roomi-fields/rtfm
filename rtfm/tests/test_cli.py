@@ -190,3 +190,27 @@ def test_cmd_doctor_enqueues_scan_and_reconcile_at_p0(rtfm_project):
     assert "scan" in types
     assert "reconcile" in types
     assert all(j.priority == P_USER for j in jobs)
+
+
+def test_cmd_queue_db_flag_and_truncation_notice(rtfm_project, capsys, monkeypatch):
+    """`rtfm queue --db PATH list` inspects a queue addressed explicitly and,
+    when truncated, honestly reports 'showing N of M' instead of stopping
+    silently at the limit."""
+    db = rtfm_project / ".rtfm" / "library.db"
+    q = Queue(str(db))
+    for i in range(25):
+        q.enqueue("ingest", {"filepath": f"f{i:02d}.md", "corpus": "c"})
+    q.close()
+
+    # Address the DB from outside its tree via --db.
+    monkeypatch.chdir(rtfm_project.parent)
+    rc = _run_cli("queue", "--db", str(db), "list")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "showing 20 of 25 pending" in out
+
+    # --limit 0 → all rows, no truncation notice.
+    rc = _run_cli("queue", "--db", str(db), "--limit", "0", "list")
+    out = capsys.readouterr().out
+    assert "showing" not in out
+    assert out.count("#") >= 25

@@ -311,11 +311,32 @@ def _cmd_worker_restart_all() -> None:
 # ── ``rtfm queue [stats|list|failed|clear-done|retry-failed|reap]`` ──────
 
 def cmd_queue(args):
-    rtfm_root = find_rtfm_root()
-    if rtfm_root is None:
-        sys.exit("queue: no .rtfm/ project root in the cwd chain.")
-    db_path = rtfm_root / ".rtfm" / "library.db"
+    # Accept an explicit --db (like `rtfm files` / `rtfm status`) so a queue
+    # can be inspected from anywhere, not only from inside its project tree.
+    explicit_db = getattr(args, "db", None)
+    if explicit_db:
+        from rtfm.config import resolve_db
+        db_path = Path(resolve_db(explicit_db))
+        rtfm_dir = db_path.parent
+    else:
+        rtfm_root = find_rtfm_root()
+        if rtfm_root is None:
+            sys.exit("queue: no .rtfm/ project root in the cwd chain "
+                     "(or pass --db PATH).")
+        rtfm_dir = rtfm_root / ".rtfm"
+        db_path = rtfm_dir / "library.db"
     queue = Queue(db_path)
+
+    def _total(kind: str) -> int:
+        """Total rows in `kind` status across all job types, so a truncated
+        listing can honestly say 'showing N of M' instead of silently
+        stopping at the limit."""
+        return sum(b.get(kind, 0) for b in queue.stats().values())
+
+    def _resolve_limit() -> int:
+        n = getattr(args, "limit", 20)
+        n = 20 if n is None else n
+        return 10_000_000 if n <= 0 else n  # 0/negative → effectively all
 
     action = getattr(args, "action", "stats") or "stats"
     try:
@@ -331,17 +352,24 @@ def cmd_queue(args):
             return
 
         if action == "list":
-            jobs = queue.list_pending(limit=getattr(args, "limit", 20) or 20)
+            limit = _resolve_limit()
+            total = _total("pending")
+            jobs = queue.list_pending(limit=limit)
             if not jobs:
                 print("queue: no pending jobs.")
                 return
             for j in jobs:
                 fp = j.payload.get("filepath") or j.payload.get("file_path") or ""
                 print(f"  #{j.id:<6} P{j.priority} {j.type:<8} {fp}")
+            if len(jobs) < total:
+                print(f"  … showing {len(jobs)} of {total} pending "
+                      f"(--limit 0 for all).")
             return
 
         if action == "failed":
-            jobs = queue.list_failed(limit=getattr(args, "limit", 20) or 20)
+            limit = _resolve_limit()
+            total = _total("failed")
+            jobs = queue.list_failed(limit=limit)
             if not jobs:
                 print("queue: no failed jobs.")
                 return
@@ -350,6 +378,9 @@ def cmd_queue(args):
                 err = (j.error or "").splitlines()[0][:80]
                 print(f"  #{j.id:<6} {j.type:<8} {fp}")
                 print(f"          ! {err}")
+            if len(jobs) < total:
+                print(f"  … showing {len(jobs)} of {total} failed "
+                      f"(--limit 0 for all).")
             return
 
         if action == "clear-done":
@@ -373,7 +404,6 @@ def cmd_queue(args):
             if not zombies:
                 print("queue: nothing to reap (no jobs in 'running' state).")
                 return
-            rtfm_dir = rtfm_root / ".rtfm"
             result = queue.reap_zombies(rtfm_dir=rtfm_dir)
             deduped_msg = (
                 f", {result.get('deduped', 0)} duplicates dropped"

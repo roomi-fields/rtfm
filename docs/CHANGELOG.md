@@ -43,6 +43,24 @@ bugs, now fixed:
   ever refusing a real deletion. `force_remove` still bypasses for deliberate
   bulk deletes.
 
+### Fixed — diagnostic tooling gaps
+
+Four rough edges that made cross-project queue diagnosis unreliable:
+
+- `rtfm queue` now accepts `--db PATH` (like `rtfm files` / `rtfm status`), so
+  a project's queue can be inspected from anywhere instead of only from inside
+  its own tree.
+- `rtfm queue list` / `failed` now report `… showing N of M` when the output
+  is truncated (default limit 20), and `--limit 0` lists everything. Before,
+  a 53-job queue silently showed 20 with no hint the rest existed.
+- The CLI and MCP server now share **one** path resolver
+  (`rtfm.core.pathresolve`). The CLI previously resolved with an empty corpus
+  and always returned relative paths while the MCP returned absolute ones — the
+  same search result reported two different paths, and "restore a deleted file"
+  flipped a path from relative to absolute on one install but not another. Both
+  now apply the identical rule: absolute when the file exists under its corpus's
+  sync root, relative otherwise.
+
 ## [0.26.4] — 2026-08-03
 
 ### Fixed — runtime DB corruption hot-looped the dispatcher for days

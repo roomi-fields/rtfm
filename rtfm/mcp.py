@@ -132,15 +132,11 @@ def _deduplicate_by_source(results, limit: int):
     # Compute count, top-3 others, and resolve absolute paths per source
     ranked = sorted(by_key.values(), key=lambda x: x["best"].score, reverse=True)
 
-    # Batch-resolve corpus → abs_path (avoids per-result SQL in _format_source_line)
-    corpus_cache: dict[str, str] = {}
-    try:
-        lib = _get_library()
-        conn = lib._get_conn()
-        for row in conn.execute("SELECT slug, corpus FROM books").fetchall():
-            corpus_cache[row["slug"]] = row["corpus"] or ""
-    except Exception:
-        pass
+    # Batch-resolve book_slug → sync-root (avoids per-result SQL). The shared
+    # resolver is the *same* one the CLI uses, so both report identical paths.
+    from rtfm.core.pathresolve import (
+        resolve_source_path, build_slug_root_resolver)
+    root_for_slug = build_slug_root_resolver(_get_library())
 
     for entry in ranked:
         entry["count"] = len(entry["all"])
@@ -151,31 +147,14 @@ def _deduplicate_by_source(results, limit: int):
         entry["others"] = others
         del entry["all"]
 
-        # Pre-resolve absolute path
+        # Pre-resolve absolute path via the shared rule.
         r = entry["best"]
         filepath = r.chunk.book_file or ""
-        corpus = corpus_cache.get(r.chunk.book_slug, "")
-        entry["abs_path"] = _resolve_abs_path(filepath, corpus) if filepath else ""
+        entry["abs_path"] = (
+            resolve_source_path(filepath, root_for_slug(r.chunk.book_slug))
+            if filepath else "")
 
     return ranked[:limit]
-
-
-def _resolve_abs_path(filepath: str, corpus: str) -> str:
-    """Resolve a relative filepath to absolute using stored sync root."""
-    if not filepath:
-        return ""
-    if os.path.isabs(filepath):
-        return filepath
-    try:
-        lib = _get_library()
-        root = lib.get_sync_root(corpus)
-        if root:
-            abs_path = os.path.join(root, filepath)
-            if os.path.exists(abs_path):
-                return abs_path
-    except Exception:
-        pass
-    return filepath
 
 
 def _render_chunk(abs_path: str, line_start: int | None, line_end: int | None) -> str:
@@ -837,7 +816,8 @@ def rtfm_expand(
     book_title = book_row["title"]
     book_file = book_row["filename"] or ""
     corpus = book_row["corpus"] or ""
-    abs_path = _resolve_abs_path(book_file, corpus)
+    from rtfm.core.pathresolve import resolve_source_path
+    abs_path = resolve_source_path(book_file, _get_library().get_sync_root(corpus))
 
     # All chunks in file order
     all_chunks = conn.execute(

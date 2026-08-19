@@ -166,23 +166,6 @@ def _deduplicate_by_source(results, limit: int):
     return ranked[:limit]
 
 
-def _resolve_abs_path(filepath: str, lib, corpus: str) -> str:
-    """Resolve a relative filepath to absolute using stored sync root."""
-    import os
-
-    if not filepath or os.path.isabs(filepath):
-        return filepath
-    try:
-        root = lib.get_sync_root(corpus)
-        if root:
-            abs_path = os.path.join(root, filepath)
-            if os.path.exists(abs_path):
-                return abs_path
-    except Exception:
-        pass
-    return filepath
-
-
 def cmd_search(args):
     """Search the library."""
     lib = _get_lib(args)
@@ -208,11 +191,14 @@ def cmd_search(args):
         if not deduped:
             print(f"No results for: {args.query}")
         else:
+            from rtfm.core.pathresolve import (
+                resolve_source_path, build_slug_root_resolver)
+            root_for_slug = build_slug_root_resolver(lib)
             for rank, entry in enumerate(deduped, 1):
                 r = entry["best"]
                 count = entry["count"]
-                filepath = _resolve_abs_path(
-                    r.chunk.book_file or "", lib, ""
+                filepath = resolve_source_path(
+                    r.chunk.book_file or "", root_for_slug(r.chunk.book_slug)
                 )
                 parts = [f"{r.source} ({r.page})"]
                 parts.append(f"score: {r.score:.2f}")
@@ -2568,6 +2554,7 @@ def main():
     # queue — inspect / manage the work queue.
     p_q = subparsers.add_parser(
         "queue",
+        parents=[db_parent],
         help="Inspect or manage the work queue (stats / list / failed / "
              "clear-done / retry-failed / reap)",
     )
@@ -2577,7 +2564,7 @@ def main():
         default="stats",
     )
     p_q.add_argument("--limit", type=int, default=20,
-                     help="Max rows for list/failed (default 20).")
+                     help="Max rows for list/failed (default 20; 0 = all).")
     p_q.add_argument("--keep", type=int, default=100,
                      help="Rows to keep when clear-done (default 100).")
     p_q.set_defaults(func=cmd_queue)
