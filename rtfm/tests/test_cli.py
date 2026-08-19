@@ -214,3 +214,20 @@ def test_cmd_queue_db_flag_and_truncation_notice(rtfm_project, capsys, monkeypat
     out = capsys.readouterr().out
     assert "showing" not in out
     assert out.count("#") >= 25
+
+
+def test_cmd_remove_source_exit_codes(rtfm_project, capsys):
+    """`rtfm remove` exits non-zero when nothing matched, zero when it removed
+    something — so a script can tell the two apart."""
+    from rtfm.config import add_source, list_sources
+    add_source(rtfm_project, "/some/where", "projets")
+
+    # No match → non-zero.
+    rc = _run_cli("remove", "--corpus", "ghost")
+    assert rc != 0
+    capsys.readouterr()
+
+    # Real removal → zero, and the source is gone.
+    rc = _run_cli("remove", "--corpus", "projets")
+    assert rc == 0
+    assert list_sources(rtfm_project) == []

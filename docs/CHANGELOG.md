@@ -7,6 +7,15 @@ description: >-
 
 # Changelog
 
+## [0.26.7] — 2026-08-19
+
+### Fixed — `rtfm remove` exits non-zero when nothing matched
+
+`rtfm remove` returned success even when no source matched, so a script could
+not tell "removed something" from "there was nothing to remove". It now exits
+non-zero (like `grep`) on no match, and zero only when it actually removed a
+source.
+
 ## [0.26.6] — 2026-08-19
 
 ### Added — `rtfm remove` unregisters a source

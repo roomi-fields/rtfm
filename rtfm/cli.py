@@ -1976,9 +1976,11 @@ def cmd_remove_source(args):
 
     n = remove_source(root, path=path, corpus=corpus)
     if n == 0:
+        # Nothing matched: exit non-zero (like grep) so a script can tell
+        # "removed something" from "there was nothing to remove".
         target = path or f"corpus [{corpus}]"
         print(f"No matching source to remove: {target}")
-        return
+        sys.exit(1)
     scope = []
     if path:
         scope.append(str(Path(path).resolve()))
