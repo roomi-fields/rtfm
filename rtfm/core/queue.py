@@ -45,10 +45,23 @@ from typing import Any, Iterable, Optional
 # is intentional: leaves room for future intermediate priorities without
 # renumbering. P_USER (0) is the explicit user-request lane that wins
 # over every periodic/background producer.
+#
+# Document work — remove, ingest AND scan — shares ONE tier (P_DOC) so it is
+# served in strict arrival order across all projects, exactly as the operator
+# mandated in 0.26.0. Keeping scan *above* remove/ingest (the pre-0.26.5
+# scheme, scan=10 < remove=20 < ingest=30) was a starvation bug: a scan is
+# re-enqueued every interval per source, so with many projects a fresh scan
+# perpetually preempted removals and ingestions queued far earlier — the
+# machine scanned forever and never served the work the scans produced. At
+# equal priority a just-enqueued scan sorts *after* older pending work, so
+# discovery can never jump ahead of the correction it feeds. embed/ocr stay
+# strictly below so a large embedding backlog can never starve index-
+# correcting work.
 P_USER = 0
-P_SCAN = 10
-P_REMOVE = 20
-P_INGEST = 30
+P_DOC = 10
+P_SCAN = P_DOC
+P_REMOVE = P_DOC
+P_INGEST = P_DOC
 P_RECONCILE = 40
 P_VACUUM = 40
 P_EMBED = 50

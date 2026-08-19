@@ -156,8 +156,7 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
         }
     """
     from rtfm.core.sync import (
-        REMOVE_CIRCUIT_MIN_FILES, REMOVE_CIRCUIT_RATIO,
-        _path_to_slug, compute_diff, scan_directory,
+        confirm_removals, _path_to_slug, compute_diff, scan_directory,
     )
 
     payload = job.payload or {}
@@ -229,30 +228,21 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
     finally:
         lib.close()
 
-    # Removals → ``remove`` jobs, guarded by the mass-removal circuit
-    # breaker. Same thresholds as the legacy ``sync()``.
+    # Removals → ``remove`` jobs, each confirmed against the live filesystem
+    # (see :func:`confirm_removals`): a file is only enqueued for removal when
+    # it is genuinely absent and its location is readable. A file that
+    # reappeared, or one whose mount went dark, is kept.
     queue = Queue(str(worker.db_path))
     remove_jobs = 0
     skipped_removed = 0
     try:
-        n_removed = len(diff.removed)
-        n_indexed = len(indexed)
-        if n_removed:
-            breaker_trips = (
-                not force_remove
-                and n_removed >= REMOVE_CIRCUIT_MIN_FILES
-                and n_removed >= REMOVE_CIRCUIT_RATIO * (n_indexed or 1)
-            )
-            if breaker_trips:
-                worker._log(
-                    f"refused to remove {n_removed}/{n_indexed} files in "
-                    f"[{corpus}] — scan looks incomplete. Re-run with "
-                    f"force_remove=True to override."
-                )
-                skipped_removed = n_removed
-            else:
+        if diff.removed:
+            confirmed, kept = confirm_removals(
+                root, list(diff.removed), force=force_remove)
+            skipped_removed = len(kept)
+            if confirmed:
                 payloads = [{"filepath": rel, "corpus": corpus}
-                            for rel in diff.removed]
+                            for rel in confirmed]
                 inserted, _ = queue.enqueue_many("remove", payloads)
                 remove_jobs = inserted
 

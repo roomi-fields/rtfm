@@ -27,11 +27,14 @@ from typing import Callable, Optional
 # costs nothing.
 IDLE_POLL_SECONDS = 5.0
 
-# How often, while idle, to also re-scan the filesystem for new or
-# moved files (cf. the old watcher.py poller — now folded in). 30 s
-# matches the user-visible expectation: a file you save lands in the
-# queue within ~30 s, automatically.
-SCAN_INTERVAL_SECONDS = 30.0
+# How often, while idle, to also re-scan the filesystem for new or moved
+# files (cf. the old watcher.py poller — now folded in). One mutualised
+# supervisor serves dozens of projects, each with several sources; a 30 s
+# per-source cadence flooded the queue with re-scans that churned the CPU
+# and (pre-0.26.5) starved real work. 300 s is ample for background
+# freshness — an explicit ``rtfm sync`` (P_USER) still lands a saved file
+# in the queue immediately, bypassing this cadence entirely.
+SCAN_INTERVAL_SECONDS = 300.0
 
 # How often, while idle, to reconcile the DB (purge orphan embeddings,
 # re-queue un-embedded chunks). Far less urgent than the file scan, and

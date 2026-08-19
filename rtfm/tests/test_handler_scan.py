@@ -130,11 +130,12 @@ def test_scan_enqueues_remove_for_disappeared_files(tmp_path: Path):
         q.close()
 
 
-def test_scan_circuit_breaker_blocks_mass_removal(tmp_path: Path):
-    """40 indexed files, only 5 on disk → batch hits both thresholds
-    (>=25 absolute AND >=25% of corpus). Refuse to enqueue any remove."""
+def test_scan_removes_genuinely_absent_files_even_in_bulk(tmp_path: Path):
+    """40 indexed, 5 on disk → the 35 genuinely-absent files are all enqueued
+    for removal. The old ratio circuit breaker refused such real bulk
+    deletions forever; per-file confirmation applies them because the scan
+    root is readable and the files are truly gone."""
     root = tmp_path / "src"
-    # 5 survivors
     survivor_rels = [f"survivor-{i:02d}.md" for i in range(5)]
     for rel in survivor_rels:
         _write_md(root / rel, f"# {rel}\n\ncontent here.\n")
@@ -142,7 +143,6 @@ def test_scan_circuit_breaker_blocks_mass_removal(tmp_path: Path):
     db = tmp_path / "library.db"
     lib = Library(str(db))
     try:
-        # 5 real entries + 35 phantom-indexed = 40 tracked total
         _seed_indexed(lib, corpus="test", root=root, rels=survivor_rels)
         phantom_rels = [f"vanished-{i:02d}.md" for i in range(35)]
         _seed_indexed(lib, corpus="test", root=root,
@@ -150,27 +150,53 @@ def test_scan_circuit_breaker_blocks_mass_removal(tmp_path: Path):
     finally:
         lib.close()
 
-    worker = _fake_worker(db)
-    handle_scan(_make_scan_job(root, "test"), worker)
+    handle_scan(_make_scan_job(root, "test"), _fake_worker(db))
 
     q = Queue(db)
     try:
         pending = q.list_pending(limit=10_000)
         remove_jobs = [j for j in pending if j.type == "remove"]
-        assert remove_jobs == [], (
-            f"circuit breaker should block all removes, got {len(remove_jobs)}"
-        )
+        rels = sorted(j.payload["filepath"] for j in remove_jobs)
+        assert rels == sorted(f"vanished-{i:02d}.md" for i in range(35))
+        assert not [j for j in pending if j.type == "ingest"]
     finally:
         q.close()
 
-    # And the handler logged a clear warning.
-    assert any("refused to remove" in m for m in worker._logs), \
-        f"missing 'refused to remove' warning in logs: {worker._logs!r}"
+
+def test_scan_keeps_removal_when_root_unreadable(tmp_path: Path):
+    """If the scan root has gone dark (mount down), scan_directory() raises
+    and handle_scan aborts before any removal — nothing is wiped. Here we
+    prove the confirmation guard keeps everything when the root is gone by
+    driving handle_scan against a valid DB but a root that vanished after the
+    index was seeded."""
+    root = tmp_path / "src"
+    root.mkdir(parents=True)
+    db = tmp_path / "library.db"
+    lib = Library(str(db))
+    try:
+        _seed_indexed(lib, corpus="test", root=root,
+                      rels=[f"gone-{i:02d}.md" for i in range(30)],
+                      real_hashes=False)
+    finally:
+        lib.close()
+
+    # Root disappears (mount down) → scan can't enumerate it.
+    import shutil
+    shutil.rmtree(root)
+    worker = _fake_worker(db)
+    handle_scan(_make_scan_job(root, "test"), worker)
+
+    q = Queue(db)
+    try:
+        assert [j for j in q.list_pending(limit=10_000)
+                if j.type == "remove"] == []
+    finally:
+        q.close()
 
 
-def test_scan_force_remove_bypasses_circuit_breaker(tmp_path: Path):
-    """Same setup as the breaker test, but with ``force_remove=True``
-    → all 35 remove jobs land."""
+def test_scan_force_remove_bulk_delete(tmp_path: Path):
+    """``force_remove=True`` enqueues removals for every diff-detected
+    deletion without per-file confirmation (deliberate bulk delete)."""
     root = tmp_path / "src"
     survivor_rels = [f"survivor-{i:02d}.md" for i in range(5)]
     for rel in survivor_rels:
@@ -194,8 +220,6 @@ def test_scan_force_remove_bypasses_circuit_breaker(tmp_path: Path):
         pending = q.list_pending(limit=10_000)
         remove_jobs = [j for j in pending if j.type == "remove"]
         assert len(remove_jobs) == 35
-        rels = sorted(j.payload["filepath"] for j in remove_jobs)
-        assert rels == sorted(f"vanished-{i:02d}.md" for i in range(35))
         # Auto-vacuum was NOT triggered (35 < AUTO_VACUUM_AFTER_REMOVES=200).
         assert not [j for j in pending if j.type == "vacuum"]
     finally:

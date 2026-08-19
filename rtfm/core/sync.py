@@ -131,12 +131,70 @@ def _load_rtfmignore_spec(root: Path):
 # external process reorganising files mid-scan, can make scan_directory()
 # return far fewer files than are indexed — and an unguarded sync then wipes
 # books + chunks + the expensive embeddings for files that are merely
-# temporarily absent (this destroyed ~500 PDFs once). The breaker refuses a
-# removal batch when it is both large in absolute terms AND a big fraction of
-# the corpus — the signature of a bad scan, not real deletions. Pass
-# force_remove=True (or `rtfm sync --force-remove`) to override deliberately.
-REMOVE_CIRCUIT_MIN_FILES = 25
-REMOVE_CIRCUIT_RATIO = 0.25
+# temporarily absent (this destroyed ~500 PDFs once).
+#
+# The old guard was a blunt ratio circuit breaker: refuse the WHOLE removal
+# batch when it was both large (>=25 files) and a big fraction (>=25%) of the
+# corpus. It failed both ways — it refused genuine bulk deletions *forever*
+# (repos that legitimately dropped 30-80% of a corpus had every removal
+# refused on every scan, thousands of times, so the index diverged silently),
+# yet it still could not tell a real deletion from a glitch. It is replaced by
+# per-file confirmation (:func:`confirm_removals`): re-verify each removal
+# against the live filesystem at removal time — remove a file only when it is
+# genuinely absent AND a readable directory ancestor up to the scan root
+# proves the location was really visited. A file that reappears on re-stat
+# (transient scan miss) or whose mount went dark (root unreadable) is kept.
+# Pass force_remove=True (or `rtfm sync --force-remove`) to skip the check for
+# a deliberate bulk delete.
+
+
+def _removal_is_real(root: Path, rel: str) -> bool:
+    """Whether a scan-detected removal of ``rel`` reflects a genuine deletion.
+
+    Safe to remove only when the file is really absent *and* a readable
+    directory ancestor up to ``root`` proves the location was actually
+    scanned. ``Path.exists``/``Path.is_dir`` swallow OSError and return
+    ``False``, so a path on a mount that went dark reads as "absent" — hence
+    the ancestor probe: if ``root`` itself is unreadable, absence is not
+    evidence of deletion and the file is kept.
+    """
+    p = root / rel
+    try:
+        if p.exists():
+            return False            # still present → transient scan miss, keep
+    except OSError:
+        return False                # unreadable path → not evidence of deletion
+    anc = p.parent
+    while True:
+        try:
+            if anc.is_dir():
+                return True         # a readable ancestor exists → real deletion
+        except OSError:
+            return False
+        if anc == root:
+            return False            # root itself unreadable → mount down, keep
+        parent = anc.parent
+        if parent == anc:
+            return False            # reached filesystem root without hitting root
+        anc = parent
+
+
+def confirm_removals(
+    root: Path, removed: list[str], force: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Partition scan-detected removals into ``(confirmed, kept)``.
+
+    ``confirmed`` are genuine deletions safe to apply; ``kept`` are held back
+    (file reappeared, or its location is unreadable). ``force`` bypasses the
+    check for a deliberate bulk delete.
+    """
+    if force:
+        return list(removed), []
+    confirmed: list[str] = []
+    kept: list[str] = []
+    for rel in removed:
+        (confirmed if _removal_is_real(root, rel) else kept).append(rel)
+    return confirmed, kept
 
 
 # ── data classes ──────────────────────────────────────────────────────────
@@ -875,11 +933,10 @@ def sync(
     #   (b) file-list mode (files=) → never delete: a caller-supplied partial
     #       list says nothing about files it didn't mention, so their absence
     #       from `files` is not evidence of deletion.
-    #   (c) mass-removal circuit breaker → if a removal batch is both large
-    #       and a big fraction of the corpus, the scan is almost certainly
-    #       incomplete (mount hiccup, external reorg mid-scan); skip it and
-    #       surface a warning instead of wiping the index. force_remove
-    #       overrides for deliberate bulk deletes.
+    #   (c) per-file confirmation → re-verify each removal against the live
+    #       filesystem; keep any file that reappeared (transient scan miss) or
+    #       whose location is unreadable (mount down). force_remove skips the
+    #       check for a deliberate bulk delete.
     if retain_history is None:
         for rel in diff.removed:
             if on_progress:
@@ -888,22 +945,17 @@ def sync(
         for rel in diff.removed:
             if on_progress:
                 on_progress("remove", rel, "skipped (file-list mode)")
-    elif (not force_remove and diff.removed
-          and len(diff.removed) >= REMOVE_CIRCUIT_MIN_FILES
-          and len(diff.removed) >= REMOVE_CIRCUIT_RATIO * (len(indexed) or 1)):
-        n, total = len(diff.removed), len(indexed)
-        msg = (
-            f"refused to remove {n}/{total} files "
-            f"({n / (total or 1):.0%} of corpus '{corpus}') — scan looks "
-            f"incomplete (mount hiccup or reorg in progress?). Index left "
-            f"intact. Re-run with force_remove=True to override."
-        )
-        result.errors.append(msg)
-        print(f"[sync] {msg}", file=sys.stderr)
-        if on_progress:
-            on_progress("error", "", msg)
     else:
-        for rel in diff.removed:
+        confirmed, kept = confirm_removals(
+            root, list(diff.removed), force=force_remove)
+        if kept:
+            msg = (f"kept {len(kept)} unconfirmed removal(s) in corpus "
+                   f"'{corpus}' (file present or location unreadable)")
+            print(f"[sync] {msg}", file=sys.stderr)
+            for rel in kept:
+                if on_progress:
+                    on_progress("remove", rel, "kept (unconfirmed)")
+        for rel in confirmed:
             try:
                 library.remove_file(rel)
                 result.removed += 1

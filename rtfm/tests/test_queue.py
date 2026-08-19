@@ -103,7 +103,7 @@ def test_peek_returns_head_without_claiming(queue: Queue):
     head = queue.peek()
     assert head is not None
     prio, created, jtype = head
-    assert prio == 30 and jtype == "ingest"  # P_INGEST wins over P_OCR
+    assert prio == 10 and jtype == "ingest"  # P_INGEST (P_DOC) wins over P_OCR
     # Nothing was claimed: the row is still pending and a dequeue returns it.
     stats = queue.stats()
     assert stats.get("ingest", {}).get("running", 0) == 0
@@ -218,15 +218,16 @@ def test_new_job_types_can_be_enqueued(queue: Queue):
     assert P_USER < min(expected.values())
 
 
-def test_priority_order_p0_to_p6(queue: Queue):
-    """Dequeue order must respect the new 7-level scheme strictly."""
+def test_priority_order_user_then_arrival_then_low(queue: Queue):
+    """P_USER preempts; document work (scan/remove/ingest) shares one tier
+    served in arrival order; embed/ocr stay strictly below."""
     from rtfm.core.queue import P_USER
-    queue.enqueue("ocr",       {"k": 1})  # P6
-    queue.enqueue("embed",     {"k": 2})  # P5
-    queue.enqueue("reconcile", {"k": 3})  # P4
-    queue.enqueue("ingest",    {"k": 4})  # P3
-    queue.enqueue("remove",    {"k": 5})  # P2
-    queue.enqueue("scan",      {"k": 6})  # P1
+    queue.enqueue("ocr",       {"k": 1})  # low
+    queue.enqueue("embed",     {"k": 2})  # low
+    queue.enqueue("reconcile", {"k": 3})  # mid
+    queue.enqueue("ingest",    {"k": 4})  # P_DOC — arrival 1
+    queue.enqueue("remove",    {"k": 5})  # P_DOC — arrival 2
+    queue.enqueue("scan",      {"k": 6})  # P_DOC — arrival 3
     queue.enqueue("ingest",    {"urgent": True}, priority=P_USER)  # P0 — wins
     out = []
     while True:
@@ -234,7 +235,9 @@ def test_priority_order_p0_to_p6(queue: Queue):
         if j is None:
             break
         out.append(j.type)
-    assert out == ["ingest", "scan", "remove", "ingest", "reconcile",
+    # P0 first; then the P_DOC tier in strict arrival order (ingest, remove,
+    # scan — the order they were enqueued); then reconcile, embed, ocr.
+    assert out == ["ingest", "ingest", "remove", "scan", "reconcile",
                    "embed", "ocr"]
 
 

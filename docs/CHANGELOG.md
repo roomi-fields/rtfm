@@ -7,6 +7,42 @@ description: >-
 
 # Changelog
 
+## [0.26.5] — 2026-08-03
+
+### Fixed — scan starved removals and ingestions; the index silently diverged
+
+Measured across 25 mutualised projects, the supervisor was scanning, not
+indexing: 9 of 12 lanes ran `scan` jobs, 0 ran ingest/remove/embed, while
+hundreds of ingestions and removals sat pending for hours. Two independent
+bugs, now fixed:
+
+- **Priority starvation.** Scan was priority 10, remove 20, ingest 30 — and a
+  scan is re-enqueued every interval per source. With many projects a fresh
+  scan (high priority) perpetually preempted removals and ingestions queued
+  far earlier, so the machine re-discovered work forever and never served it.
+  Remove, ingest **and** scan now share **one priority tier** (`P_DOC`),
+  served in strict arrival order across all projects, exactly as intended in
+  0.26.0. A just-enqueued scan sorts *after* older pending work instead of
+  jumping the queue; `embed`/`ocr` stay strictly below so an embedding backlog
+  can never starve index-correcting work. `P_USER` still preempts everything.
+  The idle re-scan cadence is also relaxed from 30 s to 300 s per source — a
+  30 s per-source loop across dozens of projects churned CPU for no benefit
+  (an explicit `rtfm sync` still lands a file immediately).
+
+- **Mass-removal circuit breaker refused genuine deletions forever.** The
+  guard refused an entire removal batch when it exceeded 25 files *and* 25 %
+  of a corpus — the signature of a mount glitch, but also of any legitimate
+  large deletion. Repos that genuinely dropped 30–80 % of a corpus had every
+  removal refused on **every** scan (one tripped it 15 747 times), so dead
+  documents accumulated in the index with nothing in the queue counters to
+  show it. Replaced by **per-file confirmation** (`confirm_removals`): a file
+  is removed only when it is genuinely absent *and* a readable directory
+  ancestor up to the scan root proves the location was really visited. A file
+  that reappears on re-stat (transient miss) or whose mount went dark (root
+  unreadable) is kept — the same protection against a disappeared mount, without
+  ever refusing a real deletion. `force_remove` still bypasses for deliberate
+  bulk deletes.
+
 ## [0.26.4] — 2026-08-03
 
 ### Fixed — runtime DB corruption hot-looped the dispatcher for days

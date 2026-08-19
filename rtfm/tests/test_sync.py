@@ -13,8 +13,46 @@ from rtfm.core.sync import (
     SyncDiff,
     SyncResult,
     _path_to_slug,
+    confirm_removals,
 )
 from rtfm.parsers.plaintext import PlainTextParser, _chunk_lines
+
+
+# ── confirm_removals: per-file deletion confirmation ─────────────────────
+
+def test_confirm_removals_confirms_genuinely_absent(tmp_path):
+    """File truly gone + readable root → confirmed for removal."""
+    (tmp_path / "kept.md").write_text("x")
+    confirmed, kept = confirm_removals(tmp_path, ["gone.md"])
+    assert confirmed == ["gone.md"] and kept == []
+
+
+def test_confirm_removals_keeps_file_that_still_exists(tmp_path):
+    """File still on disk (transient scan miss) → kept, never removed."""
+    (tmp_path / "here.md").write_text("x")
+    confirmed, kept = confirm_removals(tmp_path, ["here.md"])
+    assert confirmed == [] and kept == ["here.md"]
+
+
+def test_confirm_removals_keeps_all_when_root_unreadable(tmp_path):
+    """Root gone (mount down) → absence is not evidence of deletion; keep."""
+    missing_root = tmp_path / "mount" / "gone"
+    confirmed, kept = confirm_removals(missing_root, ["a.md", "b.md"])
+    assert confirmed == [] and sorted(kept) == ["a.md", "b.md"]
+
+
+def test_confirm_removals_confirms_deleted_subdirectory(tmp_path):
+    """A whole subdir deleted (root still readable) → its files confirmed."""
+    (tmp_path / "top.md").write_text("x")   # keeps root non-empty & readable
+    confirmed, kept = confirm_removals(tmp_path, ["sub/deep/x.md"])
+    assert confirmed == ["sub/deep/x.md"] and kept == []
+
+
+def test_confirm_removals_force_bypasses_check(tmp_path):
+    """force=True removes everything, even a file still present."""
+    (tmp_path / "here.md").write_text("x")
+    confirmed, kept = confirm_removals(tmp_path, ["here.md"], force=True)
+    assert confirmed == ["here.md"] and kept == []
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -519,24 +557,26 @@ class TestRemovalSafety:
                 "parser so that it produces at least one chunk and book.\n"
             )
 
-    def test_circuit_breaker_blocks_mass_removal(self, sync_db, tmp_path):
-        """A scan missing most of the corpus must NOT delete anything."""
+    def test_mass_removal_of_genuinely_deleted_files_applies(
+            self, sync_db, tmp_path):
+        """A large real deletion (files truly unlinked, root readable) is
+        applied. The old ratio circuit breaker refused this forever — the
+        bug that silently diverged indexes from disk."""
         self._make_corpus(tmp_path, 40)
         sync(sync_db, tmp_path, corpus="t", generate_embeddings=False)
         assert sync_db.get_stats()["books"] == 40
 
-        # Simulate a bad scan: 30/40 files vanish at once (75%).
+        # 30/40 files genuinely deleted (75%). Root is still readable, so
+        # these are confirmed deletions, not a mount glitch.
         for i in range(30):
             (tmp_path / f"f{i:03d}.txt").unlink()
 
         result = sync(sync_db, tmp_path, corpus="t",
                       generate_embeddings=False)
-        assert result.removed == 0, "circuit breaker should block deletion"
-        assert any("refused to remove" in e for e in result.errors)
-        # Index left fully intact.
-        assert sync_db.get_stats()["books"] == 40
+        assert result.removed == 30
+        assert sync_db.get_stats()["books"] == 10
 
-    def test_force_remove_overrides_breaker(self, sync_db, tmp_path):
+    def test_force_remove_bulk_delete(self, sync_db, tmp_path):
         """force_remove=True applies a deliberate bulk delete."""
         self._make_corpus(tmp_path, 40)
         sync(sync_db, tmp_path, corpus="t", generate_embeddings=False)
