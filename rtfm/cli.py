@@ -1959,6 +1959,34 @@ def cmd_add(args):
         print(f"Source already registered: [{args.corpus}] {resolved}")
 
 
+def cmd_remove_source(args):
+    """Unregister a source from .rtfm/config.json."""
+    from rtfm.config import find_rtfm_root, remove_source
+
+    root = find_rtfm_root()
+    if not root:
+        print("No .rtfm/ found. Run 'rtfm init' first.")
+        sys.exit(1)
+
+    path = getattr(args, "path", None)
+    corpus = getattr(args, "corpus", None)
+    if not path and not corpus:
+        print("Nothing to remove: give a PATH and/or --corpus.")
+        sys.exit(1)
+
+    n = remove_source(root, path=path, corpus=corpus)
+    if n == 0:
+        target = path or f"corpus [{corpus}]"
+        print(f"No matching source to remove: {target}")
+        return
+    scope = []
+    if path:
+        scope.append(str(Path(path).resolve()))
+    if corpus:
+        scope.append(f"corpus [{corpus}]")
+    print(f"Removed {n} source(s): {', '.join(scope)}")
+
+
 def cmd_sources(args):
     """List registered sources."""
     from rtfm.config import find_rtfm_root, list_sources
@@ -2631,6 +2659,18 @@ def main():
     p_add.add_argument("--corpus", "-c", default="default", help="Corpus name")
     p_add.add_argument("--extensions", "-e", help="Comma-separated extensions (e.g. md,py,pdf)")
     p_add.set_defaults(func=cmd_add)
+
+    # remove (unregister a source — the counterpart to `add`)
+    p_remove = subparsers.add_parser(
+        "remove", aliases=["rm"],
+        help="Unregister a source directory (by path and/or --corpus)")
+    p_remove.add_argument("path", nargs="?",
+                          help="Source directory to unregister")
+    p_remove.add_argument(
+        "--corpus", "-c",
+        help="Corpus to unregister: with PATH, that specific entry; "
+             "alone, every source in the corpus.")
+    p_remove.set_defaults(func=cmd_remove_source)
 
     # sources (list registered sources)
     p_sources = subparsers.add_parser("sources", help="List registered sources")

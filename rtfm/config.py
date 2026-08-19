@@ -136,3 +136,44 @@ def list_sources(project_root: Path) -> list[dict]:
     """
     config = load_config(project_root)
     return config.get("sources", [])
+
+
+def remove_source(
+    project_root: Path,
+    path: str | None = None,
+    corpus: str | None = None,
+) -> int:
+    """Remove matching sources from .rtfm/config.json. Returns how many were
+    removed.
+
+    The counterpart to :func:`add_source`. Matching:
+
+    * ``path`` + ``corpus`` → entries matching **both**,
+    * ``path`` only         → entries with that path, any corpus,
+    * ``corpus`` only       → **every** entry in that corpus.
+
+    At least one of ``path`` / ``corpus`` must be given. The path is matched
+    both resolved and as-stored, so a source whose directory no longer exists
+    (deleted upstream, or a mount that is down) can still be unregistered —
+    the whole point of removal is often that the target is gone.
+    """
+    if path is None and corpus is None:
+        raise ValueError("remove_source requires a path and/or a corpus")
+
+    config = load_config(project_root)
+    sources = config.get("sources", [])
+    resolved = str(Path(path).resolve()) if path is not None else None
+
+    def _matches(src: dict) -> bool:
+        if corpus is not None and src.get("corpus") != corpus:
+            return False
+        if resolved is not None and src.get("path") not in (resolved, path):
+            return False
+        return True
+
+    kept = [s for s in sources if not _matches(s)]
+    removed = len(sources) - len(kept)
+    if removed:
+        config["sources"] = kept
+        save_config(project_root, config)
+    return removed

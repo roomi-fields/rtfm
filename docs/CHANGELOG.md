@@ -7,6 +7,23 @@ description: >-
 
 # Changelog
 
+## [0.26.6] — 2026-08-19
+
+### Added — `rtfm remove` unregisters a source
+
+`add` registered a source and `sources` listed them, but nothing removed one —
+so undoing a source meant hand-editing `.rtfm/config.json`, which is exactly
+what the tooling exists to avoid. `rtfm remove` (alias `rm`) closes the gap:
+
+- `rtfm remove <path>` — unregister that source (any corpus).
+- `rtfm remove --corpus <name>` — unregister every source in a corpus.
+- `rtfm remove <path> --corpus <name>` — unregister that one entry.
+
+The path is matched both resolved and as-stored, so a source whose directory
+no longer exists (deleted upstream, or a mount that is down) can still be
+unregistered — removal is often needed precisely because the target is gone.
+Backed by `rtfm.config.remove_source`.
+
 ## [0.26.5] — 2026-08-03
 
 ### Fixed — scan starved removals and ingestions; the index silently diverged

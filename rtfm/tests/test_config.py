@@ -11,6 +11,7 @@ from rtfm.config import (
     find_rtfm_root,
     list_sources,
     load_config,
+    remove_source,
     resolve_db,
     save_config,
 )
@@ -112,6 +113,55 @@ class TestAddSource:
         assert result == "added"
         sources = list_sources(tmp_path)
         assert len(sources) == 2
+
+
+class TestRemoveSource:
+    def test_remove_by_path_and_corpus(self, tmp_path):
+        (tmp_path / ".rtfm").mkdir()
+        add_source(tmp_path, str(tmp_path / "src"), "code")
+        add_source(tmp_path, str(tmp_path / "src"), "tests")
+        n = remove_source(tmp_path, path=str(tmp_path / "src"), corpus="code")
+        assert n == 1
+        remaining = list_sources(tmp_path)
+        assert [s["corpus"] for s in remaining] == ["tests"]
+
+    def test_remove_whole_corpus(self, tmp_path):
+        (tmp_path / ".rtfm").mkdir()
+        add_source(tmp_path, "/a", "projets")
+        add_source(tmp_path, "/b", "projets")
+        add_source(tmp_path, "/c", "default")
+        n = remove_source(tmp_path, corpus="projets")
+        assert n == 2
+        assert [s["corpus"] for s in list_sources(tmp_path)] == ["default"]
+
+    def test_remove_by_path_any_corpus(self, tmp_path):
+        (tmp_path / ".rtfm").mkdir()
+        add_source(tmp_path, str(tmp_path / "src"), "code")
+        add_source(tmp_path, str(tmp_path / "src"), "tests")
+        n = remove_source(tmp_path, path=str(tmp_path / "src"))
+        assert n == 2
+        assert list_sources(tmp_path) == []
+
+    def test_remove_missing_directory_still_works(self, tmp_path):
+        """A source whose directory no longer exists must still be removable
+        — deletion is often *why* you remove it."""
+        (tmp_path / ".rtfm").mkdir()
+        gone = str(tmp_path / "was-here")
+        add_source(tmp_path, gone, "socle")
+        n = remove_source(tmp_path, path=gone)
+        assert n == 1
+        assert list_sources(tmp_path) == []
+
+    def test_remove_no_match_is_zero(self, tmp_path):
+        (tmp_path / ".rtfm").mkdir()
+        add_source(tmp_path, "/a", "x")
+        assert remove_source(tmp_path, corpus="nope") == 0
+        assert len(list_sources(tmp_path)) == 1
+
+    def test_remove_requires_a_criterion(self, tmp_path):
+        (tmp_path / ".rtfm").mkdir()
+        with pytest.raises(ValueError):
+            remove_source(tmp_path)
 
 
 class TestListSources:
