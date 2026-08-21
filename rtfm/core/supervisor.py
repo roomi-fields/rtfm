@@ -36,15 +36,17 @@ import os
 import signal
 import socket
 import sys
+import threading
 import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Callable, Optional
 
 from rtfm.core.dbcare import ensure_healthy_db, make_rotating_logger
-from rtfm.core.queue import Queue, Job
+from rtfm.core.queue import Queue, Job, P_USER
 from rtfm.core.throttle import _max_concurrent
 from rtfm.core.worker import (
     JobContext,
@@ -220,6 +222,24 @@ class SupervisorLock:
 # every core instead of one.
 EXCLUSIVE_JOB_TYPES = frozenset({"scan", "reconcile", "vacuum"})
 
+#: Lanes held back for P_USER work, on top of the concurrency cap.
+#:
+#: Priority alone is not enough: it decides who gets the *next* free lane,
+#: and on a busy fleet there is no next free lane for minutes — a scan of a
+#: large or slow-mounted corpus holds one for as long as it takes. Meanwhile
+#: the one job that someone is actually waiting on — the file an agent just
+#: edited, a file a search found to be out of date — sits pending. These
+#: jobs are single-file ingests, so letting them run slightly over the cap
+#: costs almost nothing and is the difference between "indexed now" and
+#: "indexed in three minutes".
+P_USER_RESERVED_LANES = 2
+
+#: How long a single scheduling step may run before the watchdog says so,
+#: and how often it looks. A healthy step is milliseconds; anything near a
+#: minute means the loop is stuck on something outside its control.
+STALL_WARN_SECONDS = 30.0
+STALL_POLL_SECONDS = 5.0
+
 
 # ── Per-project bookkeeping ──────────────────────────────────────────────
 
@@ -294,8 +314,14 @@ class Supervisor:
         self._scan_interval = scan_interval
         self._reconcile_interval = reconcile_interval
 
+        # Stall watchdog state (see ``_step``).
+        self._step_name: Optional[str] = None
+        self._step_started = 0.0
+        self._step_warned = False
+
         self._slots: dict[str, _Slot] = {}
-        self._pool = ThreadPoolExecutor(max_workers=self._max_concurrent)
+        self._pool = ThreadPoolExecutor(
+            max_workers=self._max_concurrent + P_USER_RESERVED_LANES)
         self._inflight: dict[Future, tuple[_Slot, Job]] = {}
 
         self._stop = False
@@ -318,16 +344,24 @@ class Supervisor:
         # comes from the lock, but the counters live here.
         self._snapshot()
         self._preload_model()
+        self._start_stall_watchdog()
         try:
             while not self._stop:
-                if self._should_recycle():
+                with self._step("recycle-check"):
+                    recycle = self._should_recycle()
+                if recycle:
                     self._auto_respawn = True
                     break
-                self._sync_registry()
-                self._reap_finished()
-                self._enqueue_periodic()
-                dispatched = self._dispatch()
-                self._snapshot()
+                with self._step("sync-registry"):
+                    self._sync_registry()
+                with self._step("reap"):
+                    self._reap_finished()
+                with self._step("enqueue-periodic"):
+                    self._enqueue_periodic()
+                with self._step("dispatch"):
+                    dispatched = self._dispatch()
+                with self._step("snapshot"):
+                    self._snapshot()
                 # Sleep only when fully idle: no dispatch this tick and
                 # nothing in flight. Otherwise loop hot so finished jobs are
                 # reaped and successors dispatched promptly.
@@ -337,6 +371,39 @@ class Supervisor:
                     self._sleep(0.2)
         finally:
             self._shutdown()
+
+    # ── stall watchdog ───────────────────────────────────────────────────
+    # The scheduling loop is single-threaded: whatever blocks it blocks every
+    # project at once. Most of it is local SQLite and cannot block for long,
+    # but a source on a dead network mount can park a syscall for a minute at
+    # a time — and from the outside that is indistinguishable from "idle".
+    # The watchdog turns that silence into a log line naming the step.
+
+    @contextmanager
+    def _step(self, name: str):
+        self._step_name = name
+        self._step_started = time.monotonic()
+        try:
+            yield
+        finally:
+            self._step_name = None
+            self._step_warned = False
+
+    def _start_stall_watchdog(self) -> None:
+        def watch() -> None:
+            while not self._stop:
+                time.sleep(STALL_POLL_SECONDS)
+                name = self._step_name
+                if name is None or self._step_warned:
+                    continue
+                held = time.monotonic() - self._step_started
+                if held >= STALL_WARN_SECONDS:
+                    self._step_warned = True
+                    self._log(f"STALL: scheduling blocked in '{name}' for "
+                              f"{held:.0f}s — no project is being served")
+
+        threading.Thread(target=watch, name="rtfm-stall-watchdog",
+                         daemon=True).start()
 
     # ── registry → slots ─────────────────────────────────────────────────
 
@@ -415,6 +482,11 @@ class Supervisor:
     def _free(self) -> int:
         return self._max_concurrent - len(self._inflight)
 
+    def _free_reserved(self) -> int:
+        """Lanes available counting the P_USER reserve."""
+        return (self._max_concurrent + P_USER_RESERVED_LANES
+                - len(self._inflight))
+
     def _slot_can_accept(self, slot: "_Slot", head_type: str) -> bool:
         """Whether *slot* may take its head job right now.
 
@@ -450,7 +522,11 @@ class Supervisor:
         """
         dispatched = False
         skip: set[int] = set()  # slots to ignore for the rest of this pass
-        while self._free() > 0:
+        while self._free_reserved() > 0:
+            # Once the ordinary lanes are full, only P_USER work may start —
+            # the reserve exists so a file an agent just edited is indexed
+            # now, instead of waiting behind long scans in other projects.
+            user_only = self._free() <= 0
             # Pick the globally-oldest dispatchable head across all projects.
             best_slot: Optional[_Slot] = None
             best_key: Optional[tuple[int, str]] = None
@@ -468,6 +544,8 @@ class Supervisor:
                 if head is None:
                     continue
                 priority, created_at, head_type = head
+                if user_only and priority > P_USER:
+                    continue
                 if not self._slot_can_accept(slot, head_type):
                     continue
                 key = (priority, created_at)
@@ -604,9 +682,17 @@ class Supervisor:
                  "corpus": cfg.get("corpus", "default")}
             ]
             for src in sources:
-                src_path = Path(src.get("path", ".")).resolve()
+                # Lexical only — never touch the filesystem here. ``resolve()``
+                # stats every path component, and one source on an unreachable
+                # network mount then blocks this thread in uninterruptible I/O,
+                # freezing dispatch, reaping and scheduling for *every* project
+                # (observed: the whole fleet stalled on a 9p mount while twelve
+                # jobs sat finished and unreaped). The scan handler resolves the
+                # root for real, in a pool thread, where blocking costs one lane
+                # instead of the machine.
+                src_path = os.path.abspath(src.get("path", "."))
                 payload = {
-                    "root": str(src_path),
+                    "root": src_path,
                     "corpus": src.get("corpus", cfg.get("corpus", "default")),
                     "extensions": src.get("extensions") or None,
                 }

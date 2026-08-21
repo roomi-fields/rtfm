@@ -33,12 +33,43 @@ since indexing`, `deleted since indexing` and `never indexed`.
 
 Cost is one `stat` per returned result. There is no configuration.
 
-### Changed — an edit by an agent is now top priority
+### Changed — an edit by an agent is now top priority, with a lane to run in
 
 The PostToolUse hook queued the just-written file at the same priority as
 background document work, so on a busy machine it waited behind the entire
-backlog. It is now queued at `P_USER`, ahead of everything: the file an agent
-is about to read back cannot wait behind a re-index wave.
+backlog. It is now queued at `P_USER`, ahead of everything.
+
+Priority alone turned out not to be enough: it decides who takes the *next*
+free lane, and on a 25-project fleet there is no next free lane for minutes —
+a scan of a large or network-mounted corpus holds one for as long as it takes.
+Measured: a `P_USER` ingest still pending after 125 s with all twelve lanes
+held by scans. The supervisor now keeps **two lanes in reserve for `P_USER`
+work only**. These jobs are single-file ingests, so the extra capacity costs
+almost nothing.
+
+### Fixed — one unreachable network mount froze indexing for every project
+
+The supervisor's scheduling thread resolved each configured source path
+(`Path.resolve()`) before queueing its scan. `resolve()` stats every path
+component, so a single source on a slow or unreachable network mount parked
+that thread in uninterruptible I/O — and with it dispatch, reaping and
+scheduling **for all 25 projects**. Observed live: twelve jobs finished and
+unreaped, nothing dispatched for minutes, a `P_USER` ingest pending the whole
+time, while the main thread sat in a 9p wait on `/mnt/…`.
+
+Scheduling is now purely lexical and never touches a source filesystem. The
+scan handler resolves the root for real, in a pool thread, where blocking
+costs one lane instead of the machine.
+
+### Added — the supervisor says when its scheduling loop is stuck
+
+A blocked scheduler looks exactly like an idle one from outside: no jobs
+running, no errors, nothing in the log. A watchdog now names the step and how
+long it has been in it, so "the fleet stopped indexing" stops being a mystery:
+
+```
+STALL: scheduling blocked in 'enqueue-periodic' for 62s — no project is being served
+```
 
 ### Changed — a scan no longer re-reads files that did not change
 

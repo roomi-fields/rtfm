@@ -15,6 +15,7 @@ import json
 import os
 import threading
 import time
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
@@ -489,3 +490,193 @@ class TestHookRefresh:
         sup._refresh_hooks(_Slot(root / ".rtfm"))  # must not raise
 
         assert not (root / ".claude").exists()
+
+
+class TestUserLaneReserve:
+    """Priority decides who takes the next free lane — but on a busy fleet
+    there is no next free lane for minutes. P_USER work gets its own."""
+
+    def _sup(self, tmp_path, slots):
+        from rtfm.core.supervisor import Supervisor
+
+        sup = Supervisor.__new__(Supervisor)
+        sup._log = lambda msg: None
+        sup._max_concurrent = 2
+        sup._slots = slots
+        sup._inflight = {}
+        sup._pool = None
+        return sup
+
+    def _slot(self, tmp_path, name, head):
+        """A slot whose queue reports *head* as ``(priority, created_at, type)``."""
+        from rtfm.core.library import Library
+        from rtfm.core.supervisor import _Slot
+
+        root = tmp_path / name
+        (root / ".rtfm").mkdir(parents=True)
+        Library(root / ".rtfm" / "library.db").close()
+        slot = _Slot(root / ".rtfm")
+
+        class _Q:
+            def __init__(self):
+                self.dequeued = 0
+
+            def peek(self_inner):
+                return head
+
+            def dequeue(self_inner):
+                from rtfm.core.queue import Job
+                self_inner.dequeued += 1
+                return Job(id=1, type=head[2], priority=head[0],
+                           payload={}, status="running", created_at=head[1],
+                           started_at=None, finished_at=None, error=None,
+                           attempts=1)
+
+        slot.queue = _Q()
+        return slot
+
+    def test_user_job_starts_when_every_ordinary_lane_is_busy(self, tmp_path):
+        from rtfm.core.queue import P_USER
+
+        slot = self._slot(tmp_path, "urgent", (P_USER, "2026-01-01T00:00:00Z", "ingest"))
+        sup = self._sup(tmp_path, {"a": slot})
+        sup._pool = _RecordingPool()
+        sup._inflight = {object(): (slot, None), object(): (slot, None)}  # cap full
+
+        assert sup._dispatch() is True
+        assert sup._pool.submitted >= 1
+
+    def test_background_job_waits_for_an_ordinary_lane(self, tmp_path):
+        from rtfm.core.queue import P_DOC
+
+        slot = self._slot(tmp_path, "bg", (P_DOC, "2026-01-01T00:00:00Z", "ingest"))
+        sup = self._sup(tmp_path, {"a": slot})
+        sup._pool = _RecordingPool()
+        sup._inflight = {object(): (slot, None), object(): (slot, None)}
+
+        assert sup._dispatch() is False
+        assert sup._pool.submitted == 0
+
+    def test_reserve_is_bounded(self, tmp_path):
+        """The reserve is extra capacity, not unlimited capacity."""
+        from rtfm.core.queue import P_USER
+        from rtfm.core.supervisor import P_USER_RESERVED_LANES
+
+        slot = self._slot(tmp_path, "many", (P_USER, "2026-01-01T00:00:00Z", "ingest"))
+        sup = self._sup(tmp_path, {"a": slot})
+        sup._pool = _RecordingPool()
+        sup._inflight = {object(): (slot, None) for _ in range(2)}
+
+        sup._dispatch()
+        assert sup._pool.submitted == P_USER_RESERVED_LANES
+
+
+class _RecordingPool:
+    def __init__(self):
+        self.submitted = 0
+
+    def submit(self, fn, *args):
+        self.submitted += 1
+        fut = Future()
+        fut.set_result(None)
+        return fut
+
+
+class TestSchedulingNeverTouchesSourceFilesystem:
+    """One source on an unreachable network mount must not be able to freeze
+    scheduling for the whole fleet — the scheduler stays lexical."""
+
+    def test_scan_is_enqueued_without_stat_ing_the_source(self, tmp_path, monkeypatch):
+        from rtfm.config import add_source, save_config
+        from rtfm.core.library import Library
+        from rtfm.core.supervisor import Supervisor, _Slot
+
+        root = tmp_path / "proj"
+        (root / ".rtfm").mkdir(parents=True)
+        Library(root / ".rtfm" / "library.db").close()
+        save_config(root, {"corpus": "default"})
+        add_source(root, "/mnt/unreachable/corpus", "remote")
+
+        slot = _Slot(root / ".rtfm")
+        slot.open(lambda m: None)
+
+        def _explode(*a, **k):
+            raise AssertionError("scheduler touched the source filesystem")
+
+        monkeypatch.setattr(Path, "resolve", _explode)
+        monkeypatch.setattr(Path, "is_dir", _explode)
+        monkeypatch.setattr(os.path, "realpath", _explode)
+
+        sup = Supervisor.__new__(Supervisor)
+        sup._log = lambda msg: None
+        sup._enqueue_scans(slot)
+
+        head = slot.queue.peek()
+        assert head is not None and head[2] == "scan"
+        slot.close()
+
+
+class TestStallWatchdog:
+    """A single-threaded scheduler that blocks stops serving every project.
+    From outside, that is indistinguishable from idle — unless it says so."""
+
+    def _sup(self, logged):
+        from rtfm.core.supervisor import Supervisor
+
+        sup = Supervisor.__new__(Supervisor)
+        sup._log = logged.append
+        sup._stop = False
+        sup._step_name = None
+        sup._step_started = 0.0
+        sup._step_warned = False
+        return sup
+
+    def test_names_the_step_it_is_stuck_in(self, monkeypatch):
+        from rtfm.core import supervisor as mod
+
+        monkeypatch.setattr(mod, "STALL_WARN_SECONDS", 0.05)
+        monkeypatch.setattr(mod, "STALL_POLL_SECONDS", 0.01)
+
+        logged: list[str] = []
+        sup = self._sup(logged)
+        sup._start_stall_watchdog()
+
+        with sup._step("enqueue-periodic"):
+            time.sleep(0.3)
+        sup._stop = True
+
+        assert any("STALL" in m and "enqueue-periodic" in m for m in logged)
+
+    def test_quiet_when_steps_are_quick(self, monkeypatch):
+        from rtfm.core import supervisor as mod
+
+        monkeypatch.setattr(mod, "STALL_WARN_SECONDS", 5.0)
+        monkeypatch.setattr(mod, "STALL_POLL_SECONDS", 0.01)
+
+        logged: list[str] = []
+        sup = self._sup(logged)
+        sup._start_stall_watchdog()
+
+        for _ in range(20):
+            with sup._step("dispatch"):
+                pass
+        time.sleep(0.1)
+        sup._stop = True
+
+        assert logged == []
+
+    def test_warns_once_per_step(self, monkeypatch):
+        from rtfm.core import supervisor as mod
+
+        monkeypatch.setattr(mod, "STALL_WARN_SECONDS", 0.05)
+        monkeypatch.setattr(mod, "STALL_POLL_SECONDS", 0.01)
+
+        logged: list[str] = []
+        sup = self._sup(logged)
+        sup._start_stall_watchdog()
+
+        with sup._step("dispatch"):
+            time.sleep(0.4)
+        sup._stop = True
+
+        assert len([m for m in logged if "STALL" in m]) == 1
