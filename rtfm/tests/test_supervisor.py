@@ -446,3 +446,46 @@ def test_concurrency_clamped_to_at_least_one(tmp_path: Path):
         assert sup._max_concurrent == 1
     finally:
         sup._pool.shutdown(wait=False)
+
+
+class TestHookRefresh:
+    """A hook bug must not survive an upgrade just because the script lives
+    inside the project. The supervisor always runs the installed code, so it
+    is what brings every registered project's stubs up to date."""
+
+    def _project(self, tmp_path):
+        from rtfm.core.library import Library
+        from rtfm.plugin.hooks import install_hook
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        Library(root / ".rtfm" / "library.db").close()
+        install_hook(root, corpus="t")
+        return root
+
+    def test_outdated_stub_is_rewritten_when_the_project_is_picked_up(self, tmp_path):
+        from rtfm.core.supervisor import Supervisor, _Slot
+
+        root = self._project(tmp_path)
+        stub = root / ".claude" / "hooks" / "rtfm_posttool_sync.py"
+        stub.write_text("# logic from an RTFM release long gone\n")
+
+        sup = Supervisor.__new__(Supervisor)
+        sup._log = lambda msg: None
+        sup._refresh_hooks(_Slot(root / ".rtfm"))
+
+        assert "hook_runtime import on_file_edited" in stub.read_text()
+
+    def test_project_without_hooks_is_left_alone(self, tmp_path):
+        from rtfm.core.library import Library
+        from rtfm.core.supervisor import Supervisor, _Slot
+
+        root = tmp_path / "bare"
+        root.mkdir()
+        Library(root / ".rtfm" / "library.db").close()
+
+        sup = Supervisor.__new__(Supervisor)
+        sup._log = lambda msg: None
+        sup._refresh_hooks(_Slot(root / ".rtfm"))  # must not raise
+
+        assert not (root / ".claude").exists()

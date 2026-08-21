@@ -837,3 +837,61 @@ class TestSearchExpandEditWorkflow:
                 f"Content from expand not found in file (Edit old_string would fail):\n"
                 f"  {line_content!r}"
             )
+
+
+# ── Freshness: the index must never quietly answer for a stale file ──────
+
+class TestFreshnessSignalling:
+    def _touch_far_enough_in_the_past(self, path, seconds=5):
+        """Age a file so its mtime is unambiguously older than indexing."""
+        import os as _os
+        import time as _time
+        when = _time.time() - seconds
+        _os.utime(path, (when, when))
+
+    def test_search_flags_a_file_modified_after_indexing(self, mcp_db, tmp_path):
+        from rtfm.mcp import rtfm_search
+
+        doc = tmp_path / "doc.md"
+        assert "⚠" not in rtfm_search("consciousness", limit=3)
+
+        doc.write_text(doc.read_text() + "\nA line added behind RTFM's back.\n")
+        out = rtfm_search("consciousness", limit=3)
+        assert "modified since indexing" in out
+
+    def test_search_queues_the_reindex_it_noticed(self, mcp_db, tmp_path):
+        from rtfm.core.queue import P_USER, Queue
+        from rtfm.mcp import rtfm_search
+
+        (tmp_path / "doc.md").write_text("# Philosophy\n\nconsciousness rewritten\n")
+        rtfm_search("consciousness", limit=3)
+
+        q = Queue(str(mcp_db))
+        job = q.dequeue()
+        q.close()
+        assert job is not None and job.type == "ingest"
+        assert job.priority == P_USER
+
+    def test_search_flags_a_deleted_file(self, mcp_db, tmp_path):
+        from rtfm.mcp import rtfm_search
+
+        (tmp_path / "doc.md").unlink()
+        assert "deleted since indexing" in rtfm_search("consciousness", limit=3)
+
+    def test_expand_warns_that_line_ranges_may_have_shifted(self, mcp_db, tmp_path):
+        from rtfm.mcp import rtfm_expand
+
+        doc = tmp_path / "doc.md"
+        assert "⚠" not in rtfm_expand(str(doc))
+
+        doc.write_text("A brand new first line\n" + doc.read_text())
+        out = rtfm_expand(str(doc))
+        assert "modified since indexing" in out
+        assert "line ranges" in out
+
+    def test_untouched_file_is_never_flagged(self, mcp_db, tmp_path):
+        from rtfm.mcp import rtfm_expand, rtfm_search
+
+        self._touch_far_enough_in_the_past(tmp_path / "doc.md")
+        assert "⚠" not in rtfm_search("consciousness", limit=3)
+        assert "⚠" not in rtfm_expand(str(tmp_path / "doc.md"))

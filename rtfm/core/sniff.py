@@ -18,6 +18,21 @@ from pathlib import Path
 from typing import Optional
 
 
+def looks_binary(path: str | Path, probe: int = 8192) -> bool:
+    """True when the file's first *probe* bytes contain a NUL byte.
+
+    The single rule RTFM uses to decide "text or not" when no parser claims
+    a file. Shared by the ingest catch-all and the edit hook so the hook
+    never enqueues something ingest would refuse. An unreadable file is
+    reported as binary (nothing to index either way).
+    """
+    try:
+        with open(path, "rb") as fh:
+            return b"\x00" in fh.read(probe)
+    except OSError:
+        return True
+
+
 def detect_real_format(path: str | Path) -> Optional[str]:
     """Return a coarse real-format tag from the file's magic bytes:
 

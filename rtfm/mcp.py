@@ -150,11 +150,76 @@ def _deduplicate_by_source(results, limit: int):
         # Pre-resolve absolute path via the shared rule.
         r = entry["best"]
         filepath = r.chunk.book_file or ""
+        root = root_for_slug(r.chunk.book_slug)
+        entry["filepath"] = filepath
+        entry["root"] = root
         entry["abs_path"] = (
-            resolve_source_path(filepath, root_for_slug(r.chunk.book_slug))
-            if filepath else "")
+            resolve_source_path(filepath, root) if filepath else "")
 
     return ranked[:limit]
+
+
+def _verify_freshness(entries: list[dict]) -> None:
+    """Annotate answered sources that disagree with their file on disk.
+
+    The index is eventually consistent; an agent must never be left to
+    assume otherwise. Each answered file is stat'ed (hashed when small),
+    drift is reported inline, and a top-priority re-ingest is queued so the
+    next search is right. Best-effort — a search must still answer if this
+    fails.
+    """
+    if not entries:
+        return
+    try:
+        from rtfm.core import freshness
+
+        lib = _get_library()
+        verdicts = freshness.verify(
+            lib, [(e.get("abs_path", ""), e.get("filepath", "")) for e in entries])
+        if not verdicts:
+            return
+
+        requeue = []
+        for entry in entries:
+            found = verdicts.get(entry.get("abs_path", ""))
+            if not found:
+                continue
+            entry["stale"] = found["verdict"]
+            if (found["verdict"] == freshness.STALE and entry.get("root")
+                    and found.get("corpus")):
+                requeue.append((entry["root"], found["corpus"], found["filepath"]))
+        n = freshness.requeue(str(lib.db_path), requeue)
+        log("freshness", f"drift on {len(verdicts)} source(s), {n} re-ingest queued")
+    except Exception as exc:  # pragma: no cover - defensive
+        log("freshness", f"check skipped: {exc}")
+
+
+def _expand_freshness_note(abs_path: str, filepath: str, corpus: str,
+                           root: str | None) -> str:
+    """Warning line for an expanded file that no longer matches its index.
+
+    Returns "" when the file is up to date — the common case, and the only
+    one where the reported line ranges can be trusted.
+    """
+    if not abs_path:
+        return ""
+    try:
+        from rtfm.core import freshness
+
+        lib = _get_library()
+        verdicts = freshness.verify(lib, [(abs_path, filepath)])
+        found = verdicts.get(abs_path)
+        if not found:
+            return ""
+        if found["verdict"] == freshness.STALE and root:
+            freshness.requeue(str(lib.db_path),
+                              [(root, found.get("corpus") or corpus, filepath)])
+        log("freshness", f"expand on {found['verdict']}: {abs_path}")
+        return (f"⚠ {found['verdict']} — content below is read from disk and "
+                f"current; the line ranges and sections come from the index "
+                f"and may have shifted. Re-indexing queued.")
+    except Exception:
+        return ""
 
 
 def _render_chunk(abs_path: str, line_start: int | None, line_end: int | None) -> str:
@@ -256,6 +321,13 @@ def _format_source_line(entry: dict, rank: int = 0) -> str:
     section = r.chunk.chapter_title or ""
     if section:
         parts.append(f"({section})")
+
+    # Say it out loud when the index disagrees with the file on disk: the
+    # path and content are still right (expand reads the real file), but the
+    # line range may have drifted and the match may no longer be there.
+    stale = entry.get("stale")
+    if stale:
+        parts.append(f"⚠ {stale}")
 
     main_line = " ".join(parts)
 
@@ -376,6 +448,7 @@ def rtfm_search(
 
     # Deduplicate: 1 best chunk per source
     deduped = _deduplicate_by_source(results, limit)
+    _verify_freshness(deduped)
     log("search", f"query={query!r} type={search_type} sources={len(deduped)}/{results.total_found} time={elapsed:.3f}s")
 
     lines = [f"{len(deduped)} sources for \"{query}\":\n"]
@@ -770,6 +843,7 @@ def rtfm_context(
 
     # Deduplicate: 1 best chunk per source
     deduped = _deduplicate_by_source(results, limit)
+    _verify_freshness(deduped)
     log("context", f"subject={subject!r} scope={scope!r} sources={len(deduped)}/{results.total_found} time={elapsed:.3f}s")
 
     lines = [f"{len(deduped)} sources for \"{subject}\":\n"]
@@ -817,7 +891,13 @@ def rtfm_expand(
     book_file = book_row["filename"] or ""
     corpus = book_row["corpus"] or ""
     from rtfm.core.pathresolve import resolve_source_path
-    abs_path = resolve_source_path(book_file, _get_library().get_sync_root(corpus))
+    sync_root = _get_library().get_sync_root(corpus)
+    abs_path = resolve_source_path(book_file, sync_root)
+
+    # Content below is read live off disk, so it is never stale — but the
+    # chunk boundaries come from the index, and they drift as soon as lines
+    # are added above. Say so, and queue the re-ingest that fixes it.
+    stale_note = _expand_freshness_note(abs_path, book_file, corpus, sync_root)
 
     # All chunks in file order
     all_chunks = conn.execute(
@@ -869,6 +949,8 @@ def rtfm_expand(
             header += f" — {line_info}"
 
         lines = [header, "", _render_chunk(display_path, ls, le)]
+        if stale_note:
+            lines.insert(1, stale_note)
 
         # Additional results
         for r in selected[1:]:
@@ -955,6 +1037,8 @@ def rtfm_expand(
         header += f" — {line_info}"
 
     lines = [header, "", _render_chunk(display_path, ls, first["line_end"])]
+    if stale_note:
+        lines.insert(1, stale_note)
 
     # Additional chunks
     for j, row in enumerate(selected_rows[1:], 1):

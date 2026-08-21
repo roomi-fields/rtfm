@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from rtfm.core.freshness import probably_unchanged
 from rtfm.parsers.base import ParserRegistry
 
 if TYPE_CHECKING:
@@ -487,6 +488,21 @@ def compute_diff(
             rel = str(fpath)
 
         seen_paths.add(rel)
+
+        # Fast path: an already-indexed file whose size and mtime both match
+        # the tracking row cannot have changed in any way we would index, so
+        # skip the MD5. Without this, every scan re-reads the entire corpus —
+        # which is what forced the scan interval up to minutes and left agent
+        # edits undiscovered for that long.
+        tracked = indexed_files.get(rel)
+        if tracked is not None:
+            try:
+                if probably_unchanged(fpath.stat(), tracked):
+                    diff.unchanged += 1
+                    continue
+            except OSError:
+                pass
+
         current_hash = compute_file_hash(fpath)
 
         if rel not in indexed_files:

@@ -7,6 +7,70 @@ description: >-
 
 # Changelog
 
+## [0.28.0] — 2026-08-21
+
+### Added — RTFM tells you when it is answering about a file that changed
+
+An index is eventually consistent, so between an edit and the re-ingest there
+is a window where RTFM describes a file that no longer exists in that form.
+Measured on a 25-project machine: **104 s** from an agent's edit to the file
+being searchable. An agent searching in that window got answers about the past
+with no way to know it.
+
+RTFM no longer pretends otherwise. Every file it answers with is checked
+against disk at read time — size, then mtime, then an MD5 for anything under
+2 MB — and disagreement is stated inline:
+
+```
+/home/me/proj/api.py L40-88 (class Client) ⚠ modified since indexing
+```
+
+`rtfm_expand` says it too, and spells out the consequence: the content shown is
+read live off disk and is always current, but the *line ranges* and section
+boundaries come from the index and may have shifted. Noticing drift also queues
+a top-priority re-ingest, so the next search is right. Verdicts are `modified
+since indexing`, `deleted since indexing` and `never indexed`.
+
+Cost is one `stat` per returned result. There is no configuration.
+
+### Changed — an edit by an agent is now top priority
+
+The PostToolUse hook queued the just-written file at the same priority as
+background document work, so on a busy machine it waited behind the entire
+backlog. It is now queued at `P_USER`, ahead of everything: the file an agent
+is about to read back cannot wait behind a re-index wave.
+
+### Changed — a scan no longer re-reads files that did not change
+
+`compute_diff` used to MD5 **every file on every pass** — the whole corpus,
+re-read every scan, for every project. It now skips the hash when size *and*
+mtime both say the file is untouched, and only trusts mtime when it is at
+least a second older than the indexing stamp (so a file rewritten around the
+moment it was indexed is re-read, not trusted). Measured 3–6× faster with
+identical verdicts; the gain grows with corpus size.
+
+That made a frequent scan affordable, so **the idle scan interval drops from
+300 s to 60 s** while still costing less than before. This is the discovery
+latency for everything the edit hook cannot see: files written by a shell
+command, a build step, a `git checkout`, or another agent.
+
+### Fixed — the edit hook skipped files with no parser (0.27.0 regression)
+
+0.27.0 made RTFM index all text, but the hook still filtered on "does a parser
+claim this file". Extension-less and exotic files (BP3 `-gr.*` data, `.bps`,
+`.gr`) were therefore never enqueued on edit and waited for the next scan. The
+hook now applies the source's own `extensions`/`include`/`exclude` rules and
+refuses only genuinely binary content — the same contract as the scanner.
+
+### Changed — hook scripts are stubs, and update themselves
+
+The scripts written into `.claude/hooks/` used to carry their logic inline, so
+a project kept running whatever RTFM version created it — which is why the
+regression above would have survived any number of upgrades. They are now thin
+stubs delegating to `rtfm.plugin.hook_runtime` in the installed package, and
+the heartbeat hook rewrites outdated stubs on the next prompt. **No re-`init`
+is needed**; existing projects self-heal.
+
 ## [0.27.0] — 2026-08-19
 
 ### Changed — index all text by default; a parser is a bonus, not a gate

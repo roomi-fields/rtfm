@@ -31,10 +31,15 @@ IDLE_POLL_SECONDS = 5.0
 # files (cf. the old watcher.py poller — now folded in). One mutualised
 # supervisor serves dozens of projects, each with several sources; a 30 s
 # per-source cadence flooded the queue with re-scans that churned the CPU
-# and (pre-0.26.5) starved real work. 300 s is ample for background
-# freshness — an explicit ``rtfm sync`` (P_USER) still lands a saved file
-# in the queue immediately, bypassing this cadence entirely.
-SCAN_INTERVAL_SECONDS = 300.0
+# and (pre-0.26.5) starved real work, which is why this sat at 300 s.
+#
+# Since 0.28.0 a scan no longer re-hashes untouched files (size+mtime
+# short-circuit, see ``freshness.probably_unchanged``), so a pass is
+# stat-bound instead of read-bound — cheap enough to run every minute, and
+# still cheaper overall than the old five-minute full re-read. This is the
+# discovery latency for everything the edit hook cannot see: files written
+# by a shell command, a build step, a git checkout or another agent.
+SCAN_INTERVAL_SECONDS = 60.0
 
 # How often, while idle, to reconcile the DB (purge orphan embeddings,
 # re-queue un-embedded chunks). Far less urgent than the file scan, and

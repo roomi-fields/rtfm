@@ -9,8 +9,15 @@ a momentarily-incomplete scan failed to see). Instead:
 
   - UserPromptSubmit / Stop  → just ensure the worker is alive.
   - PostToolUse (Write/Edit)  → enqueue the one file the agent just wrote
-                                as a P1 ingest job. Non-destructive: only
-                                ever ADDS work, never scans or removes.
+                                as a P_USER ingest job. Non-destructive:
+                                only ever ADDS work, never scans/removes.
+
+Design (0.28.0+): the scripts written into a project are **stubs**. All the
+logic lives in :mod:`rtfm.plugin.hook_runtime`, which ships with the
+installed package, so a fix reaches every project through ``pipx upgrade``
+instead of requiring a re-``init``. The heartbeat hook additionally
+rewrites its sibling stubs whenever the package ships newer ones, so
+projects initialised on an older version self-heal on the next prompt.
 """
 
 from __future__ import annotations
@@ -19,49 +26,36 @@ import json
 from pathlib import Path
 
 
-# ── Worker heartbeat (UserPromptSubmit + Stop) ───────────────────────────
-# Both events run the same tiny script: revive the background worker if it
-# died. No scan, no MD5, no DB writes on the user's hot path. Discovery of
-# new/changed files is the worker's job (idle-scan, non-destructive).
+#: Bumped whenever a stub's *body* changes, so the self-heal in
+#: ``refresh_hook_scripts`` can tell an outdated stub from a current one.
+HOOK_STUB_VERSION = 1
 
-HOOK_SCRIPT = r'''#!/usr/bin/env python3
-"""RTFM UserPromptSubmit hook — keep the background worker alive.
+_STUB_HEADER = '''#!/usr/bin/env python3
+"""RTFM {event} hook — stub. Logic lives in rtfm.plugin.hook_runtime.
 
-No sync here. The single background worker handles discovery (idle-scan),
-ingestion, embeddings and OCR. This hook only revives that worker if it
-died, so a new session brings the pipeline back. Cheap by design: no
-filesystem scan, no hashing, nothing on the user's hot path.
+Do not edit: rewritten automatically when the installed rtfm-ai package
+ships a newer version (rtfm.plugin.hooks.HOOK_STUB_VERSION={version}).
 """
-import os, time
+import os, sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parents[2])
+'''
 
 
-def _log(msg):
-    try:
-        ts = time.strftime("%H:%M:%S")
-        with open(PROJECT_ROOT / ".rtfm" / "rtfm.log", "a") as f:
-            f.write(f"[{ts}]       hook | {msg}\n")
-    except Exception:
-        pass
+# ── Worker heartbeat (UserPromptSubmit + Stop) ───────────────────────────
+# Both events run the same tiny script: revive the background worker if it
+# died, and refresh the hook stubs. No scan, no MD5, no DB writes on the
+# user's hot path. Discovery of new/changed files is the worker's job.
 
+HOOK_SCRIPT = _STUB_HEADER.format(event="UserPromptSubmit/Stop",
+                                  version=HOOK_STUB_VERSION) + '''
 
-def main():
-    rtfm_dir = PROJECT_ROOT / ".rtfm"
-    if not (rtfm_dir / "library.db").exists():
-        return
-    try:
-        from rtfm.cli_worker import ensure_worker_running
-        pid = ensure_worker_running(rtfm_dir)
-        if pid:
-            _log(f"worker alive pid={pid}")
-    except Exception as e:
-        _log(f"worker ensure ERROR: {e}")
-
-
-if __name__ == "__main__":
-    main()
+try:
+    from rtfm.plugin.hook_runtime import heartbeat
+    heartbeat(PROJECT_ROOT)
+except Exception:
+    pass
 '''
 
 
@@ -73,122 +67,21 @@ STOP_SYNC_SCRIPT = HOOK_SCRIPT
 
 # ── File enqueue (PostToolUse: Write|Edit|MultiEdit) ─────────────────────
 # Fires right after the agent writes a file. Maps that one file to its
-# configured source/corpus and enqueues a single P1 ingest job for the
+# configured source/corpus and enqueues a single P_USER ingest job for the
 # worker. This is the only place a hook touches the index directly, and it
 # only ever adds work for the file that just changed — never scans, never
 # deletes, never touches unrelated files.
 
-POSTTOOL_HOOK_SCRIPT = r'''#!/usr/bin/env python3
-"""RTFM PostToolUse hook — enqueue the just-written file for ingestion.
-
-Reads the edited file path from the hook payload (stdin JSON), maps it to a
-configured source (corpus + root), and enqueues ONE P1 ingest job. The
-worker does the actual parse/index. Non-destructive: only ever adds a job.
+POSTTOOL_HOOK_SCRIPT = _STUB_HEADER.format(event="PostToolUse",
+                                           version=HOOK_STUB_VERSION) + \
 """
-import json, os, sys, time
-from pathlib import Path
 
-PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path(__file__).resolve().parents[2])
-
-
-def _log(msg):
-    try:
-        ts = time.strftime("%H:%M:%S")
-        with open(PROJECT_ROOT / ".rtfm" / "rtfm.log", "a") as f:
-            f.write(f"[{ts}]       hook | {msg}\n")
-    except Exception:
-        pass
-
-
-def _edited_path(payload):
-    ti = payload.get("tool_input") or {}
-    p = ti.get("file_path") or ti.get("path") or ti.get("notebook_path")
-    if not p:
-        return None
-    try:
-        return Path(p).resolve()
-    except Exception:
-        return None
-
-
-def main():
-    rtfm_dir = PROJECT_ROOT / ".rtfm"
-    db_path = rtfm_dir / "library.db"
-    if not db_path.exists():
-        return
-
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        return
-    fpath = _edited_path(payload)
-    if not fpath or not fpath.is_file():
-        return
-
-    # Only enqueue files RTFM can actually parse.
-    try:
-        from rtfm.parsers.base import ParserRegistry
-        import rtfm.parsers  # noqa: F401 — register all parsers
-        if ParserRegistry.get_parser(fpath) is None:
-            return
-    except Exception:
-        return
-
-    cfg = {}
-    cfg_path = rtfm_dir / "config.json"
-    if cfg_path.exists():
-        try:
-            cfg = json.loads(cfg_path.read_text())
-        except Exception:
-            pass
-    sources = cfg.get("sources") or [
-        {"path": str(PROJECT_ROOT), "corpus": cfg.get("corpus", "default")}]
-
-    # Pick the most specific (deepest-rooted) source that contains the file
-    # and whose extension filter (if any) admits it.
-    best = None  # (root, corpus, depth)
-    for src in sources:
-        try:
-            root = Path(src.get("path", ".")).resolve()
-        except Exception:
-            continue
-        try:
-            fpath.relative_to(root)
-        except ValueError:
-            continue
-        exts = src.get("extensions")
-        if exts:
-            allowed = {e.strip().lower() if e.strip().startswith(".")
-                       else f".{e.strip().lower()}" for e in exts.split(",")}
-            if fpath.suffix.lower() not in allowed:
-                continue
-        depth = len(root.parts)
-        if best is None or depth > best[2]:
-            best = (root, src.get("corpus", cfg.get("corpus", "default")), depth)
-
-    if best is None:
-        return
-    root, corpus, _ = best
-    rel = str(fpath.relative_to(root))
-
-    try:
-        from rtfm.core.queue import Queue
-        from rtfm.cli_worker import ensure_worker_running
-        q = Queue(str(db_path))
-        try:
-            q.enqueue("ingest", {"root": str(root), "corpus": corpus,
-                                 "filepath": rel})
-        finally:
-            q.close()
-        ensure_worker_running(rtfm_dir)
-        _log(f"enqueued ingest [{corpus}] {rel}")
-    except Exception as e:
-        _log(f"enqueue ERROR: {e}")
-
-
-if __name__ == "__main__":
-    main()
-'''
+try:
+    from rtfm.plugin.hook_runtime import on_file_edited, read_payload
+    on_file_edited(PROJECT_ROOT, read_payload(sys.stdin))
+except Exception:
+    pass
+"""
 
 
 MEMORY_HOOK_SCRIPT = r'''#!/usr/bin/env python3
@@ -293,6 +186,43 @@ def install_memory_hook() -> str:
 
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     return "installed"
+
+
+#: Stub file name → its content, for the self-heal pass.
+_PROJECT_STUBS = {
+    "rtfm_sync.py": lambda: HOOK_SCRIPT,
+    "rtfm_stop_sync.py": lambda: STOP_SYNC_SCRIPT,
+    "rtfm_posttool_sync.py": lambda: POSTTOOL_HOOK_SCRIPT,
+}
+
+
+def refresh_hook_scripts(project_root: str | Path) -> list[str]:
+    """Rewrite this project's hook stubs when the package ships newer ones.
+
+    Called from the heartbeat hook, so a project initialised on an older
+    RTFM picks up hook fixes on its next prompt instead of silently running
+    stale logic until someone re-runs ``rtfm init``. Only rewrites files
+    RTFM installed itself, only when the content actually differs, and
+    never registers anything in ``settings.json`` (that stays ``init``'s
+    job). Returns the names rewritten.
+    """
+    hooks_dir = Path(project_root) / ".claude" / "hooks"
+    if not hooks_dir.is_dir():
+        return []
+    updated = []
+    for name, body in _PROJECT_STUBS.items():
+        path = hooks_dir / name
+        if not path.exists():
+            continue  # not installed here — installing is init's decision
+        wanted = body()
+        try:
+            if path.read_text(encoding="utf-8") == wanted:
+                continue
+            path.write_text(wanted, encoding="utf-8")
+        except OSError:
+            continue
+        updated.append(name)
+    return updated
 
 
 def install_hook(project_root: str | Path, corpus: str = "default") -> str:

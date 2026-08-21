@@ -381,12 +381,34 @@ class Supervisor:
             self._slots[path] = slot
             self._log(f"+ project {Path(path).parent.name}"
                       + (" (rebuilding: corrupt DB)" if rebuilt else ""))
+            self._refresh_hooks(slot)
         # Drop removed (only if idle — never yank a slot mid-job).
         for path in list(self._slots):
             if path not in wanted and not self._slots[path].active:
                 self._slots[path].close()
                 del self._slots[path]
                 self._log(f"- project {Path(path).parent.name}")
+
+    def _refresh_hooks(self, slot: "_Slot") -> None:
+        """Bring a project's Claude Code hook stubs up to the installed code.
+
+        Hook *scripts* live inside each project, so a project keeps running
+        the logic that was current the day it was initialised — a hook bug
+        then survives every upgrade. The supervisor always runs the installed
+        package and knows every registered project, so it is the one place
+        that can close that gap. Only files RTFM installed itself are
+        rewritten, and only when they differ.
+        """
+        try:
+            from rtfm.plugin.hooks import refresh_hook_scripts
+            updated = refresh_hook_scripts(slot.rtfm_dir.parent)
+        except Exception as exc:
+            slot.log(f"hook refresh error: {exc}")
+            return
+        if updated:
+            msg = f"hook scripts updated: {', '.join(updated)}"
+            slot.log(msg)
+            self._log(f"  {Path(slot.rtfm_dir).parent.name}: {msg}")
 
     # ── dispatch / reap ──────────────────────────────────────────────────
 

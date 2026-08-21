@@ -32,19 +32,49 @@ class TestInstallHook:
         assert (hooks_dir / "rtfm_stop_sync.py").exists()
         assert (hooks_dir / "rtfm_posttool_sync.py").exists()
 
-    def test_prompt_hook_does_not_full_sync(self, tmp_path):
+    def test_prompt_hook_delegates_and_does_not_full_sync(self, tmp_path):
         install_hook(tmp_path, corpus="t")
         script = (tmp_path / ".claude" / "hooks" / "rtfm_sync.py").read_text()
-        # Heartbeat only — must call ensure_worker_running and must NOT
+        # Heartbeat only — delegates to the installed package and must NOT
         # import/run the heavy sync().
-        assert "ensure_worker_running" in script
+        assert "hook_runtime import heartbeat" in script
         assert "from rtfm.core.sync import sync" not in script
 
-    def test_posttool_hook_enqueues_not_syncs(self, tmp_path):
+    def test_posttool_hook_delegates_and_does_not_full_sync(self, tmp_path):
         install_hook(tmp_path, corpus="t")
         script = (tmp_path / ".claude" / "hooks" / "rtfm_posttool_sync.py").read_text()
-        assert "enqueue" in script
+        assert "hook_runtime import on_file_edited" in script
         assert "from rtfm.core.sync import sync" not in script
+
+    def test_stubs_carry_no_logic(self, tmp_path):
+        """The logic must live in the package, not in the copied script —
+        otherwise a project keeps running the version it was created with."""
+        install_hook(tmp_path, corpus="t")
+        for name in ("rtfm_sync.py", "rtfm_stop_sync.py", "rtfm_posttool_sync.py"):
+            script = (tmp_path / ".claude" / "hooks" / name).read_text()
+            assert len(script.splitlines()) < 25, f"{name} is not a stub"
+
+    def test_refresh_rewrites_outdated_stub(self, tmp_path):
+        from rtfm.plugin.hooks import refresh_hook_scripts
+
+        install_hook(tmp_path, corpus="t")
+        stub = tmp_path / ".claude" / "hooks" / "rtfm_posttool_sync.py"
+        stub.write_text("# stale content from an older RTFM\n")
+
+        updated = refresh_hook_scripts(tmp_path)
+        assert "rtfm_posttool_sync.py" in updated
+        assert "hook_runtime import on_file_edited" in stub.read_text()
+
+        # Already current → nothing rewritten (no churn on every prompt).
+        assert refresh_hook_scripts(tmp_path) == []
+
+    def test_refresh_does_not_install_missing_hooks(self, tmp_path):
+        """Refresh heals what init installed; deciding to install is init's."""
+        from rtfm.plugin.hooks import refresh_hook_scripts
+
+        (tmp_path / ".claude" / "hooks").mkdir(parents=True)
+        assert refresh_hook_scripts(tmp_path) == []
+        assert not (tmp_path / ".claude" / "hooks" / "rtfm_sync.py").exists()
 
     def test_idempotent_no_duplicate_hooks(self, tmp_path):
         install_hook(tmp_path, corpus="t")
