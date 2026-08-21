@@ -181,12 +181,15 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
 
     force_remove = bool(payload.get("force_remove", False))
     honor_gitignore = bool(payload.get("honor_gitignore", True))
+    include = payload.get("include") or None
+    exclude = payload.get("exclude") or None
 
     lib = Library(str(worker.db_path))
     try:
         lib.set_sync_root(corpus, str(root))
         files_on_disk = scan_directory(root, ext_set,
-                                       honor_gitignore=honor_gitignore)
+                                       honor_gitignore=honor_gitignore,
+                                       include=include, exclude=exclude)
         indexed = lib.list_indexed_files(corpus=corpus)
         indexed_global = lib.list_indexed_files()
         diff = compute_diff(

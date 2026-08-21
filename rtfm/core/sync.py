@@ -312,63 +312,95 @@ def compute_file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
+def _matches_pattern(name: str, rel: str, pattern: str) -> bool:
+    """Match one include/exclude selection pattern against a file.
+
+    * a bare extension (``.bps`` — leading dot, no wildcard) → **suffix** match;
+    * a pattern containing ``/`` → glob against the path relative to the root
+      (``fixtures/*``, ``**/demos/*``);
+    * anything else → glob against the file name (``-gr.*`` prefix, ``*.bps``
+      suffix, ``*test*`` infix).
+    """
+    import fnmatch
+    if "/" in pattern:
+        return (fnmatch.fnmatch(rel, pattern)
+                or fnmatch.fnmatch(rel, f"*/{pattern}"))
+    if pattern.startswith(".") and not any(c in pattern for c in "*?["):
+        return name.lower().endswith(pattern.lower())
+    return fnmatch.fnmatch(name, pattern)
+
+
 def scan_directory(
     root: Path,
     extensions: set[str] | None = None,
     exclude_dirs: set[str] | None = None,
     honor_gitignore: bool = True,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> list[Path]:
-    """Recursively scan *root* and return files matching *extensions*.
+    """Recursively scan *root* and return the files to index.
 
-    Three-layer filter, in order:
+    RTFM indexes **all text by default**: with no positive restrictor set,
+    every file is a candidate and binary content is filtered later, at ingest.
+    A registered parser is a structuring *bonus*, never a gate — a file is not
+    skipped just because its extension is unknown.
+
+    Filters, in order:
 
     1. :data:`DEFAULT_EXCLUDE_DIRS` — always skipped (``.git``, ``.venv``,
-       ``node_modules``, …).
-    2. ``.gitignore`` at *root* — skipped when *honor_gitignore* is on
-       and ``pathspec`` is installed. Off means the user opted in to
-       indexing files git wants gone (private corpora, etc.).
-    3. ``.rtfmignore`` at *root* — **always** skipped when the file
-       exists. Same syntax as ``.gitignore``. The idea: a project can
-       set ``honor_gitignore=false`` to expose a private corpus, then
-       use ``.rtfmignore`` to keep noise (build outputs, caches) out.
+       ``node_modules``, ``.rtfm``, …).
+    2. **Type gate** — a file passes when *no* positive restrictor is set
+       (index-all default) OR it matches the suffix allow-list *extensions*
+       OR it matches an *include* pattern. ``*``/``**``/``.*`` in *extensions*
+       forces index-all explicitly.
+    3. *exclude* patterns (prefix/suffix/glob) — rejected when matched.
+    4. ``.gitignore`` at *root* (when *honor_gitignore*) then ``.rtfmignore``
+       (always) — same syntax as ``.gitignore``.
+
+    *include* / *exclude* patterns follow :func:`_matches_pattern`
+    (``*.bps`` suffix, ``-gr.*`` prefix, ``fixtures/*`` path glob).
     """
-    extensions = extensions or DEFAULT_EXTENSIONS
     exclude_dirs = exclude_dirs or DEFAULT_EXCLUDE_DIRS
+    include = list(include or [])
+    exclude = list(exclude or [])
 
-    # A ``*`` (or ``.*`` / ``**``) among the extensions means "index every
-    # file", suffix ignored — for trees whose files encode their type in a
-    # prefix (BP3's ``-gr.``/``-se.``…) or carry no extension at all. Binary
-    # files are filtered downstream at ingest (text catch-all). gitignore /
-    # rtfmignore / excluded dirs still apply.
-    index_all = any(e in ("*", ".*", "**") for e in extensions)
-
-    # Normalise extensions to lower-case with leading dot (drop the wildcard)
-    extensions = {
-        e if e.startswith(".") else f".{e}"
-        for e in extensions if e not in ("*", ".*", "**")
+    raw_exts = set(extensions or ())
+    wildcard = any(e in ("*", ".*", "**") for e in raw_exts)
+    exts = {
+        (e if e.startswith(".") else f".{e}").lower()
+        for e in raw_exts if e not in ("*", ".*", "**")
     }
+    # No suffix allow-list and no include patterns → index every file.
+    has_restrictor = bool(exts) or bool(include)
 
     gi_spec = _load_gitignore_spec(root) if honor_gitignore else None
     ri_spec = _load_rtfmignore_spec(root)  # always applied when present
 
     files: list[Path] = []
     for item in sorted(root.rglob("*")):
-        # Skip excluded directories
         if any(part in exclude_dirs for part in item.parts):
             continue
         if not item.is_file():
             continue
-        if not index_all and item.suffix.lower() not in extensions:
+        try:
+            rel = str(item.relative_to(root))
+        except ValueError:
+            rel = str(item)
+
+        # Type gate.
+        if not wildcard and has_restrictor:
+            ok = item.suffix.lower() in exts or any(
+                _matches_pattern(item.name, rel, p) for p in include)
+            if not ok:
+                continue
+        # Explicit exclusions (prefix/suffix/glob).
+        if exclude and any(_matches_pattern(item.name, rel, p) for p in exclude):
             continue
-        if gi_spec is not None or ri_spec is not None:
-            try:
-                rel = str(item.relative_to(root))
-            except ValueError:
-                rel = str(item)
-            if gi_spec is not None and gi_spec.match_file(rel):
-                continue
-            if ri_spec is not None and ri_spec.match_file(rel):
-                continue
+        # Ignore files.
+        if gi_spec is not None and gi_spec.match_file(rel):
+            continue
+        if ri_spec is not None and ri_spec.match_file(rel):
+            continue
         files.append(item)
     return files
 
@@ -698,6 +730,8 @@ def sync(
     progress_interval: float | None = None,
     force_remove: bool = False,
     honor_gitignore: bool = True,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> SyncResult:
     """Orchestrate a full incremental sync.
 
@@ -746,7 +780,8 @@ def sync(
                 files_on_disk.append(p)
     else:
         files_on_disk = scan_directory(root, extensions, exclude_dirs,
-                                       honor_gitignore=honor_gitignore)
+                                       honor_gitignore=honor_gitignore,
+                                       include=include, exclude=exclude)
 
     # 2. Get DB state (scoped to corpus to support multi-directory sync)
     indexed = library.list_indexed_files(corpus=corpus)

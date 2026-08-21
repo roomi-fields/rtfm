@@ -7,6 +7,41 @@ description: >-
 
 # Changelog
 
+## [0.27.0] — 2026-08-19
+
+### Changed — index all text by default; a parser is a bonus, not a gate
+
+RTFM used to select files by an extension allow-list, so any file whose
+extension it lacked a parser for was silently skipped. That is the wrong
+default for a retrieval layer: **a file with no parser is still worth indexing
+as text.** The scanner now indexes **every file by default** — binary content
+is filtered at ingest (a file with no registered parser is read as plain text
+when textual, skipped when binary). A registered parser is now purely a
+*structuring* bonus (headers, symbols, tables); it no longer decides whether a
+file is indexed at all.
+
+**Upgrade impact:** on the next scan, a source with no explicit `extensions`
+indexes all of its text (previously only known extensions). `.gitignore`,
+`.rtfmignore`, and the always-excluded dirs still apply — use them, or the new
+`exclude` rules below, to keep noise out (lock files, source maps, minified
+bundles).
+
+### Added — prefix / suffix / glob selection rules per source
+
+Selection is no longer suffix-only. A source can carry `include` and `exclude`
+pattern lists — for files that encode their type in a **prefix** (Bol
+Processor's `-gr.*`, `-se.*`), a **suffix** (`*.bps`), or a **path** glob
+(`fixtures/*`):
+
+```
+rtfm add <path> --include='-gr.*,*.bps' --exclude='*.min.js,package-lock.json'
+```
+
+`include` restricts selection to matching files; `exclude` drops matches; a
+bare `extensions` allow-list still works and composes as a suffix restrictor.
+(Patterns beginning with `-` collide with option parsing — pass them as
+`--include=-gr.*`.)
+
 ## [0.26.8] — 2026-08-19
 
 ### Added — index files with no extension or an unknown one

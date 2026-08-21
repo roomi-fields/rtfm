@@ -91,6 +91,8 @@ def add_source(
     path: str,
     corpus: str,
     extensions: str | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> str:
     """Add a source to .rtfm/config.json.
 
@@ -100,7 +102,12 @@ def add_source(
         project_root: Project root directory.
         path: Path to the source directory.
         corpus: Corpus name.
-        extensions: Comma-separated extensions (e.g. ".md,.py").
+        extensions: Comma-separated suffix allow-list (e.g. ".md,.py"). Omit to
+            index all text (the default) — a parser is used when one matches,
+            else plain text; binary files are skipped.
+        include: Selection patterns (prefix/suffix/glob: ``-gr.*``, ``*.bps``,
+            ``fixtures/*``). When set, only matching files are indexed.
+        exclude: Rejection patterns, same syntax — matched files are skipped.
 
     Returns:
         "added" or "already exists".
@@ -118,6 +125,10 @@ def add_source(
     entry: dict = {"path": resolved, "corpus": corpus}
     if extensions:
         entry["extensions"] = extensions
+    if include:
+        entry["include"] = list(include)
+    if exclude:
+        entry["exclude"] = list(exclude)
 
     sources.append(entry)
     config["sources"] = sources

@@ -1948,13 +1948,24 @@ def cmd_add(args):
         sys.exit(1)
 
     ext = args.extensions or None
-    result = add_source(root, args.path, corpus=args.corpus, extensions=ext)
+    inc = [p.strip() for p in args.include.split(",") if p.strip()] \
+        if getattr(args, "include", None) else None
+    exc = [p.strip() for p in args.exclude.split(",") if p.strip()] \
+        if getattr(args, "exclude", None) else None
+    result = add_source(root, args.path, corpus=args.corpus, extensions=ext,
+                        include=inc, exclude=exc)
     resolved = str(Path(args.path).resolve())
 
     if result == "added":
         print(f"Added source: [{args.corpus}] {resolved}")
         if ext:
             print(f"  Extensions: {ext}")
+        else:
+            print("  Indexing: all text (binary skipped)")
+        if inc:
+            print(f"  Include: {', '.join(inc)}")
+        if exc:
+            print(f"  Exclude: {', '.join(exc)}")
     else:
         print(f"Source already registered: [{args.corpus}] {resolved}")
 
@@ -2005,8 +2016,15 @@ def cmd_sources(args):
 
     print("Sources:")
     for src in sources:
-        ext_info = f"  (extensions: {src['extensions']})" if src.get("extensions") else ""
-        print(f"  [{src.get('corpus', 'default')}] {src['path']}{ext_info}")
+        print(f"  [{src.get('corpus', 'default')}] {src['path']}")
+        if src.get("extensions"):
+            print(f"      extensions: {src['extensions']}")
+        else:
+            print("      indexing: all text (binary skipped)")
+        if src.get("include"):
+            print(f"      include: {', '.join(src['include'])}")
+        if src.get("exclude"):
+            print(f"      exclude: {', '.join(src['exclude'])}")
 
 
 def cmd_serve(args):
@@ -2659,7 +2677,16 @@ def main():
     p_add = subparsers.add_parser("add", help="Register a source directory")
     p_add.add_argument("path", help="Directory to register as a source")
     p_add.add_argument("--corpus", "-c", default="default", help="Corpus name")
-    p_add.add_argument("--extensions", "-e", help="Comma-separated extensions (e.g. md,py,pdf)")
+    p_add.add_argument("--extensions", "-e",
+                       help="Comma-separated suffix allow-list (e.g. md,py,pdf). "
+                            "Omit to index all text (default).")
+    p_add.add_argument("--include", "-i",
+                       help="Comma-separated selection patterns — prefix/suffix/"
+                            "glob (e.g. '-gr.*,*.bps,fixtures/*'). Only matching "
+                            "files are indexed.")
+    p_add.add_argument("--exclude", "-x",
+                       help="Comma-separated rejection patterns, same syntax "
+                            "(e.g. '*.min.js,package-lock.json').")
     p_add.set_defaults(func=cmd_add)
 
     # remove (unregister a source — the counterpart to `add`)

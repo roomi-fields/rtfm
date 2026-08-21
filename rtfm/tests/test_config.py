@@ -114,6 +114,16 @@ class TestAddSource:
         sources = list_sources(tmp_path)
         assert len(sources) == 2
 
+    def test_add_source_with_include_exclude(self, tmp_path):
+        (tmp_path / ".rtfm").mkdir()
+        add_source(tmp_path, str(tmp_path / "d"), "c",
+                   include=["-gr.*", "*.bps"], exclude=["*.min.js"])
+        src = list_sources(tmp_path)[0]
+        assert src["include"] == ["-gr.*", "*.bps"]
+        assert src["exclude"] == ["*.min.js"]
+        # No extensions key when indexing all text.
+        assert "extensions" not in src
+
 
 class TestRemoveSource:
     def test_remove_by_path_and_corpus(self, tmp_path):

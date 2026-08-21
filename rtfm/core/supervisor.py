@@ -590,6 +590,10 @@ class Supervisor:
                 }
                 if src.get("honor_gitignore") is not None:
                     payload["honor_gitignore"] = bool(src["honor_gitignore"])
+                if src.get("include"):
+                    payload["include"] = list(src["include"])
+                if src.get("exclude"):
+                    payload["exclude"] = list(src["exclude"])
                 slot.queue.enqueue("scan", payload)
         except Exception as exc:
             slot.log(f"scan enqueue error: {exc}")

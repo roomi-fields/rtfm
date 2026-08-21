@@ -186,8 +186,8 @@ class TestScanDirectory:
             assert f.suffix == ".py"
 
     def test_wildcard_indexes_every_file(self, tmp_path):
-        """A ``*`` extension indexes prefix-named and extensionless files that
-        no suffix could ever select (BP3 ``-gr.dhati``, ``CHECK_THIS``)."""
+        """An explicit ``*`` extension indexes prefix-named and extensionless
+        files (same result as the index-all default, kept for compatibility)."""
         (tmp_path / "-gr.dhati").write_text("gram#1 A --> B\n")
         (tmp_path / "-se.tempo").write_text("tempo 120\n")
         (tmp_path / "CHECK_THIS").write_text("no extension\n")
@@ -196,8 +196,8 @@ class TestScanDirectory:
         allf = {f.name for f in scan_directory(tmp_path, extensions={"*"})}
         assert allf == {"-gr.dhati", "-se.tempo", "CHECK_THIS", "readme.md"}
 
-        # Default extension set still ignores the exotic files.
-        deff = {f.name for f in scan_directory(tmp_path)}
+        # A suffix allow-list still restricts (parser routing / opt-in).
+        deff = {f.name for f in scan_directory(tmp_path, extensions={".md"})}
         assert deff == {"readme.md"}
 
     def test_wildcard_still_honors_rtfmignore(self, tmp_path):
@@ -207,6 +207,40 @@ class TestScanDirectory:
         names = {f.name for f in scan_directory(tmp_path, extensions={"*"})}
         assert "-gr.keep" in names
         assert "-gr.drop" not in names
+
+    def test_default_indexes_all_text(self, tmp_path):
+        """With no positive restrictor, every file is a candidate — RTFM
+        indexes all text by default; the extension list no longer gates."""
+        (tmp_path / "-gr.dhati").write_text("x")     # prefix-typed
+        (tmp_path / "CHECK_THIS").write_text("y")    # no extension
+        (tmp_path / "app.bps").write_text("z")       # unregistered extension
+        (tmp_path / "readme.md").write_text("w")
+        names = {f.name for f in scan_directory(tmp_path)}
+        assert names == {"-gr.dhati", "CHECK_THIS", "app.bps", "readme.md"}
+
+    def test_include_prefix_and_suffix(self, tmp_path):
+        (tmp_path / "-gr.dhati").write_text("x")
+        (tmp_path / "-se.tempo").write_text("x")
+        (tmp_path / "song.bps").write_text("x")
+        (tmp_path / "readme.md").write_text("x")
+        names = {f.name for f in scan_directory(
+            tmp_path, include=["-gr.*", "*.bps"])}
+        assert names == {"-gr.dhati", "song.bps"}
+
+    def test_exclude_patterns(self, tmp_path):
+        (tmp_path / "a.md").write_text("x")
+        (tmp_path / "app.min.js").write_text("x")
+        (tmp_path / "package-lock.json").write_text("x")
+        names = {f.name for f in scan_directory(
+            tmp_path, exclude=["*.min.js", "package-lock.json"])}
+        assert names == {"a.md"}
+
+    def test_include_path_glob(self, tmp_path):
+        (tmp_path / "fixtures").mkdir()
+        (tmp_path / "fixtures" / "a.bps").write_text("x")
+        (tmp_path / "top.bps").write_text("x")
+        names = {f.name for f in scan_directory(tmp_path, include=["fixtures/*"])}
+        assert names == {"a.bps"}
 
     def test_excludes_rtfm_state_dir(self, tmp_path):
         """`.rtfm/` must never be scanned — it contains RTFM's own state
