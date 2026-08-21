@@ -240,6 +240,9 @@ P_USER_RESERVED_LANES = 2
 STALL_WARN_SECONDS = 30.0
 STALL_POLL_SECONDS = 5.0
 
+#: How many project databases are integrity-checked at once when they join.
+SLOT_OPEN_CONCURRENCY = 2
+
 
 # ── Per-project bookkeeping ──────────────────────────────────────────────
 
@@ -320,6 +323,14 @@ class Supervisor:
         self._step_warned = False
 
         self._slots: dict[str, _Slot] = {}
+        # Projects being integrity-checked before they join the fleet, and
+        # the small side pool that does it — see ``_sync_registry``. Two at a
+        # time: enough to overlap the I/O, few enough not to storm the disk.
+        self._opening: dict[str, tuple[_Slot, Future]] = {}
+        self._wanted: set[str] = set()
+        self._open_stagger = 0
+        self._opener = ThreadPoolExecutor(
+            max_workers=SLOT_OPEN_CONCURRENCY, thread_name_prefix="rtfm-open")
         self._pool = ThreadPoolExecutor(
             max_workers=self._max_concurrent + P_USER_RESERVED_LANES)
         self._inflight: dict[Future, tuple[_Slot, Job]] = {}
@@ -354,6 +365,8 @@ class Supervisor:
                     break
                 with self._step("sync-registry"):
                     self._sync_registry()
+                with self._step("collect-opened"):
+                    self._collect_opened()
                 with self._step("reap"):
                     self._reap_finished()
                 with self._step("enqueue-periodic"):
@@ -410,14 +423,21 @@ class Supervisor:
     def _sync_registry(self) -> None:
         """Rebuild the slot set from ``workers.json`` when it changes.
 
-        New projects get a slot (integrity-guarded, queue opened). Projects
-        dropped from the registry are closed once they are not mid-job.
+        Opening a project is **not** done here. ``_Slot.open`` integrity-scans
+        the whole database (:func:`ensure_healthy_db`), which on a large
+        corpus means reading gigabytes; doing that for 25 projects on the
+        scheduling thread left the fleet unserved for the ten minutes it took,
+        every single restart — the stall watchdog named this step. Opening now
+        happens on a small side pool and each project joins the fleet the
+        moment its own check passes, so a small project is served while a big
+        one is still being verified. The guarantee is unchanged: every
+        database is still integrity-checked before it is serviced.
         """
         try:
             mtime = self._registry_path.stat().st_mtime
         except OSError:
             mtime = 0.0
-        if mtime == self._registry_mtime and self._slots:
+        if mtime == self._registry_mtime and (self._slots or self._opening):
             return
         self._registry_mtime = mtime
 
@@ -428,33 +448,45 @@ class Supervisor:
             projects = []
 
         wanted = {p for p in projects if Path(p).is_dir()}
-        # Add new.
-        stagger = 0
+        self._wanted = wanted
         for path in sorted(wanted):
-            if path in self._slots:
+            if path in self._slots or path in self._opening:
                 continue
             slot = _Slot(Path(path))
-            rebuilt = slot.open(self._log)
-            # Stagger first scans across the interval so N projects don't
-            # all scan at once (the storm we're eliminating). A rebuilt DB
-            # scans ASAP to repopulate.
-            now = time.monotonic()
-            if rebuilt:
-                slot.next_scan_at = now
-            else:
-                span = self._scan_interval / max(1, len(wanted))
-                slot.next_scan_at = now + (stagger * span)
-                stagger += 1
-            self._slots[path] = slot
-            self._log(f"+ project {Path(path).parent.name}"
-                      + (" (rebuilding: corrupt DB)" if rebuilt else ""))
-            self._refresh_hooks(slot)
+            self._opening[path] = (slot, self._opener.submit(slot.open, self._log))
         # Drop removed (only if idle — never yank a slot mid-job).
         for path in list(self._slots):
             if path not in wanted and not self._slots[path].active:
                 self._slots[path].close()
                 del self._slots[path]
                 self._log(f"- project {Path(path).parent.name}")
+
+    def _collect_opened(self) -> None:
+        """Admit projects whose integrity check has finished."""
+        for path in [p for p, (_, fut) in self._opening.items() if fut.done()]:
+            slot, fut = self._opening.pop(path)
+            if path not in self._wanted:
+                slot.close()  # unregistered while we were checking it
+                continue
+            try:
+                rebuilt = fut.result()
+            except Exception as exc:
+                self._log(f"{Path(path).parent.name}: open failed: {exc}")
+                continue
+            # Stagger first scans across the interval so N projects don't all
+            # scan at once (the storm we're eliminating). A rebuilt DB scans
+            # ASAP to repopulate.
+            now = time.monotonic()
+            if rebuilt:
+                slot.next_scan_at = now
+            else:
+                span = self._scan_interval / max(1, len(self._wanted))
+                slot.next_scan_at = now + (self._open_stagger * span)
+                self._open_stagger = (self._open_stagger + 1) % max(1, len(self._wanted))
+            self._slots[path] = slot
+            self._log(f"+ project {Path(path).parent.name}"
+                      + (" (rebuilding: corrupt DB)" if rebuilt else ""))
+            self._refresh_hooks(slot)
 
     def _refresh_hooks(self, slot: "_Slot") -> None:
         """Bring a project's Claude Code hook stubs up to the installed code.
@@ -777,6 +809,10 @@ class Supervisor:
                   f"done={self._jobs_done} failed={self._jobs_failed}")
         # Let in-flight jobs finish (they hold the only writer for their DB;
         # killing them mid-write is exactly what corrupts a DB). Then close.
+        self._opener.shutdown(wait=False, cancel_futures=True)
+        for slot, _ in self._opening.values():
+            slot.close()
+        self._opening.clear()
         self._pool.shutdown(wait=True)
         # Any job that completed during shutdown still needs its row closed.
         self._reap_finished()

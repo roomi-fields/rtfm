@@ -134,8 +134,8 @@ class TestRequeue:
 
         db = tmp_path / "lib.db"
         Library(db).close()
-        n = freshness.requeue(str(db), [("/root", "default", "a.md")])
-        assert n == 1
+        ids = freshness.requeue(str(db), [("/root", "default", "a.md")])
+        assert len(ids) == 1
 
         q = Queue(str(db))
         job = q.dequeue()
@@ -144,4 +144,52 @@ class TestRequeue:
         assert job.priority == P_USER
 
     def test_empty_input_is_a_noop(self, tmp_path):
-        assert freshness.requeue(str(tmp_path / "nothing.db"), []) == 0
+        assert freshness.requeue(str(tmp_path / "nothing.db"), []) == []
+
+
+class TestReadRepair:
+    """A read that notices drift should fix it and answer correctly, not
+    merely explain that its answer is wrong."""
+
+    def _db(self, tmp_path):
+        from rtfm.core.library import Library
+        db = tmp_path / "lib.db"
+        Library(db).close()
+        return str(db)
+
+    def test_returns_the_pending_job_when_one_is_already_queued(self, tmp_path):
+        """Dedup refuses the duplicate — but the reader still needs an id to
+        wait on, or it would answer stale while the fix is in flight."""
+        db = self._db(tmp_path)
+        first = freshness.requeue(db, [("/root", "default", "a.md")])
+        second = freshness.requeue(db, [("/root", "default", "a.md")])
+        assert first == second and len(first) == 1
+
+    def test_wait_returns_when_the_job_is_done(self, tmp_path):
+        from rtfm.core.queue import Queue
+
+        db = self._db(tmp_path)
+        ids = freshness.requeue(db, [("/root", "default", "a.md")])
+        q = Queue(db)
+        job = q.dequeue()
+        q.mark_done(job.id)
+        q.close()
+        assert freshness.wait_for(db, ids, timeout=1.0) is True
+
+    def test_wait_gives_up_on_a_job_that_never_runs(self, tmp_path):
+        db = self._db(tmp_path)
+        ids = freshness.requeue(db, [("/root", "default", "a.md")])
+        assert freshness.wait_for(db, ids, timeout=0.2, poll=0.02) is False
+
+    def test_wait_with_nothing_to_wait_for(self, tmp_path):
+        assert freshness.wait_for(self._db(tmp_path), [], timeout=5) is True
+
+    def test_budget_is_configurable_and_can_be_disabled(self, monkeypatch):
+        monkeypatch.delenv("RTFM_FRESH_WAIT_SECONDS", raising=False)
+        assert freshness.refresh_wait_seconds() == freshness.DEFAULT_REFRESH_WAIT_SECONDS
+        monkeypatch.setenv("RTFM_FRESH_WAIT_SECONDS", "0")
+        assert freshness.refresh_wait_seconds() == 0.0
+        monkeypatch.setenv("RTFM_FRESH_WAIT_SECONDS", "1.5")
+        assert freshness.refresh_wait_seconds() == 1.5
+        monkeypatch.setenv("RTFM_FRESH_WAIT_SECONDS", "nonsense")
+        assert freshness.refresh_wait_seconds() == freshness.DEFAULT_REFRESH_WAIT_SECONDS

@@ -38,6 +38,36 @@ HASH_MAX_BYTES = 2 * 1024 * 1024
 #: before indexing; erring the other way costs a wrong answer.
 MTIME_CERTAINTY_MARGIN_SECONDS = 1.0
 
+#: How long a read may wait for its own repair before answering anyway.
+#: A single-file re-ingest measured ~1.1 s end to end on a busy 25-project
+#: machine, so a few seconds covers the ordinary case with room to spare;
+#: anything slower (a large PDF, a saturated fleet) falls back to reporting
+#: the drift rather than making the agent wait. ``0`` disables the wait and
+#: restores report-only behaviour.
+DEFAULT_REFRESH_WAIT_SECONDS = 3.0
+
+
+def refresh_wait_seconds() -> float:
+    """Read-repair budget, overridable with ``RTFM_FRESH_WAIT_SECONDS``."""
+    raw = os.environ.get("RTFM_FRESH_WAIT_SECONDS")
+    if raw is None:
+        return DEFAULT_REFRESH_WAIT_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_REFRESH_WAIT_SECONDS
+
+
+def indexer_is_running() -> bool:
+    """Whether a supervisor exists to service the repair we are about to
+    queue. Without one, waiting is pure latency for nothing."""
+    try:
+        from rtfm.core.supervisor import supervisor_running
+        return supervisor_running() is not None
+    except Exception:
+        return False
+
+
 #: What a verdict means, in the words shown to the agent.
 STALE = "modified since indexing"
 GONE = "deleted since indexing"
@@ -161,28 +191,113 @@ def verify(lib, items: Iterable[tuple[str, str]]) -> dict[str, dict]:
     return verdicts
 
 
-def requeue(db_path: str, stale: Iterable[tuple[str, str, str]]) -> int:
+def requeue(db_path: str, stale: Iterable[tuple[str, str, str]]) -> list[int]:
     """Queue a top-priority re-ingest for files found out of date.
 
     *stale* items are ``(root, corpus, relative_path)``. Best-effort: a
     queueing failure must never break the read that noticed the drift.
-    Returns how many jobs were accepted (dedup drops the rest).
+
+    Returns the ids of the jobs that will bring those files up to date —
+    including a job already pending for the same file, which dedup refuses
+    to duplicate but which the caller may still want to wait on.
     """
     jobs = [t for t in stale if t[0] and t[2]]
     if not jobs:
-        return 0
+        return []
     try:
+        import json
+
         from rtfm.core.queue import Queue, P_USER
         q = Queue(db_path)
         try:
-            queued = 0
+            ids: list[int] = []
             for root, corpus, rel in jobs:
-                if q.enqueue("ingest",
-                             {"root": root, "corpus": corpus, "filepath": rel},
-                             priority=P_USER):
-                    queued += 1
-            return queued
+                payload = {"root": root, "corpus": corpus, "filepath": rel}
+                job_id = q.enqueue("ingest", payload, priority=P_USER)
+                if job_id is None:
+                    # Dedup: an identical job is already waiting. Wait on it.
+                    row = q._get_conn().execute(
+                        "SELECT id FROM work_queue WHERE type='ingest' "
+                        "AND payload = ? AND status IN ('pending','running')",
+                        (json.dumps(payload, sort_keys=True),),
+                    ).fetchone()
+                    job_id = row[0] if row else None
+                if job_id is not None:
+                    ids.append(job_id)
+            return ids
         finally:
             q.close()
     except Exception:
-        return 0
+        return []
+
+
+def pending_content_jobs(db_path: str) -> list[int]:
+    """Ids of queued jobs that would change what a search can find.
+
+    Read-time verification only sees files a search *returned*, so it cannot
+    rescue the one case where the index is most obviously wrong: a query that
+    finds nothing because the file that answers it has not been ingested yet.
+    What it can do is notice that such work is already queued — the edit hook
+    files it the moment an agent writes — and wait for it before concluding
+    that nothing matches.
+
+    Only ``ingest`` and ``remove``: those decide what exists in the index.
+    Scans are excluded on purpose — a scan of a large corpus can run for
+    minutes and is not something a reader should ever wait on.
+    """
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT id FROM work_queue WHERE type IN ('ingest','remove') "
+            "AND status IN ('pending','running')").fetchall()
+        return [r[0] for r in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+
+def wait_for(db_path: str, job_ids: Iterable[int], timeout: float,
+             poll: float = 0.05) -> bool:
+    """Block until *job_ids* leave the queue, or *timeout* elapses.
+
+    This is how a read repairs itself instead of merely complaining: the
+    reader queues the re-ingest at top priority and waits the second or so
+    it takes, then answers from a correct index. The write still happens in
+    the supervisor — the single-writer rule that keeps these databases from
+    corrupting is not negotiable, and a reader must never take that role.
+
+    Returns ``True`` if every job finished in time. ``False`` means the
+    caller should answer with what it has, and say the file has drifted.
+    """
+    ids = [int(i) for i in job_ids]
+    if not ids:
+        return True
+    import sqlite3
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    placeholders = ",".join("?" * len(ids))
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        while True:
+            try:
+                left = conn.execute(
+                    f"SELECT COUNT(*) FROM work_queue WHERE id IN ({placeholders}) "
+                    "AND status IN ('pending','running')", ids).fetchone()[0]
+            except sqlite3.Error:
+                return False
+            if left == 0:
+                return True
+            if _time.monotonic() >= deadline:
+                return False
+            _time.sleep(poll)
+    finally:
+        conn.close()

@@ -26,6 +26,22 @@ from rtfm.core.library import Library
 from rtfm.core.queue import Queue
 
 
+
+def _sync(sup):
+    """Sync the registry and wait for the projects to finish opening.
+
+    Opening is asynchronous in the supervisor (each database is integrity-
+    checked on a side pool so one big corpus cannot hold up the fleet); tests
+    want the settled state.
+    """
+    sup._sync_registry()
+    deadline = time.monotonic() + 30
+    while sup._opening and time.monotonic() < deadline:
+        sup._collect_opened()
+        time.sleep(0.005)
+    sup._collect_opened()
+
+
 def _write_config(rtfm_dir: Path, sources: list[dict]) -> None:
     rtfm_dir.mkdir(parents=True, exist_ok=True)
     (rtfm_dir / "config.json").write_text(
@@ -63,7 +79,7 @@ def test_enqueue_scans_one_per_source(tmp_path: Path):
 
     sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
     try:
-        sup._sync_registry()
+        _sync(sup)
         slot = _only_slot(sup)
         sup._enqueue_scans(slot)
 
@@ -89,7 +105,7 @@ def test_enqueue_scans_dedup_on_repeat(tmp_path: Path):
 
     sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
     try:
-        sup._sync_registry()
+        _sync(sup)
         slot = _only_slot(sup)
         sup._enqueue_scans(slot)
         sup._enqueue_scans(slot)  # dedup index drops the duplicate
@@ -110,7 +126,7 @@ def test_periodic_reconcile_seeds_then_enqueues(tmp_path: Path):
 
     sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
     try:
-        sup._sync_registry()
+        _sync(sup)
         slot = _only_slot(sup)
         # Suppress scans so we isolate reconcile.
         slot.next_scan_at = time.monotonic() + 10_000
@@ -219,7 +235,7 @@ def test_dispatch_heals_runtime_peek_corruption(tmp_path: Path, monkeypatch):
 
     sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
     try:
-        sup._sync_registry()
+        _sync(sup)
         slot = _only_slot(sup)
 
         import sqlite3
@@ -262,7 +278,7 @@ def test_dispatch_runs_handler_and_marks_done(tmp_path: Path, monkeypatch):
 
     sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
     try:
-        sup._sync_registry()
+        _sync(sup)
         slot = _only_slot(sup)
         slot.queue.enqueue("reconcile", {})
 
@@ -302,7 +318,7 @@ def test_project_parallelises_writes_but_serialises_exclusive(
 
     sup = _make_sup(_registry(tmp_path, [rtfm_dir]), max_concurrent=4)
     try:
-        sup._sync_registry()
+        _sync(sup)
         slot = _only_slot(sup)
 
         # Two parallelisable jobs for the SAME project → both run at once.
@@ -353,19 +369,19 @@ def test_registry_sync_add_and_remove(tmp_path: Path):
 
     sup = _make_sup(reg)
     try:
-        sup._sync_registry()
+        _sync(sup)
         assert set(sup._slots) == {str(a)}
 
         # Add b.
         reg.write_text(json.dumps({"projects": [str(a), str(b)]}), encoding="utf-8")
         sup._registry_mtime = -1.0  # force re-read regardless of mtime granularity
-        sup._sync_registry()
+        _sync(sup)
         assert set(sup._slots) == {str(a), str(b)}
 
         # Remove a (idle slot → dropped).
         reg.write_text(json.dumps({"projects": [str(b)]}), encoding="utf-8")
         sup._registry_mtime = -1.0
-        sup._sync_registry()
+        _sync(sup)
         assert set(sup._slots) == {str(b)}
     finally:
         sup._pool.shutdown(wait=False)
@@ -394,7 +410,7 @@ def test_dispatch_serves_global_arrival_order(tmp_path: Path, monkeypatch):
     sup = _make_sup(_registry(tmp_path, [dirs["aaa"], dirs["zzz"]]),
                     max_concurrent=1)
     try:
-        sup._sync_registry()
+        _sync(sup)
         by_name = {Path(p).parent.name: s for p, s in sup._slots.items()}
         by_name["zzz"].queue.enqueue("reconcile", {"n": 1})   # oldest
         time.sleep(0.01)                                       # distinct stamp
@@ -680,3 +696,87 @@ class TestStallWatchdog:
         sup._stop = True
 
         assert len([m for m in logged if "STALL" in m]) == 1
+
+
+class TestProgressiveOpening:
+    """A project joins the fleet as soon as its own database checks out.
+    One large corpus must not keep every other project unserved while it is
+    verified — that cost ten minutes of blindness on every restart."""
+
+    def _project(self, tmp_path, name):
+        rtfm_dir = tmp_path / name / ".rtfm"
+        rtfm_dir.mkdir(parents=True)
+        Library(str(rtfm_dir / "library.db")).close()
+        return rtfm_dir
+
+    def test_a_slow_database_does_not_hold_up_the_others(self, tmp_path, monkeypatch):
+        slow = self._project(tmp_path, "slow")
+        quick = self._project(tmp_path, "quick")
+
+        release = threading.Event()
+        real = sup_mod.ensure_healthy_db
+
+        def gated(db_path, log=None):
+            if Path(db_path).parent.parent.name == "slow":
+                release.wait(timeout=10)
+            return real(db_path, log=log)
+
+        monkeypatch.setattr(sup_mod, "ensure_healthy_db", gated)
+
+        sup = _make_sup(_registry(tmp_path, [slow, quick]))
+        try:
+            sup._sync_registry()
+            deadline = time.monotonic() + 10
+            while str(quick) not in sup._slots and time.monotonic() < deadline:
+                sup._collect_opened()
+                time.sleep(0.005)
+
+            # Served already, while the slow one is still being checked.
+            assert str(quick) in sup._slots
+            assert str(slow) not in sup._slots
+
+            release.set()
+            deadline = time.monotonic() + 10
+            while sup._opening and time.monotonic() < deadline:
+                sup._collect_opened()
+                time.sleep(0.005)
+            assert str(slow) in sup._slots
+        finally:
+            release.set()
+            sup._opener.shutdown(wait=False)
+            sup._pool.shutdown(wait=False)
+
+    def test_scheduling_is_not_blocked_while_a_project_opens(self, tmp_path, monkeypatch):
+        """The whole point: the scheduling step returns immediately."""
+        slow = self._project(tmp_path, "slow")
+        release = threading.Event()
+
+        monkeypatch.setattr(sup_mod, "ensure_healthy_db",
+                            lambda db_path, log=None: release.wait(timeout=10) or False)
+
+        sup = _make_sup(_registry(tmp_path, [slow]))
+        try:
+            t0 = time.monotonic()
+            sup._sync_registry()
+            assert time.monotonic() - t0 < 0.5
+            assert sup._opening  # the work is in flight, not done inline
+        finally:
+            release.set()
+            sup._opener.shutdown(wait=False)
+            sup._pool.shutdown(wait=False)
+
+    def test_a_project_unregistered_while_opening_is_dropped(self, tmp_path):
+        gone = self._project(tmp_path, "gone")
+        reg = _registry(tmp_path, [gone])
+        sup = _make_sup(reg)
+        try:
+            sup._sync_registry()
+            sup._wanted = set()  # unregistered before its check finished
+            deadline = time.monotonic() + 10
+            while sup._opening and time.monotonic() < deadline:
+                sup._collect_opened()
+                time.sleep(0.005)
+            assert sup._slots == {}
+        finally:
+            sup._opener.shutdown(wait=False)
+            sup._pool.shutdown(wait=False)

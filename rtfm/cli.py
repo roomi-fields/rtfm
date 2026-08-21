@@ -166,17 +166,65 @@ def _deduplicate_by_source(results, limit: int):
     return ranked[:limit]
 
 
+def _repair_stale_sources(lib, deduped, root_for_slug) -> tuple[dict[str, str], bool]:
+    """Reconcile the answered files with disk before printing them.
+
+    The CLI reads the same eventually-consistent index the MCP tools do, and
+    an agent shelling out to ``rtfm search`` deserves the same guarantee: out
+    of date is either fixed on the spot or said out loud, never passed off as
+    current. Returns ``{book_slug: verdict}`` for what could not be fixed.
+    """
+    try:
+        from rtfm.core import freshness
+        from rtfm.core.pathresolve import resolve_source_path
+
+        pairs, roots = [], {}
+        for entry in deduped:
+            chunk = entry["best"].chunk
+            filepath = chunk.book_file or ""
+            if not filepath:
+                continue
+            root = root_for_slug(chunk.book_slug)
+            abs_path = resolve_source_path(filepath, root)
+            pairs.append((abs_path, filepath))
+            roots[abs_path] = (chunk.book_slug, root)
+
+        verdicts = freshness.verify(lib, pairs)
+        if not verdicts:
+            return {}, False
+
+        repairable = [
+            (roots[p][1], v.get("corpus"), v["filepath"])
+            for p, v in verdicts.items()
+            if v["verdict"] == freshness.STALE and roots.get(p, (None, None))[1]
+            and v.get("corpus")
+        ]
+        job_ids = freshness.requeue(str(lib.db_path), repairable)
+        budget = freshness.refresh_wait_seconds()
+        if (job_ids and budget > 0 and freshness.indexer_is_running()
+                and freshness.wait_for(str(lib.db_path), job_ids, budget)):
+            return {}, True
+        return ({roots[p][0]: v["verdict"] for p, v in verdicts.items()
+                 if p in roots}, False)
+    except Exception:
+        return {}, False
+
+
 def cmd_search(args):
     """Search the library."""
     lib = _get_lib(args)
     # Overfetch so dedup still yields enough unique sources
     fetch_limit = args.limit * 5
-    results = lib.search(
-        args.query,
-        limit=fetch_limit,
-        corpus=args.corpus,
-        book=args.book,
-    )
+
+    def _run():
+        return lib.search(
+            args.query,
+            limit=fetch_limit,
+            corpus=args.corpus,
+            book=args.book,
+        )
+
+    results = _run()
 
     if args.format == "json":
         print(results.to_json())
@@ -194,6 +242,12 @@ def cmd_search(args):
             from rtfm.core.pathresolve import (
                 resolve_source_path, build_slug_root_resolver)
             root_for_slug = build_slug_root_resolver(lib)
+            stale, repaired = _repair_stale_sources(lib, deduped, root_for_slug)
+            if repaired:
+                # Something was re-indexed — the ranking above was computed
+                # from the rows it replaced, so ask again.
+                results = _run()
+                deduped = _deduplicate_by_source(results, args.limit)
             for rank, entry in enumerate(deduped, 1):
                 r = entry["best"]
                 count = entry["count"]
@@ -207,6 +261,9 @@ def cmd_search(args):
                     parts.append(f"file: {filepath}")
                 else:
                     parts.append(f"slug: {r.chunk.book_slug}")
+                verdict = stale.get(r.chunk.book_slug)
+                if verdict:
+                    parts.append(f"⚠ {verdict}")
                 print(f"[{rank}] {' — '.join(parts)}")
 
     lib.close()

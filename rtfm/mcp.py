@@ -159,17 +159,55 @@ def _deduplicate_by_source(results, limit: int):
     return ranked[:limit]
 
 
-def _verify_freshness(entries: list[dict]) -> None:
-    """Annotate answered sources that disagree with their file on disk.
+def _await_queued_content() -> bool:
+    """Wait for queued ingests before reporting that nothing matches.
+
+    "No results" is the one answer read-time verification cannot check: with
+    no file returned, there is nothing to compare against disk. But a file an
+    agent just wrote is already queued at top priority, and an empty answer
+    delivered a second too early reads as "this does not exist" — the most
+    expensive kind of wrong. Returns ``True`` if work drained and the query
+    is worth repeating.
+    """
+    try:
+        from rtfm.core import freshness
+
+        budget = freshness.refresh_wait_seconds()
+        if budget <= 0 or not freshness.indexer_is_running():
+            return False
+        lib = _get_library()
+        pending = freshness.pending_content_jobs(str(lib.db_path))
+        if not pending:
+            return False
+        t0 = time.time()
+        drained = freshness.wait_for(str(lib.db_path), pending, budget)
+        log("freshness", f"empty answer with {len(pending)} ingest(s) queued — "
+                         f"{'drained' if drained else 'still running'} "
+                         f"after {time.time() - t0:.2f}s")
+        return drained
+    except Exception:
+        return False
+
+
+def _verify_freshness(entries: list[dict]) -> bool:
+    """Check answered sources against disk, and repair before answering.
 
     The index is eventually consistent; an agent must never be left to
-    assume otherwise. Each answered file is stat'ed (hashed when small),
-    drift is reported inline, and a top-priority re-ingest is queued so the
-    next search is right. Best-effort — a search must still answer if this
-    fails.
+    assume otherwise. Each answered file is stat'ed (hashed when small). On
+    drift the fix is queued at top priority and this call **waits** for it —
+    a single-file re-ingest takes about a second, which is worth paying to
+    answer from a correct index rather than to explain that it isn't one.
+
+    The write happens in the supervisor, never here: one writer per database
+    is what keeps them from corrupting, and a reader must not take that role.
+
+    Returns ``True`` when the index was repaired and the caller should ask
+    its question again. Otherwise the drifting entries carry a ``stale``
+    verdict to report. Best-effort — a search must still answer if any of
+    this fails.
     """
     if not entries:
-        return
+        return False
     try:
         from rtfm.core import freshness
 
@@ -177,9 +215,9 @@ def _verify_freshness(entries: list[dict]) -> None:
         verdicts = freshness.verify(
             lib, [(e.get("abs_path", ""), e.get("filepath", "")) for e in entries])
         if not verdicts:
-            return
+            return False
 
-        requeue = []
+        repairable = []
         for entry in entries:
             found = verdicts.get(entry.get("abs_path", ""))
             if not found:
@@ -187,22 +225,45 @@ def _verify_freshness(entries: list[dict]) -> None:
             entry["stale"] = found["verdict"]
             if (found["verdict"] == freshness.STALE and entry.get("root")
                     and found.get("corpus")):
-                requeue.append((entry["root"], found["corpus"], found["filepath"]))
-        n = freshness.requeue(str(lib.db_path), requeue)
-        log("freshness", f"drift on {len(verdicts)} source(s), {n} re-ingest queued")
+                repairable.append(
+                    (entry["root"], found["corpus"], found["filepath"]))
+
+        job_ids = freshness.requeue(str(lib.db_path), repairable)
+        budget = freshness.refresh_wait_seconds()
+        if not job_ids or budget <= 0 or not freshness.indexer_is_running():
+            log("freshness", f"drift on {len(verdicts)} source(s), "
+                             f"{len(job_ids)} re-ingest queued")
+            return False
+
+        t0 = time.time()
+        repaired = freshness.wait_for(str(lib.db_path), job_ids, budget)
+        log("freshness", f"drift on {len(verdicts)} source(s), "
+                         f"{len(job_ids)} re-ingest "
+                         f"{'done' if repaired else 'still running'} "
+                         f"in {time.time() - t0:.2f}s")
+        if not repaired:
+            return False
+        # Fresh index — the answer must be recomputed, not patched up.
+        for entry in entries:
+            entry.pop("stale", None)
+        return True
     except Exception as exc:  # pragma: no cover - defensive
         log("freshness", f"check skipped: {exc}")
+        return False
 
 
-def _expand_freshness_note(abs_path: str, filepath: str, corpus: str,
-                           root: str | None) -> str:
-    """Warning line for an expanded file that no longer matches its index.
+def _expand_freshness(abs_path: str, filepath: str, corpus: str,
+                      root: str | None) -> tuple[str, bool]:
+    """Reconcile an expanded file with its index before reading it.
 
-    Returns "" when the file is up to date — the common case, and the only
-    one where the reported line ranges can be trusted.
+    Returns ``(warning, repaired)``. ``repaired`` means the file was out of
+    date and has just been re-indexed, so the caller must re-read its chunk
+    rows — the boundaries it holds describe the old content. A non-empty
+    warning means the drift is still there and the line ranges below cannot
+    be trusted (the content can: it is read live off disk either way).
     """
     if not abs_path:
-        return ""
+        return "", False
     try:
         from rtfm.core import freshness
 
@@ -210,16 +271,24 @@ def _expand_freshness_note(abs_path: str, filepath: str, corpus: str,
         verdicts = freshness.verify(lib, [(abs_path, filepath)])
         found = verdicts.get(abs_path)
         if not found:
-            return ""
+            return "", False
+
         if found["verdict"] == freshness.STALE and root:
-            freshness.requeue(str(lib.db_path),
-                              [(root, found.get("corpus") or corpus, filepath)])
+            job_ids = freshness.requeue(
+                str(lib.db_path), [(root, found.get("corpus") or corpus, filepath)])
+            budget = freshness.refresh_wait_seconds()
+            if job_ids and budget > 0 and freshness.indexer_is_running():
+                t0 = time.time()
+                if freshness.wait_for(str(lib.db_path), job_ids, budget):
+                    log("freshness", f"expand re-indexed in {time.time() - t0:.2f}s: "
+                                     f"{abs_path}")
+                    return "", True
         log("freshness", f"expand on {found['verdict']}: {abs_path}")
         return (f"⚠ {found['verdict']} — content below is read from disk and "
                 f"current; the line ranges and sections come from the index "
-                f"and may have shifted. Re-indexing queued.")
+                f"and may have shifted. Re-indexing queued.", False)
     except Exception:
-        return ""
+        return "", False
 
 
 def _render_chunk(abs_path: str, line_start: int | None, line_end: int | None) -> str:
@@ -425,21 +494,24 @@ def rtfm_search(
     # Overfetch to ensure enough unique sources after dedup
     fetch_limit = limit * 5
 
-    try:
-        if search_type == "semantic":
-            results = lib.semantic_search(query, limit=fetch_limit, corpus=corpus)
-        elif search_type == "fts":
-            results = lib.search(query, limit=fetch_limit, corpus=corpus)
-        else:
-            results = lib.hybrid_search(query, limit=fetch_limit, corpus=corpus)
-    except Exception:
-        results = lib.search(query, limit=fetch_limit, corpus=corpus)
+    def _run():
+        try:
+            if search_type == "semantic":
+                found = lib.semantic_search(query, limit=fetch_limit, corpus=corpus)
+            elif search_type == "fts":
+                found = lib.search(query, limit=fetch_limit, corpus=corpus)
+            else:
+                found = lib.hybrid_search(query, limit=fetch_limit, corpus=corpus)
+        except Exception:
+            found = lib.search(query, limit=fetch_limit, corpus=corpus)
+        if freshness_weight > 0 or centrality_weight > 0:
+            found = lib.rerank(found, freshness_weight=freshness_weight,
+                               centrality_weight=centrality_weight)
+        return found
 
-    # Apply reranking if weights are provided
-    if freshness_weight > 0 or centrality_weight > 0:
-        results = lib.rerank(results, freshness_weight=freshness_weight,
-                             centrality_weight=centrality_weight)
-
+    results = _run()
+    if not results and _await_queued_content():
+        results = _run()
     elapsed = time.time() - t0
 
     if not results:
@@ -448,7 +520,15 @@ def rtfm_search(
 
     # Deduplicate: 1 best chunk per source
     deduped = _deduplicate_by_source(results, limit)
-    _verify_freshness(deduped)
+    if _verify_freshness(deduped):
+        # A source had drifted and has just been re-indexed. The ranking and
+        # the line ranges were computed from the old content, so ask again
+        # rather than hand back an answer we know was built on stale rows.
+        results = _run()
+        deduped = _deduplicate_by_source(results, limit) if results else []
+        elapsed = time.time() - t0
+        if not deduped:
+            return f"No results found for: {query}"
     log("search", f"query={query!r} type={search_type} sources={len(deduped)}/{results.total_found} time={elapsed:.3f}s")
 
     lines = [f"{len(deduped)} sources for \"{query}\":\n"]
@@ -834,6 +914,8 @@ def rtfm_context(
 
     # FTS search across all corpora (or scoped) — fast, no model loading
     results = lib.search(subject, limit=fetch_limit, corpus=scope)
+    if not results and _await_queued_content():
+        results = lib.search(subject, limit=fetch_limit, corpus=scope)
 
     elapsed = time.time() - t0
 
@@ -843,7 +925,13 @@ def rtfm_context(
 
     # Deduplicate: 1 best chunk per source
     deduped = _deduplicate_by_source(results, limit)
-    _verify_freshness(deduped)
+    if _verify_freshness(deduped):
+        # A source drifted and was just re-indexed — ask again (see rtfm_search).
+        results = lib.search(subject, limit=fetch_limit, corpus=scope)
+        deduped = _deduplicate_by_source(results, limit) if results else []
+        elapsed = time.time() - t0
+        if not deduped:
+            return f"No context found for: {subject}\nTip: use Grep/Glob as fallback."
     log("context", f"subject={subject!r} scope={scope!r} sources={len(deduped)}/{results.total_found} time={elapsed:.3f}s")
 
     lines = [f"{len(deduped)} sources for \"{subject}\":\n"]
@@ -896,8 +984,14 @@ def rtfm_expand(
 
     # Content below is read live off disk, so it is never stale — but the
     # chunk boundaries come from the index, and they drift as soon as lines
-    # are added above. Say so, and queue the re-ingest that fixes it.
-    stale_note = _expand_freshness_note(abs_path, book_file, corpus, sync_root)
+    # are added above. Repair that before reading; say so if we could not.
+    stale_note, repaired = _expand_freshness(abs_path, book_file, corpus, sync_root)
+    if repaired:
+        # The book row may have been rebuilt — resolve it again before
+        # reading chunks, or we would read the rows we just replaced.
+        book_row = _resolve_book_by_path(conn, source) or book_row
+        book_slug = book_row["slug"]
+        book_title = book_row["title"]
 
     # All chunks in file order
     all_chunks = conn.execute(

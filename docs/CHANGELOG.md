@@ -9,6 +9,30 @@ description: >-
 
 ## [0.28.0] — 2026-08-21
 
+### Added — a read repairs the index before answering
+
+Noticing that a file has drifted is worth little if the answer is wrong
+anyway. When a search or an expand finds a source that no longer matches its
+index, RTFM queues the fix at top priority, **waits for it** (about a second
+for a single file), and answers from the corrected index — ranking and line
+ranges included. Only when the repair does not land inside the budget does it
+fall back to reporting the drift.
+
+The same applies to the answer read-time checking cannot inspect: **"no
+results"**. With nothing returned there is no file to compare against disk, so
+an empty answer would sail past every guard — and "this does not exist" is the
+most expensive kind of wrong. If ingests are already queued (the edit hook
+files one the instant an agent writes), the search waits for them and asks
+again before concluding that nothing matches.
+
+The write still happens in the supervisor, never in the reader: one writer per
+database is what keeps them from corrupting.
+
+The budget is `RTFM_FRESH_WAIT_SECONDS` (default 3 s); `0` restores
+report-only behaviour. `rtfm search` on the command line does the same — an
+agent shelling out must not be the one path that quietly answers from stale
+rows.
+
 ### Added — RTFM tells you when it is answering about a file that changed
 
 An index is eventually consistent, so between an edit and the re-ingest there
@@ -60,6 +84,18 @@ time, while the main thread sat in a 9p wait on `/mnt/…`.
 Scheduling is now purely lexical and never touches a source filesystem. The
 scan handler resolves the root for real, in a pool thread, where blocking
 costs one lane instead of the machine.
+
+### Fixed — a restart no longer blinds the fleet for ten minutes
+
+Every supervisor start integrity-scans each project database before serving
+it — reading, on this machine, some 20 GB. That ran on the scheduling thread,
+one project after another, so nothing at all was indexed until the last check
+finished; the new watchdog named the step within a minute of shipping.
+
+Projects now open on a small side pool and each joins the fleet the moment its
+own check passes, so a small project is served while a large one is still
+being verified. The guarantee is unchanged: every database is still
+integrity-checked before it is serviced.
 
 ### Added — the supervisor says when its scheduling loop is stuck
 

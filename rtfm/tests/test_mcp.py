@@ -5,6 +5,8 @@ to verify the business logic.
 """
 
 import os
+import time
+
 import pytest
 import tempfile
 from pathlib import Path
@@ -842,6 +844,14 @@ class TestSearchExpandEditWorkflow:
 # ── Freshness: the index must never quietly answer for a stale file ──────
 
 class TestFreshnessSignalling:
+    @pytest.fixture(autouse=True)
+    def no_indexer(self, monkeypatch):
+        """No supervisor is servicing these temp DBs, so read-repair cannot
+        complete — these tests cover what RTFM reports when it cannot fix
+        the drift itself. The repair path is covered below."""
+        from rtfm.core import freshness
+        monkeypatch.setattr(freshness, "indexer_is_running", lambda: False)
+
     def _touch_far_enough_in_the_past(self, path, seconds=5):
         """Age a file so its mtime is unambiguously older than indexing."""
         import os as _os
@@ -895,3 +905,112 @@ class TestFreshnessSignalling:
         self._touch_far_enough_in_the_past(tmp_path / "doc.md")
         assert "⚠" not in rtfm_search("consciousness", limit=3)
         assert "⚠" not in rtfm_expand(str(tmp_path / "doc.md"))
+
+
+class TestFreshnessReadRepair:
+    """When a supervisor is there to service it, a read fixes the drift it
+    finds and answers from the corrected index — a second of latency in
+    exchange for an answer that is actually right."""
+
+    @pytest.fixture
+    def indexer(self, mcp_db, tmp_path):
+        """A stand-in supervisor: drains ingest jobs the way the real one
+        does, so the read under test has something to wait on."""
+        import threading
+
+        from rtfm.core.queue import Queue
+        from rtfm import Library
+
+        stop = threading.Event()
+
+        def drain():
+            q = Queue(str(mcp_db))
+            lib = Library(mcp_db)
+            try:
+                while not stop.is_set():
+                    job = q.dequeue()
+                    if job is None:
+                        stop.wait(0.02)
+                        continue
+                    payload = job.payload
+                    path = Path(payload["root"]) / payload["filepath"]
+                    try:
+                        lib.ingest(path, corpus=payload.get("corpus", "test"))
+                        q.mark_done(job.id)
+                    except Exception as exc:
+                        q.mark_failed(job.id, str(exc))
+            finally:
+                lib.close()
+                q.close()
+
+        from rtfm.core import freshness
+        real = freshness.indexer_is_running
+        freshness.indexer_is_running = lambda: True
+        t = threading.Thread(target=drain, daemon=True)
+        t.start()
+        yield
+        stop.set()
+        t.join(timeout=5)
+        freshness.indexer_is_running = real
+
+    def test_search_finds_what_an_agent_just_wrote(self, mcp_db, tmp_path, indexer):
+        """The point of the whole exercise: a word written moments ago is
+        findable, without the agent having to know about indexing at all.
+
+        This is the "no results" path — nothing came back to compare against
+        disk, so the only signal is the ingest the edit hook just queued."""
+        from rtfm.core.queue import P_USER, Queue
+        from rtfm.mcp import rtfm_search
+
+        doc = tmp_path / "doc.md"
+        assert "No results" in rtfm_search("epistemology", limit=3)
+
+        doc.write_text(doc.read_text() + "\n## Epistemology\n\nA new section.\n")
+        # What the edit hook does the instant an agent writes a file.
+        q = Queue(str(mcp_db))
+        q.enqueue("ingest", {"root": str(tmp_path), "corpus": "test",
+                             "filepath": "doc.md"}, priority=P_USER)
+        q.close()
+
+        out = rtfm_search("epistemology", limit=3)
+        assert "doc.md" in out
+        assert "⚠" not in out
+
+    def test_empty_answer_is_not_delayed_when_nothing_is_queued(
+            self, mcp_db, tmp_path, indexer):
+        """The wait must cost nothing on the ordinary miss — no queued work
+        means the answer is already final."""
+        from rtfm.mcp import rtfm_search
+
+        t0 = time.time()
+        assert "No results" in rtfm_search("zzzznotaword", limit=3)
+        assert time.time() - t0 < 1.0
+
+    def test_repaired_search_reports_no_drift(self, mcp_db, tmp_path, indexer):
+        from rtfm.mcp import rtfm_search
+
+        doc = tmp_path / "doc.md"
+        doc.write_text("# Philosophy\n\nconsciousness, rewritten entirely.\n")
+        out = rtfm_search("consciousness", limit=3)
+        assert "modified since indexing" not in out
+
+    def test_expand_line_ranges_follow_the_repair(self, mcp_db, tmp_path, indexer):
+        """Boundaries are the thing that silently rots: shift the file down
+        and the old ranges point at the wrong lines."""
+        from rtfm.mcp import rtfm_expand
+
+        doc = tmp_path / "doc.md"
+        doc.write_text("<!-- three -->\n<!-- new -->\n<!-- lines -->\n"
+                       + doc.read_text())
+        out = rtfm_expand(str(doc))
+        assert "⚠" not in out
+        assert "# Philosophy" in out
+
+    def test_falls_back_to_reporting_when_the_budget_runs_out(
+            self, mcp_db, tmp_path, monkeypatch, indexer):
+        from rtfm.core import freshness
+        from rtfm.mcp import rtfm_search
+
+        monkeypatch.setattr(freshness, "wait_for", lambda *a, **k: False)
+        (tmp_path / "doc.md").write_text("# Philosophy\n\nconsciousness moved on.\n")
+        assert "modified since indexing" in rtfm_search("consciousness", limit=3)

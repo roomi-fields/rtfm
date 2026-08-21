@@ -231,3 +231,41 @@ def test_cmd_remove_source_exit_codes(rtfm_project, capsys):
     rc = _run_cli("remove", "--corpus", "projets")
     assert rc == 0
     assert list_sources(rtfm_project) == []
+
+
+class TestSearchFreshness:
+    """`rtfm search` reads the same eventually-consistent index the MCP
+    tools do — an agent shelling out to it must get the same guarantee."""
+
+    def _project(self, tmp_path):
+        from rtfm.core.library import Library
+        from rtfm.core.sync import sync
+
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "notes.md").write_text("# Notes\n\nconsciousness and attention.\n")
+        lib = Library(tmp_path / "lib.db")
+        sync(lib, src, corpus="default", generate_embeddings=False)
+        lib.close()
+        return src, str(tmp_path / "lib.db")
+
+    def test_reports_a_source_that_drifted(self, tmp_path, capsys, monkeypatch):
+        from rtfm.core import freshness
+
+        src, db = self._project(tmp_path)
+        monkeypatch.setattr(freshness, "indexer_is_running", lambda: False)
+        (src / "notes.md").write_text("# Notes\n\nconsciousness, rewritten.\n")
+
+        _run_cli("search", "consciousness", "--db", db)
+        assert "modified since indexing" in capsys.readouterr().out
+
+    def test_silent_when_the_index_is_current(self, tmp_path, capsys, monkeypatch):
+        from rtfm.core import freshness
+
+        src, db = self._project(tmp_path)
+        monkeypatch.setattr(freshness, "indexer_is_running", lambda: False)
+
+        _run_cli("search", "consciousness", "--db", db)
+        out = capsys.readouterr().out
+        assert "notes" in out
+        assert "⚠" not in out
