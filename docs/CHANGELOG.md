@@ -7,6 +7,31 @@ description: >-
 
 # Changelog
 
+## [0.26.8] — 2026-08-19
+
+### Added — index files with no extension or an unknown one
+
+RTFM selected files by extension only, so whole families of files were
+invisible: those that encode their type in a **prefix** (Bol Processor's
+`-gr.dhati`, `-se.tempo`, `-da.…`), those with an **unregistered** extension
+(`.bps`, `.gr`, `.bpsl`), and **extensionless** files (`CHECK_THIS`). One repo
+had ~1,600 language files on disk and zero indexed. Two generic additions —
+no format-specific parser in the package:
+
+- **Index-all selection.** A source whose `extensions` includes `*` (e.g.
+  `rtfm add <path> -e '*'`) indexes **every** file, suffix ignored. `.gitignore`,
+  `.rtfmignore`, and the always-excluded dirs (`.git`, `node_modules`, `.rtfm`,
+  …) still apply, so noise stays out.
+- **Text catch-all at ingest.** A selected file with no registered parser is
+  indexed as plain text when it is textual, and skipped — not failed — when it
+  is binary (detected by a NUL byte). So an index-all tree pulls in every
+  grammar, setting, and data file as searchable text while `.mid` and other
+  binaries are passed over cleanly, with no re-ingest churn.
+
+Together these let a source index an arbitrary tree without a bespoke parser
+per exotic format — the extensibility path stays for structured parsing, but
+is no longer required just to make files searchable.
+
 ## [0.26.7] — 2026-08-19
 
 ### Fixed — `rtfm remove` exits non-zero when nothing matched

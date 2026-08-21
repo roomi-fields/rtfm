@@ -335,8 +335,18 @@ def scan_directory(
     extensions = extensions or DEFAULT_EXTENSIONS
     exclude_dirs = exclude_dirs or DEFAULT_EXCLUDE_DIRS
 
-    # Normalise extensions to lower-case with leading dot
-    extensions = {e if e.startswith(".") else f".{e}" for e in extensions}
+    # A ``*`` (or ``.*`` / ``**``) among the extensions means "index every
+    # file", suffix ignored — for trees whose files encode their type in a
+    # prefix (BP3's ``-gr.``/``-se.``…) or carry no extension at all. Binary
+    # files are filtered downstream at ingest (text catch-all). gitignore /
+    # rtfmignore / excluded dirs still apply.
+    index_all = any(e in ("*", ".*", "**") for e in extensions)
+
+    # Normalise extensions to lower-case with leading dot (drop the wildcard)
+    extensions = {
+        e if e.startswith(".") else f".{e}"
+        for e in extensions if e not in ("*", ".*", "**")
+    }
 
     gi_spec = _load_gitignore_spec(root) if honor_gitignore else None
     ri_spec = _load_rtfmignore_spec(root)  # always applied when present
@@ -346,7 +356,9 @@ def scan_directory(
         # Skip excluded directories
         if any(part in exclude_dirs for part in item.parts):
             continue
-        if not (item.is_file() and item.suffix.lower() in extensions):
+        if not item.is_file():
+            continue
+        if not index_all and item.suffix.lower() not in extensions:
             continue
         if gi_spec is not None or ri_spec is not None:
             try:

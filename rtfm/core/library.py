@@ -521,7 +521,21 @@ class Library:
         if parser is None:
             parser = ParserRegistry.get_parser(path)
             if parser is None:
-                raise ValueError(f"No parser available for: {path.suffix}")
+                # Text catch-all. A selected file with no registered parser
+                # (unknown or absent extension — e.g. BP3 prefix-named data
+                # files like ``-gr.dhati``, or extensionless files) is indexed
+                # as plain text when it is textual, and skipped — not failed —
+                # when it is binary. This lets a source opt into indexing a
+                # whole tree without a bespoke parser per exotic format.
+                from rtfm.parsers.plaintext import PlainTextParser
+                try:
+                    with open(path, "rb") as fh:
+                        head = fh.read(8192)
+                except OSError as exc:
+                    raise ValueError(f"unreadable file: {path}") from exc
+                if b"\x00" in head:
+                    return {"chunks": 0, "chars": 0, "skipped": "binary"}
+                parser = PlainTextParser()
 
         # Extract or use provided metadata
         doc_metadata = parser.extract_metadata(path)

@@ -55,6 +55,35 @@ def test_confirm_removals_force_bypasses_check(tmp_path):
     assert confirmed == ["here.md"] and kept == []
 
 
+# ── text catch-all: index files with no registered parser ────────────────
+
+def test_ingest_text_fallback_for_unknown_extension(tmp_path):
+    """A textual file whose extension no parser claims (BP3 ``-gr.dhati``)
+    is indexed as plain text rather than rejected."""
+    f = tmp_path / "-gr.dhati"
+    f.write_text("gram#1 A --> B\n\nsecond paragraph.\n")
+    lib = Library(str(tmp_path / "lib.db"))
+    try:
+        stats = lib.ingest(f, corpus="t")
+        assert stats["chunks"] >= 1
+    finally:
+        lib.close()
+
+
+def test_ingest_skips_binary_without_failing(tmp_path):
+    """A binary file selected by an index-all source is skipped cleanly —
+    zero chunks, no raised error (which would fail the queue job)."""
+    f = tmp_path / "song.mid"
+    f.write_bytes(b"MThd\x00\x00\x00\x06\x00\x01\x00\x00")
+    lib = Library(str(tmp_path / "lib.db"))
+    try:
+        stats = lib.ingest(f, corpus="t")
+        assert stats["chunks"] == 0
+        assert stats.get("skipped") == "binary"
+    finally:
+        lib.close()
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -155,6 +184,29 @@ class TestScanDirectory:
         files = scan_directory(project_dir, extensions={"py"})
         for f in files:
             assert f.suffix == ".py"
+
+    def test_wildcard_indexes_every_file(self, tmp_path):
+        """A ``*`` extension indexes prefix-named and extensionless files that
+        no suffix could ever select (BP3 ``-gr.dhati``, ``CHECK_THIS``)."""
+        (tmp_path / "-gr.dhati").write_text("gram#1 A --> B\n")
+        (tmp_path / "-se.tempo").write_text("tempo 120\n")
+        (tmp_path / "CHECK_THIS").write_text("no extension\n")
+        (tmp_path / "readme.md").write_text("# hi\n")
+
+        allf = {f.name for f in scan_directory(tmp_path, extensions={"*"})}
+        assert allf == {"-gr.dhati", "-se.tempo", "CHECK_THIS", "readme.md"}
+
+        # Default extension set still ignores the exotic files.
+        deff = {f.name for f in scan_directory(tmp_path)}
+        assert deff == {"readme.md"}
+
+    def test_wildcard_still_honors_rtfmignore(self, tmp_path):
+        (tmp_path / "-gr.keep").write_text("x\n")
+        (tmp_path / "-gr.drop").write_text("y\n")
+        (tmp_path / ".rtfmignore").write_text("-gr.drop\n")
+        names = {f.name for f in scan_directory(tmp_path, extensions={"*"})}
+        assert "-gr.keep" in names
+        assert "-gr.drop" not in names
 
     def test_excludes_rtfm_state_dir(self, tmp_path):
         """`.rtfm/` must never be scanned — it contains RTFM's own state
