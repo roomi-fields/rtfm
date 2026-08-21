@@ -21,9 +21,17 @@ fall back to reporting the drift.
 The same applies to the answer read-time checking cannot inspect: **"no
 results"**. With nothing returned there is no file to compare against disk, so
 an empty answer would sail past every guard — and "this does not exist" is the
-most expensive kind of wrong. If ingests are already queued (the edit hook
-files one the instant an agent writes), the search waits for them and asks
-again before concluding that nothing matches.
+most expensive kind of wrong: it sends an agent off to rewrite code that is
+already there. An empty answer now earns a look at the disk. First it drains
+whatever the edit hook queued; failing that it scans the project's sources
+outright and asks again — affordable only because a scan no longer re-reads
+untouched files (0.04 s over 431 files, 0.15 s over 1 708). That covers the
+last gap: a file changed by a shell command, a build step or a `git checkout`,
+which no hook announced and no result could reveal.
+
+The catch-up scan refuses to guess: without a project configuration naming its
+sources it does nothing, rather than risk scanning the wrong tree with the
+wrong rules.
 
 The write still happens in the supervisor, never in the reader: one writer per
 database is what keeps them from corrupting.

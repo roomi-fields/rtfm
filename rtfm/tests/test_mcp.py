@@ -913,34 +913,67 @@ class TestFreshnessReadRepair:
     exchange for an answer that is actually right."""
 
     @pytest.fixture
+    def mcp_db(self, tmp_path):
+        """A project laid out the way a real one is: ``.rtfm/library.db``
+        beside a config naming its sources. The catch-up scan refuses to run
+        without that, precisely so it can never guess at the wrong tree."""
+        from rtfm.config import add_source, save_config
+        from rtfm import Library
+
+        (tmp_path / ".rtfm").mkdir()
+        db_path = tmp_path / ".rtfm" / "library.db"
+        lib = Library(db_path)
+        (tmp_path / "doc.md").write_text(
+            "# Philosophy\n\n"
+            "The nature of consciousness is a profound topic. "
+            "Self-inquiry is a method taught by Ramana Maharshi.\n\n"
+            "## Meditation\n\n"
+            "Meditation calms the mind and develops awareness.\n"
+        )
+        lib.sync(root=tmp_path, corpus="test", extensions={".md"},
+                 generate_embeddings=False)
+        lib.close()
+
+        save_config(tmp_path, {"corpus": "test"})
+        add_source(tmp_path, str(tmp_path), "test", extensions=".md")
+
+        with patch.dict(os.environ, {"RTFM_DB": str(db_path)}):
+            import rtfm.mcp as mcp_mod
+            mcp_mod._library = None
+            yield db_path
+            mcp_mod._library = None
+
+    @pytest.fixture
     def indexer(self, mcp_db, tmp_path):
         """A stand-in supervisor: drains ingest jobs the way the real one
         does, so the read under test has something to wait on."""
         import threading
 
         from rtfm.core.queue import Queue
-        from rtfm import Library
 
         stop = threading.Event()
 
         def drain():
+            from rtfm.core.handlers import HANDLERS
+            from rtfm.core.worker import JobContext
+
             q = Queue(str(mcp_db))
-            lib = Library(mcp_db)
+            ctx = JobContext(str(mcp_db), lambda m: None)
             try:
                 while not stop.is_set():
                     job = q.dequeue()
                     if job is None:
                         stop.wait(0.02)
                         continue
-                    payload = job.payload
-                    path = Path(payload["root"]) / payload["filepath"]
+                    if job.type == "embed":   # not what these tests measure
+                        q.mark_done(job.id)
+                        continue
                     try:
-                        lib.ingest(path, corpus=payload.get("corpus", "test"))
+                        HANDLERS[job.type](job, ctx)
                         q.mark_done(job.id)
                     except Exception as exc:
                         q.mark_failed(job.id, str(exc))
             finally:
-                lib.close()
                 q.close()
 
         from rtfm.core import freshness
@@ -976,15 +1009,27 @@ class TestFreshnessReadRepair:
         assert "doc.md" in out
         assert "⚠" not in out
 
-    def test_empty_answer_is_not_delayed_when_nothing_is_queued(
-            self, mcp_db, tmp_path, indexer):
-        """The wait must cost nothing on the ordinary miss — no queued work
-        means the answer is already final."""
+    def test_empty_answer_is_bounded(self, mcp_db, tmp_path, indexer):
+        """A miss must stay quick: the catch-up is capped by the budget, and
+        a word that is genuinely nowhere still comes back promptly."""
         from rtfm.mcp import rtfm_search
 
         t0 = time.time()
         assert "No results" in rtfm_search("zzzznotaword", limit=3)
-        assert time.time() - t0 < 1.0
+        assert time.time() - t0 < 3.5
+
+    def test_empty_answer_scans_for_a_file_changed_behind_rtfm(
+            self, mcp_db, tmp_path, indexer):
+        """The last gap: a shell command, a build step or a git checkout
+        changes a file, so nothing queued it and nothing returned it. Only an
+        actual look at the disk can answer — cheap enough now to do on a miss."""
+        from rtfm.mcp import rtfm_search
+
+        assert "No results" in rtfm_search("phenomenology", limit=3)
+        (tmp_path / "doc.md").write_text(
+            "# Philosophy\n\nPhenomenology, added by something other than an agent.\n")
+
+        assert "doc.md" in rtfm_search("phenomenology", limit=3)
 
     def test_repaired_search_reports_no_drift(self, mcp_db, tmp_path, indexer):
         from rtfm.mcp import rtfm_search
@@ -1004,7 +1049,9 @@ class TestFreshnessReadRepair:
                        + doc.read_text())
         out = rtfm_expand(str(doc))
         assert "⚠" not in out
-        assert "# Philosophy" in out
+        # Re-chunked: the first chunk is the new head of the file, and the
+        # numbers shown match the file as it is now.
+        assert "<!-- three -->" in out
 
     def test_falls_back_to_reporting_when_the_budget_runs_out(
             self, mcp_db, tmp_path, monkeypatch, indexer):

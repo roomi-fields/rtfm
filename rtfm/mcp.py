@@ -159,15 +159,17 @@ def _deduplicate_by_source(results, limit: int):
     return ranked[:limit]
 
 
-def _await_queued_content() -> bool:
-    """Wait for queued ingests before reporting that nothing matches.
+def _catch_up_before_empty_answer() -> bool:
+    """Bring the index level with disk before reporting that nothing matches.
 
     "No results" is the one answer read-time verification cannot check: with
-    no file returned, there is nothing to compare against disk. But a file an
-    agent just wrote is already queued at top priority, and an empty answer
-    delivered a second too early reads as "this does not exist" — the most
-    expensive kind of wrong. Returns ``True`` if work drained and the query
-    is worth repeating.
+    no file returned, there is nothing to compare against disk. And it is the
+    answer that misleads most — "this does not exist" sends an agent off to
+    write code that is already there, or to conclude a symbol was removed.
+
+    So an empty answer earns a look at the disk: drain whatever the edit hook
+    queued, and failing that scan the sources outright, all inside the
+    freshness budget. Returns ``True`` if the index moved.
     """
     try:
         from rtfm.core import freshness
@@ -176,15 +178,12 @@ def _await_queued_content() -> bool:
         if budget <= 0 or not freshness.indexer_is_running():
             return False
         lib = _get_library()
-        pending = freshness.pending_content_jobs(str(lib.db_path))
-        if not pending:
-            return False
+        project_root = Path(lib.db_path).resolve().parent.parent
         t0 = time.time()
-        drained = freshness.wait_for(str(lib.db_path), pending, budget)
-        log("freshness", f"empty answer with {len(pending)} ingest(s) queued — "
-                         f"{'drained' if drained else 'still running'} "
-                         f"after {time.time() - t0:.2f}s")
-        return drained
+        moved = freshness.catch_up(str(lib.db_path), str(project_root), budget)
+        log("freshness", f"empty answer — caught up in {time.time() - t0:.2f}s, "
+                         f"index {'moved' if moved else 'unchanged'}")
+        return moved
     except Exception:
         return False
 
@@ -510,7 +509,7 @@ def rtfm_search(
         return found
 
     results = _run()
-    if not results and _await_queued_content():
+    if not results and _catch_up_before_empty_answer():
         results = _run()
     elapsed = time.time() - t0
 
@@ -914,7 +913,7 @@ def rtfm_context(
 
     # FTS search across all corpora (or scoped) — fast, no model loading
     results = lib.search(subject, limit=fetch_limit, corpus=scope)
-    if not results and _await_queued_content():
+    if not results and _catch_up_before_empty_answer():
         results = lib.search(subject, limit=fetch_limit, corpus=scope)
 
     elapsed = time.time() - t0

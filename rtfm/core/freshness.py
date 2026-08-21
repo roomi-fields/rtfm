@@ -261,6 +261,100 @@ def pending_content_jobs(db_path: str) -> list[int]:
         conn.close()
 
 
+def catch_up(db_path: str, project_root: str, budget: float) -> bool:
+    """Bring the index level with the disk before reporting an empty answer.
+
+    The last gap read-time verification cannot see. A file changed by a shell
+    command, a build step or a ``git checkout`` is not in any result to be
+    checked, and no hook filed an ingest for it — so a query about its new
+    contents finds nothing, and "nothing" reads as "this does not exist".
+
+    Closing it needs an actual look at the disk, which used to be far too
+    expensive to do on a read. It no longer is: since a scan skips untouched
+    files by size and mtime, a pass over a source tree costs milliseconds
+    (measured 0.04 s over 431 files, 0.15 s over 1 708). So an empty answer
+    now buys one: scan at top priority, wait for it and for whatever it finds
+    to be ingested, all inside *budget*.
+
+    Returns ``True`` if the index moved and the query deserves a second look.
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + budget
+    ids = pending_content_jobs(db_path)
+    if ids:
+        # Work is already queued — the edit hook files it the instant an
+        # agent writes. Wait for that before doing anything more expensive.
+        if wait_for(db_path, ids, deadline - _time.monotonic()):
+            return True
+        return False
+
+    scan_ids = _enqueue_scans(db_path, project_root)
+    if not scan_ids:
+        return False
+    if not wait_for(db_path, scan_ids, deadline - _time.monotonic()):
+        return False
+    # The scan only *discovers*; what it found still has to be ingested.
+    found = pending_content_jobs(db_path)
+    if not found:
+        return False
+    return wait_for(db_path, found, deadline - _time.monotonic())
+
+
+def _enqueue_scans(db_path: str, project_root: str) -> list[int]:
+    """Queue a top-priority scan of every source of *project_root*.
+
+    Deliberately refuses to guess. A scan carries the source's selection
+    rules, and running one with the wrong rules — or against the wrong tree —
+    would pull a whole unrelated directory into the index. So this only acts
+    on a project whose configuration says what its sources are; anything
+    else is left to the periodic scan, which has the same information.
+    """
+    try:
+        import json
+        import os as _os
+
+        from rtfm.config import load_config
+        from rtfm.core.queue import Queue, P_USER
+
+        if Path(db_path).parent.name != ".rtfm":
+            return []
+        cfg = load_config(project_root)
+        sources = cfg.get("sources")
+        if not sources:
+            if not cfg.get("corpus"):
+                return []
+            sources = [{"path": str(project_root), "corpus": cfg["corpus"]}]
+
+        q = Queue(db_path)
+        try:
+            ids = []
+            for src in sources:
+                payload = {
+                    "root": _os.path.abspath(src.get("path", ".")),
+                    "corpus": src.get("corpus", cfg.get("corpus", "default")),
+                    "extensions": src.get("extensions") or None,
+                }
+                if src.get("include"):
+                    payload["include"] = list(src["include"])
+                if src.get("exclude"):
+                    payload["exclude"] = list(src["exclude"])
+                job_id = q.enqueue("scan", payload, priority=P_USER)
+                if job_id is None:
+                    row = q._get_conn().execute(
+                        "SELECT id FROM work_queue WHERE type='scan' AND payload = ? "
+                        "AND status IN ('pending','running')",
+                        (json.dumps(payload, sort_keys=True),)).fetchone()
+                    job_id = row[0] if row else None
+                if job_id is not None:
+                    ids.append(job_id)
+            return ids
+        finally:
+            q.close()
+    except Exception:
+        return []
+
+
 def wait_for(db_path: str, job_ids: Iterable[int], timeout: float,
              poll: float = 0.05) -> bool:
     """Block until *job_ids* leave the queue, or *timeout* elapses.
