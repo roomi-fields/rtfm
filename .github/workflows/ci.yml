@@ -45,7 +45,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
-    # Non-blocking: ~83 pre-existing ruff violations (see pyproject [tool.ruff]).
+    # Non-blocking: ~755 pre-existing ruff violations (see pyproject [tool.ruff]).
     # Surfaces the backlog without gating merges. Drop this once `ruff check
     # rtfm/` is clean, to make lint a hard gate per PLAYBOOK §1.7.
     continue-on-error: true
