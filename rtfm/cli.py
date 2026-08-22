@@ -530,6 +530,28 @@ def cmd_failed(args):
     """
     import sqlite3 as _sqlite3
     db_path = resolve_db(args.db)
+
+    if getattr(args, "retry", False):
+        # A file whose content failed to parse is skipped by later scans, so
+        # it stops burning a lane every minute. Clearing that record is how
+        # you say "the cause is fixed, look again".
+        conn = _sqlite3.connect(db_path)
+        try:
+            if getattr(args, "corpus", None):
+                cur = conn.execute(
+                    "DELETE FROM ingest_failures WHERE corpus = ?",
+                    (args.corpus,))
+            else:
+                cur = conn.execute("DELETE FROM ingest_failures")
+            conn.commit()
+            n = cur.rowcount
+        finally:
+            conn.close()
+        scope = f" in corpus {args.corpus}" if getattr(args, "corpus", None) else ""
+        print(f"failed: cleared {n} recorded parse failure(s){scope} — "
+              f"the next scan will try them again.")
+        return
+
     conn = _sqlite3.connect(db_path)
     conn.row_factory = _sqlite3.Row
 
@@ -2450,6 +2472,11 @@ def main():
                           help="Cap rows returned (default 1000)")
     p_failed.add_argument("--format", "-f", choices=["text", "json"],
                           default="json", help="Default: json")
+    p_failed.add_argument("--retry", action="store_true",
+                          help="Forget recorded parse failures so the next "
+                               "scan tries those files again (use after "
+                               "fixing the cause — installing OCR, repairing "
+                               "a mount). Combine with --corpus to scope it.")
     p_failed.set_defaults(func=cmd_failed)
 
     # check — report searchability + processing state of a book

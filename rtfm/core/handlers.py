@@ -196,6 +196,7 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
             files_on_disk, indexed, root,
             indexed_global=indexed_global,
             current_corpus=corpus,
+            known_failures=lib.list_ingest_failures(corpus=corpus),
         )
 
         # Cross-corpus moves: cheap, in-place — no parsing, no re-embed.
@@ -338,11 +339,22 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
                 abs_path, corpus=corpus,
                 metadata={"book_slug": book_slug, "source_file": rel},
             )
-        except Exception:
+        except Exception as exc:
             # A parse failure on a file that's still being written (a
             # download/rsync finishing mid-scan) is not a real failure —
             # re-queue it to try again once it settles instead of marking
             # it failed for good. A genuinely-broken file re-raises.
+            if not _looks_like_partial_write(abs_path, _mtime_before, _size_before):
+                # Remember *this content* failed, so the next scan doesn't
+                # offer the same broken file again — and the one after that,
+                # and the one after that.
+                try:
+                    lib.record_ingest_failure(
+                        rel, corpus, file_hash,
+                        abs_path.stat().st_size if abs_path.exists() else 0,
+                        f"{type(exc).__name__}: {exc}")
+                except Exception:
+                    pass  # bookkeeping must not mask the real error
             if _looks_like_partial_write(abs_path, _mtime_before, _size_before):
                 q = Queue(str(worker.db_path))
                 try:
@@ -363,6 +375,11 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
             book_slug=book_slug,
             file_size=abs_path.stat().st_size,
         )
+        # It parsed — any past failure for this path is history.
+        try:
+            lib.clear_ingest_failure(rel, corpus)
+        except Exception:
+            pass
 
         # Health signal: detect scanned-image PDFs deterministically by
         # text density (chars per page). Born-digital PDFs run into the

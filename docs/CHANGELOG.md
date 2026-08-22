@@ -93,6 +93,20 @@ Scheduling is now purely lexical and never touches a source filesystem. The
 scan handler resolves the root for real, in a pool thread, where blocking
 costs one lane instead of the machine.
 
+### Fixed — a file that cannot be parsed was retried on every scan, forever
+
+A failed ingest writes no tracking row, so the next scan saw the file as new
+again and queued it again. On a corpus with a few thousand broken PDFs that is
+not a backlog, it is a permanent storm: **50 000 failed jobs in twenty
+minutes**, measured, burning the very lanes fresh work needs (and five times
+worse since the scan interval dropped to 60 s).
+
+Failures are now recorded with the content's fingerprint. The same bytes are
+never re-queued; change the file and it is picked up on the very next pass, no
+intervention. When the cause was environmental rather than the file — OCR now
+installed, a mount repaired — `rtfm failed --retry` (optionally `--corpus`)
+re-opens them.
+
 ### Fixed — a restart no longer blinds the fleet for ten minutes
 
 Every supervisor start integrity-scans each project database before serving

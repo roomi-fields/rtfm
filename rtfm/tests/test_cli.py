@@ -269,3 +269,39 @@ class TestSearchFreshness:
         out = capsys.readouterr().out
         assert "notes" in out
         assert "⚠" not in out
+
+
+class TestFailedRetry:
+    """Skipping a broken file must never mean forgetting it: once the cause
+    is fixed (OCR installed, mount repaired), one command re-opens them."""
+
+    def _db(self, tmp_path):
+        from rtfm.core.library import Library
+
+        db = tmp_path / "lib.db"
+        lib = Library(db)
+        lib.record_ingest_failure("a.pdf", "docs", "h1", 10, "boom")
+        lib.record_ingest_failure("b.pdf", "docs", "h2", 10, "boom")
+        lib.record_ingest_failure("c.md", "notes", "h3", 10, "boom")
+        lib.close()
+        return str(db)
+
+    def test_retry_clears_everything(self, tmp_path, capsys):
+        from rtfm.core.library import Library
+
+        db = self._db(tmp_path)
+        _run_cli("failed", "--retry", "--db", db)
+        assert "cleared 3" in capsys.readouterr().out
+        lib = Library(db)
+        assert lib.list_ingest_failures() == {}
+        lib.close()
+
+    def test_retry_can_be_scoped_to_a_corpus(self, tmp_path, capsys):
+        from rtfm.core.library import Library
+
+        db = self._db(tmp_path)
+        _run_cli("failed", "--retry", "--corpus", "docs", "--db", db)
+        assert "cleared 2" in capsys.readouterr().out
+        lib = Library(db)
+        assert list(lib.list_ingest_failures()) == ["c.md"]
+        lib.close()

@@ -141,6 +141,25 @@ CREATE TABLE IF NOT EXISTS indexed_files (
 );
 CREATE INDEX IF NOT EXISTS idx_indexed_filepath ON indexed_files(filepath);
 
+-- Files whose ingestion genuinely failed (a corrupt PDF, an unreadable
+-- archive). Without this a scan re-proposes them on every pass, forever:
+-- a failed ingest writes no indexed_files row, so the next scan sees the
+-- file as new again. On a corpus with thousands of broken PDFs that is a
+-- permanent retry storm — 50 000 failed jobs in twenty minutes, measured,
+-- burning the very lanes that fresh work needs. Recording the attempt with
+-- the content's fingerprint stops the loop while keeping the retry
+-- automatic: change the file and it no longer matches, so it is tried again.
+CREATE TABLE IF NOT EXISTS ingest_failures (
+    filepath TEXT NOT NULL,
+    corpus TEXT NOT NULL DEFAULT 'default',
+    file_hash TEXT,
+    file_size INTEGER,
+    error TEXT,
+    attempts INTEGER DEFAULT 1,
+    failed_at TEXT,
+    PRIMARY KEY (filepath, corpus)
+);
+
 -- Sync roots tracking (absolute project roots per corpus)
 CREATE TABLE IF NOT EXISTS sync_roots (
     corpus TEXT PRIMARY KEY,
@@ -299,6 +318,25 @@ class Library:
                     file_size INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_indexed_filepath ON indexed_files(filepath);
+            """)
+
+        # Create ingest_failures table if missing (see the schema comment).
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='ingest_failures'"
+        )
+        if not cursor.fetchone():
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS ingest_failures (
+                    filepath TEXT NOT NULL,
+                    corpus TEXT NOT NULL DEFAULT 'default',
+                    file_hash TEXT,
+                    file_size INTEGER,
+                    error TEXT,
+                    attempts INTEGER DEFAULT 1,
+                    failed_at TEXT,
+                    PRIMARY KEY (filepath, corpus)
+                );
             """)
 
         # Create sync_roots table if missing
@@ -2160,6 +2198,62 @@ class Library:
             }
             for row in cursor.fetchall()
         }
+
+    def list_ingest_failures(self, corpus: str | None = None) -> dict[str, dict]:
+        """Return ``{filepath: {file_hash, file_size, attempts, failed_at}}``.
+
+        The scan uses this to stop re-proposing a file whose content it has
+        already tried and failed to parse.
+        """
+        conn = self._get_conn()
+        if corpus:
+            cursor = conn.execute(
+                "SELECT filepath, file_hash, file_size, attempts, failed_at, error "
+                "FROM ingest_failures WHERE corpus = ?", (corpus,))
+        else:
+            cursor = conn.execute(
+                "SELECT filepath, file_hash, file_size, attempts, failed_at, error "
+                "FROM ingest_failures")
+        return {
+            row["filepath"]: {
+                "file_hash": row["file_hash"],
+                "file_size": row["file_size"],
+                "attempts": row["attempts"],
+                # Named to match indexed_files so the same freshness helpers
+                # can compare either kind of row against the file on disk.
+                "indexed_at": row["failed_at"],
+                "error": row["error"],
+            }
+            for row in cursor.fetchall()
+        }
+
+    def record_ingest_failure(self, filepath: str, corpus: str,
+                              file_hash: str | None, file_size: int,
+                              error: str) -> None:
+        """Remember that *this content* could not be parsed."""
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO ingest_failures
+                   (filepath, corpus, file_hash, file_size, error, attempts, failed_at)
+               VALUES (?, ?, ?, ?, ?, 1, ?)
+               ON CONFLICT(filepath, corpus) DO UPDATE SET
+                   file_hash = excluded.file_hash,
+                   file_size = excluded.file_size,
+                   error = excluded.error,
+                   attempts = ingest_failures.attempts + 1,
+                   failed_at = excluded.failed_at""",
+            (filepath, corpus, file_hash, file_size, error[:2000],
+             datetime.now().isoformat()),
+        )
+        conn.commit()
+
+    def clear_ingest_failure(self, filepath: str, corpus: str) -> None:
+        """Forget a past failure — the file parsed this time."""
+        conn = self._get_conn()
+        conn.execute(
+            "DELETE FROM ingest_failures WHERE filepath = ? AND corpus = ?",
+            (filepath, corpus))
+        conn.commit()
 
     def update_indexed_file(
         self, filepath: str, file_hash: str, corpus: str,

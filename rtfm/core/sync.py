@@ -463,6 +463,7 @@ def compute_diff(
     root: Path,
     indexed_global: dict[str, dict] | None = None,
     current_corpus: str | None = None,
+    known_failures: dict[str, dict] | None = None,
 ) -> SyncDiff:
     """Compare the filesystem state against the DB tracking table.
 
@@ -473,8 +474,14 @@ def compute_diff(
       in the current corpus matches the hash of a file tracked in
       another corpus, it's a cross-corpus move. The book + chunks +
       embeddings + tags are transferred without re-ingestion.
+
+    *known_failures* are files whose ingestion already failed on exactly this
+    content. A failed ingest writes no tracking row, so without this every
+    scan would offer the same broken file again — for ever. They are skipped
+    while their content is unchanged, and picked up again the moment it is.
     """
     diff = SyncDiff()
+    known_failures = known_failures or {}
     seen_paths: set[str] = set()
     added_by_hash: dict[str, list[Path]] = {}  # hash → [new paths]
     # Cache hashes computed during the added/modified pass so we don't
@@ -494,7 +501,7 @@ def compute_diff(
         # skip the MD5. Without this, every scan re-reads the entire corpus —
         # which is what forced the scan interval up to minutes and left agent
         # edits undiscovered for that long.
-        tracked = indexed_files.get(rel)
+        tracked = indexed_files.get(rel) or known_failures.get(rel)
         if tracked is not None:
             try:
                 if probably_unchanged(fpath.stat(), tracked):
@@ -504,6 +511,13 @@ def compute_diff(
                 pass
 
         current_hash = compute_file_hash(fpath)
+
+        failed = known_failures.get(rel)
+        if failed is not None and failed.get("file_hash") == current_hash:
+            # Same bytes that failed to parse last time. Re-queueing it would
+            # only fail again and crowd out real work.
+            diff.unchanged += 1
+            continue
 
         if rel not in indexed_files:
             diff.added.append(fpath)
