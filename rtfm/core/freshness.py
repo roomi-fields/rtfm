@@ -295,10 +295,15 @@ def catch_up(db_path: str, project_root: str, budget: float) -> bool:
     if not wait_for(db_path, scan_ids, deadline - _time.monotonic()):
         return False
     # The scan only *discovers*; what it found still has to be ingested.
+    # Finding nothing to wait for here does **not** mean nothing happened —
+    # the ingest may simply have finished between the scan completing and
+    # this poll. A completed scan is reason enough to ask the question
+    # again; the query costs milliseconds, and treating the race as "no
+    # change" is how a correct index still answers "nothing found".
     found = pending_content_jobs(db_path)
-    if not found:
-        return False
-    return wait_for(db_path, found, deadline - _time.monotonic())
+    if found:
+        wait_for(db_path, found, deadline - _time.monotonic())
+    return True
 
 
 def _enqueue_scans(db_path: str, project_root: str) -> list[int]:

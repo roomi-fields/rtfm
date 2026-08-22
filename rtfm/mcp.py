@@ -180,10 +180,11 @@ def _catch_up_before_empty_answer() -> bool:
         lib = _get_library()
         project_root = Path(lib.db_path).resolve().parent.parent
         t0 = time.time()
-        moved = freshness.catch_up(str(lib.db_path), str(project_root), budget)
-        log("freshness", f"empty answer — caught up in {time.time() - t0:.2f}s, "
-                         f"index {'moved' if moved else 'unchanged'}")
-        return moved
+        caught_up = freshness.catch_up(str(lib.db_path), str(project_root), budget)
+        log("freshness", f"empty answer — catch-up "
+                         f"{'ran' if caught_up else 'skipped'} "
+                         f"in {time.time() - t0:.2f}s")
+        return caught_up
     except Exception:
         return False
 

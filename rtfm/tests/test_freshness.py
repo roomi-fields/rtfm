@@ -193,3 +193,24 @@ class TestReadRepair:
         assert freshness.refresh_wait_seconds() == 1.5
         monkeypatch.setenv("RTFM_FRESH_WAIT_SECONDS", "nonsense")
         assert freshness.refresh_wait_seconds() == freshness.DEFAULT_REFRESH_WAIT_SECONDS
+
+    def test_a_finished_scan_counts_even_if_the_ingest_already_drained(
+            self, tmp_path, monkeypatch):
+        """The race that made CI disagree with the developer's machine: if
+        the ingest completes between the scan finishing and the next poll,
+        there is nothing left to wait on — which must not be read as "the
+        index did not move", or a corrected index still answers "nothing"."""
+        from rtfm.core.library import Library
+
+        root = tmp_path / "proj"
+        (root / ".rtfm").mkdir(parents=True)
+        Library(root / ".rtfm" / "library.db").close()
+        from rtfm.config import save_config
+        save_config(root, {"corpus": "default"})
+
+        db = str(root / ".rtfm" / "library.db")
+        monkeypatch.setattr(freshness, "wait_for", lambda *a, **k: True)
+        monkeypatch.setattr(freshness, "pending_content_jobs",
+                            lambda _db: [])   # nothing left: already drained
+
+        assert freshness.catch_up(db, str(root), budget=1.0) is True
