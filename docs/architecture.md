@@ -343,3 +343,10 @@ A single project run as a whole obeys:
 ## Contributors
 
 Thanks to everyone who reported issues and tested RTFM.
+
+- **[@t0mmyf3rr3ira](https://github.com/t0mmyf3rr3ira)** — found that
+  `rtfm sync` stored a source's `--exclude` patterns and then scanned without
+  them ([#6](https://github.com/roomi-fields/rtfm/issues/6)), and traced it to
+  the two enqueue sites that built the same payload by hand. The diagnosis
+  named the fix: one shared description of a source, which turned out to
+  correct four callers rather than two. Fixed in 0.28.1.
