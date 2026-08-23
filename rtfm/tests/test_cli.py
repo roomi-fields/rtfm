@@ -305,3 +305,83 @@ class TestFailedRetry:
         lib = Library(db)
         assert list(lib.list_ingest_failures()) == ["c.md"]
         lib.close()
+
+
+class TestSourceSelectionRulesReachTheScan:
+    """Regression cover for issue #6 — ``rtfm sync`` stored the user's
+    ``--exclude`` patterns and then scanned without them, so every excluded
+    file was indexed anyway, with no warning. The reporter lost 312 files to
+    it on a 685-book index."""
+
+    def _scan_payloads(self, project):
+        q = Queue(str(project / ".rtfm" / "library.db"))
+        jobs = q.list_pending(limit=20)
+        q.close()
+        return [j.payload for j in jobs if j.type == "scan"]
+
+    def test_exclude_patterns_reach_the_scan_job(self, rtfm_project):
+        docs = rtfm_project / "docs"
+        docs.mkdir()
+        add_source(rtfm_project, str(docs), "docs", extensions="md",
+                   exclude=["data/*", ".agents/*"])
+
+        assert _run_cli("sync", "--background") == 0
+
+        payloads = self._scan_payloads(rtfm_project)
+        assert payloads, "no scan job enqueued"
+        assert payloads[0]["exclude"] == ["data/*", ".agents/*"]
+
+    def test_include_patterns_reach_the_scan_job(self, rtfm_project):
+        docs = rtfm_project / "docs"
+        docs.mkdir()
+        add_source(rtfm_project, str(docs), "docs", include=["*.bps", "-gr.*"])
+
+        assert _run_cli("sync", "--background") == 0
+
+        payloads = self._scan_payloads(rtfm_project)
+        assert payloads[0]["include"] == ["*.bps", "-gr.*"]
+
+    def test_narrowing_to_one_corpus_keeps_its_patterns(self, rtfm_project):
+        """`rtfm sync --corpus docs` narrows *which* source runs, never
+        which rules it runs with."""
+        docs = rtfm_project / "docs"
+        code = rtfm_project / "code"
+        docs.mkdir()
+        code.mkdir()
+        add_source(rtfm_project, str(docs), "docs", exclude=["data/*"])
+        add_source(rtfm_project, str(code), "code")
+
+        assert _run_cli("sync", "--background", "--corpus", "docs") == 0
+
+        payloads = self._scan_payloads(rtfm_project)
+        assert len(payloads) == 1
+        assert payloads[0]["corpus"] == "docs"
+        assert payloads[0]["exclude"] == ["data/*"]
+
+    def test_an_extension_override_still_honours_the_exclusions(
+            self, rtfm_project):
+        docs = rtfm_project / "docs"
+        docs.mkdir()
+        add_source(rtfm_project, str(docs), "docs", exclude=["data/*"])
+
+        assert _run_cli("sync", "--background", "--corpus", "docs",
+                        "--extensions", "md") == 0
+
+        payloads = self._scan_payloads(rtfm_project)
+        assert payloads[0]["extensions"] == "md"
+        assert payloads[0]["exclude"] == ["data/*"]
+
+    def test_the_sync_output_states_the_rules_it_applies(
+            self, rtfm_project, capsys):
+        """The failure was silent: an over-broad index looked exactly like a
+        successful sync. The applied rules are now on screen."""
+        docs = rtfm_project / "docs"
+        docs.mkdir()
+        add_source(rtfm_project, str(docs), "docs", extensions="md",
+                   exclude=["data/*"])
+
+        assert _run_cli("sync", "--background") == 0
+
+        out = capsys.readouterr().out
+        assert "ext=md" in out
+        assert "exclude=data/*" in out

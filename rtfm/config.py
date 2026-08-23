@@ -86,6 +86,93 @@ def save_config(project_root: Path, config: dict) -> None:
     )
 
 
+def build_scan_payload(
+    src: dict,
+    cfg: dict | None = None,
+    *,
+    force_remove: bool = False,
+    honor_gitignore: bool | None = None,
+) -> dict:
+    """Describe a configured source the way a ``scan`` job needs it.
+
+    The single place that turns a ``sources`` entry into a scan payload.
+    Four callers used to build this dict by hand and had drifted apart:
+    ``rtfm sync`` dropped ``include``/``exclude`` entirely, so patterns the
+    user had registered were silently ignored and excluded files got indexed
+    anyway (issue #6). Every enqueue site now goes through here, and a guard
+    test fails if a new one starts hand-rolling its own.
+
+    Two conventions matter beyond the field list:
+
+    * **Lexical paths only.** ``os.path.abspath``, never ``Path.resolve()``:
+      resolving stats every component, and one source on a dead network
+      mount then blocks the caller in uninterruptible I/O. The scan handler
+      resolves for real, in a worker thread, where blocking costs one lane.
+    * **Defaults are omitted, not written.** The queue deduplicates pending
+      jobs on the exact payload JSON, so a payload that spells out
+      ``extensions: null`` or ``honor_gitignore: true`` would fail to match
+      an identical job enqueued elsewhere. Emitting only what departs from
+      the handler's defaults makes the same source produce the same payload
+      from every caller.
+
+    Args:
+        src: A ``sources`` entry (``path``, ``corpus``, ``extensions``,
+            ``include``, ``exclude``, ``honor_gitignore``).
+        cfg: The project config, used only for the fallback corpus.
+        force_remove: Authorise a bulk delete for this run.
+        honor_gitignore: CLI-level override, applied only to sources that
+            do not state their own preference.
+
+    Returns:
+        The payload dict for a ``scan`` job.
+    """
+    cfg = cfg or {}
+    payload: dict = {
+        "root": os.path.abspath(src.get("path", ".")),
+        "corpus": src.get("corpus") or cfg.get("corpus") or "default",
+    }
+    if src.get("extensions"):
+        payload["extensions"] = src["extensions"]
+    if src.get("include"):
+        payload["include"] = list(src["include"])
+    if src.get("exclude"):
+        payload["exclude"] = list(src["exclude"])
+
+    effective_gitignore = src.get("honor_gitignore")
+    if effective_gitignore is None:
+        effective_gitignore = honor_gitignore
+    if effective_gitignore is False:
+        payload["honor_gitignore"] = False
+
+    if force_remove:
+        payload["force_remove"] = True
+    return payload
+
+
+def describe_selection(payload: dict) -> str:
+    """One-line summary of the selection rules a scan payload applies.
+
+    An over-broad index used to look exactly like a successful sync: nothing
+    in the output said which rules had been applied, so a dropped pattern was
+    invisible until you queried the database for paths you thought you had
+    excluded. Printing the rules makes that class of failure self-reporting.
+
+    Returns:
+        A summary such as ``ext=md exclude=data/*,.agents/*``, or ``"all
+        text"`` when the source restricts nothing.
+    """
+    bits = []
+    if payload.get("extensions"):
+        bits.append(f"ext={payload['extensions']}")
+    if payload.get("include"):
+        bits.append("include=" + ",".join(payload["include"]))
+    if payload.get("exclude"):
+        bits.append("exclude=" + ",".join(payload["exclude"]))
+    if payload.get("honor_gitignore") is False:
+        bits.append("gitignore off")
+    return " ".join(bits) if bits else "all text"
+
+
 def add_source(
     project_root: Path,
     path: str,

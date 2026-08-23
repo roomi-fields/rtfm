@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
-from rtfm.config import resolve_db
+from rtfm.config import build_scan_payload, describe_selection, resolve_db
 from rtfm.core.library import Library
 
 
@@ -1464,14 +1465,9 @@ def cmd_doctor(args):
     try:
         enqueued: set[int] = set()
         for src in sources:
-            src_path = Path(src.get("path", ".")).resolve()
-            src_corpus = src.get("corpus", "default")
-            if not src_path.is_dir():
+            payload = build_scan_payload(src)
+            if not Path(payload["root"]).is_dir():
                 continue
-            payload: dict = {"root": str(src_path), "corpus": src_corpus,
-                             "force_remove": False}
-            if src.get("extensions"):
-                payload["extensions"] = src["extensions"]
             jid = queue.enqueue("scan", payload, priority=P_USER)
             if jid is not None:
                 enqueued.add(jid)
@@ -1680,16 +1676,19 @@ def cmd_status(args):
                 pending_added = pending_modified = pending_removed = 0
                 print("  (scanning sources, may take a moment)...")
                 for src in sources:
-                    src_path = Path(src.get("path", ".")).resolve()
-                    src_corpus = src.get("corpus", "default")
+                    payload = build_scan_payload(src, cfg)
                     ext_set = None
-                    if src.get("extensions"):
+                    if payload.get("extensions"):
                         ext_set = {e.strip() if e.strip().startswith(".") else f".{e.strip()}"
-                                   for e in src["extensions"].split(",")}
+                                   for e in payload["extensions"].split(",")}
                     try:
                         qd = quick_diff(
-                            library=lib, root=src_path, corpus=src_corpus,
+                            library=lib, root=Path(payload["root"]),
+                            corpus=payload["corpus"],
                             extensions=ext_set,
+                            honor_gitignore=payload.get("honor_gitignore", True),
+                            include=payload.get("include"),
+                            exclude=payload.get("exclude"),
                         )
                         pending_added += len(qd.added)
                         pending_modified += len(qd.modified)
@@ -1779,11 +1778,29 @@ def _resolve_sources(rtfm_root: Path, args) -> list[dict]:
     explicit_corpus = getattr(args, "corpus", None)
     explicit_ext = getattr(args, "extensions", None)
     if explicit_path or explicit_corpus or explicit_ext:
-        return [{
-            "path": str(Path(explicit_path or ".").resolve()),
+        cfg = load_config(rtfm_root)
+        want = os.path.abspath(explicit_path) if explicit_path else None
+        matched = [
+            s for s in (cfg.get("sources") or [])
+            if (want is None
+                or os.path.abspath(s.get("path", ".")) == want)
+            and (explicit_corpus is None or s.get("corpus") == explicit_corpus)
+        ]
+        # Narrowing a registered source must not discard the rules it was
+        # registered with: `rtfm sync --corpus docs` on a source that excludes
+        # `data/*` still excludes it. Only `--extensions` overrides.
+        if matched and not explicit_ext:
+            return matched
+        override: dict = {
+            "path": os.path.abspath(explicit_path or "."),
             "corpus": explicit_corpus or "default",
             "extensions": explicit_ext,
-        }]
+        }
+        if len(matched) == 1:
+            for key in ("include", "exclude", "honor_gitignore"):
+                if matched[0].get(key) is not None:
+                    override[key] = matched[0][key]
+        return [override]
 
     cfg = load_config(rtfm_root)
     sources = cfg.get("sources") or [
@@ -1964,26 +1981,16 @@ def cmd_sync(args):
     sources = _resolve_sources(rtfm_root, args)
     scan_payloads: list[dict] = []
     for src in sources:
-        src_path = Path(src.get("path", ".")).resolve()
-        src_corpus = src.get("corpus", "default")
-        if not src_path.is_dir():
-            print(f"  ! [{src_corpus}] {src_path} (path missing — skipped)")
+        # Per-source honor_gitignore takes precedence over the CLI flag;
+        # `--no-gitignore` only applies to sources that state no preference.
+        payload = build_scan_payload(
+            src, force_remove=force_remove,
+            honor_gitignore=False if no_gitignore else None,
+        )
+        if not Path(payload["root"]).is_dir():
+            print(f"  ! [{payload['corpus']}] {payload['root']} "
+                  f"(path missing — skipped)")
             continue
-        payload: dict = {
-            "root": str(src_path),
-            "corpus": src_corpus,
-            "force_remove": force_remove,
-        }
-        if src.get("extensions"):
-            payload["extensions"] = src["extensions"]
-        # Per-source honor_gitignore takes precedence over the CLI flag.
-        # Explicit `--no-gitignore` on the CLI overrides sources that
-        # didn't set the field (they default to True upstream).
-        src_hg = src.get("honor_gitignore")
-        if src_hg is not None:
-            payload["honor_gitignore"] = bool(src_hg)
-        elif no_gitignore:
-            payload["honor_gitignore"] = False
         scan_payloads.append(payload)
 
     if not scan_payloads:
@@ -1993,8 +2000,7 @@ def cmd_sync(args):
     if dry_run:
         print(f"[dry-run] would enqueue {len(scan_payloads)} P0 scan job(s):")
         for p in scan_payloads:
-            ext = f"  ext={p['extensions']}" if p.get("extensions") else ""
-            print(f"  [{p['corpus']}] {p['root']}{ext}")
+            print(f"  [{p['corpus']}] {p['root']}  {describe_selection(p)}")
         return
 
     queue = Queue(db_path)
@@ -2006,6 +2012,10 @@ def cmd_sync(args):
                 enqueued_ids.add(jid)
         print(f"Queued {len(enqueued_ids)} P0 scan job(s) "
               f"({len(scan_payloads) - len(enqueued_ids)} already pending).")
+        # Say which selection rules each scan carries. An over-broad index
+        # otherwise looks exactly like a successful sync (issue #6).
+        for p in scan_payloads:
+            print(f"  [{p['corpus']}] {p['root']}  {describe_selection(p)}")
         ensure_worker_running(rtfm_dir)
         sys.exit(_watch_jobs(
             queue, enqueued_ids,
@@ -2108,7 +2118,6 @@ def cmd_sources(args):
 
 def cmd_serve(args):
     """Start the RTFM MCP server."""
-    import os
     db = resolve_db(args.db)
     os.environ["RTFM_DB"] = db
     print(f"Starting RTFM MCP server (db: {db}) ...", file=sys.stderr)

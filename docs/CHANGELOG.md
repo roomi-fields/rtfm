@@ -7,6 +7,43 @@ description: >-
 
 # Changelog
 
+## [0.28.1] — 2026-08-23
+
+### Fixed — `rtfm sync` obeys the selection rules you registered
+
+A source registered with `--exclude` (or `--include`) kept its patterns in the
+project configuration, and `rtfm sync` scanned without them. Every excluded
+path was indexed anyway, with no warning and no error — on the index that
+surfaced the bug, 312 files that had been explicitly excluded. The periodic
+scan honoured the patterns, so this only bit projects driven by hand, with the
+edit hook off. Reported in [#6](https://github.com/roomi-fields/rtfm/issues/6),
+with a diagnosis precise enough to fix from.
+
+The cause was four places describing a source by hand for the scan they
+enqueue: the supervisor, the read-repair path, `rtfm sync` and `rtfm doctor`.
+They had drifted — one dropped the patterns, another the gitignore preference,
+a third both. There is now a single description used by all four, and a guard
+that fails the build if a fifth caller starts writing its own.
+
+Consequences beyond the reported bug:
+
+- **Narrowing no longer widens.** `rtfm sync --corpus docs` runs *which*
+  source you asked for, with the rules it was registered with, instead of
+  reconstructing a rule-free source of the same name.
+- **Health checks agree with reality.** `rtfm status --health` applied no
+  patterns either, so it counted excluded files as "not yet indexed" and sent
+  you to a sync that would never index them.
+- **Fewer redundant scans.** Payloads that differed only in how they spelled a
+  default could not match each other, so the queue deduplicated less than it
+  should.
+
+### Changed — a sync says what it selected
+
+The failure above was invisible: an over-broad index looks exactly like a
+successful sync. `rtfm sync` now prints the rules each scan carries —
+`[docs] /path/to/project  ext=md exclude=data/*,.agents/*` — so a dropped
+pattern shows up on screen instead of in a database query weeks later.
+
 ## [0.28.0] — 2026-08-21
 
 ### Added — a read repairs the index before answering

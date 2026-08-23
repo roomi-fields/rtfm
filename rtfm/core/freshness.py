@@ -317,9 +317,8 @@ def _enqueue_scans(db_path: str, project_root: str) -> list[int]:
     """
     try:
         import json
-        import os as _os
 
-        from rtfm.config import load_config
+        from rtfm.config import build_scan_payload, load_config
         from rtfm.core.queue import Queue, P_USER
 
         if Path(db_path).parent.name != ".rtfm":
@@ -335,15 +334,7 @@ def _enqueue_scans(db_path: str, project_root: str) -> list[int]:
         try:
             ids = []
             for src in sources:
-                payload = {
-                    "root": _os.path.abspath(src.get("path", ".")),
-                    "corpus": src.get("corpus", cfg.get("corpus", "default")),
-                    "extensions": src.get("extensions") or None,
-                }
-                if src.get("include"):
-                    payload["include"] = list(src["include"])
-                if src.get("exclude"):
-                    payload["exclude"] = list(src["exclude"])
+                payload = build_scan_payload(src, cfg)
                 job_id = q.enqueue("scan", payload, priority=P_USER)
                 if job_id is None:
                     row = q._get_conn().execute(

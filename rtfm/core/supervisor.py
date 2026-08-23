@@ -704,7 +704,7 @@ class Supervisor:
         already pending is silently dropped.
         """
         try:
-            from rtfm.config import load_config
+            from rtfm.config import build_scan_payload, load_config
             try:
                 cfg = load_config(slot.rtfm_dir.parent)
             except Exception:
@@ -714,27 +714,14 @@ class Supervisor:
                  "corpus": cfg.get("corpus", "default")}
             ]
             for src in sources:
-                # Lexical only — never touch the filesystem here. ``resolve()``
+                # ``build_scan_payload`` is lexical by contract — it never
+                # touches the filesystem. That matters most here: ``resolve()``
                 # stats every path component, and one source on an unreachable
-                # network mount then blocks this thread in uninterruptible I/O,
+                # network mount would block this thread in uninterruptible I/O,
                 # freezing dispatch, reaping and scheduling for *every* project
                 # (observed: the whole fleet stalled on a 9p mount while twelve
-                # jobs sat finished and unreaped). The scan handler resolves the
-                # root for real, in a pool thread, where blocking costs one lane
-                # instead of the machine.
-                src_path = os.path.abspath(src.get("path", "."))
-                payload = {
-                    "root": src_path,
-                    "corpus": src.get("corpus", cfg.get("corpus", "default")),
-                    "extensions": src.get("extensions") or None,
-                }
-                if src.get("honor_gitignore") is not None:
-                    payload["honor_gitignore"] = bool(src["honor_gitignore"])
-                if src.get("include"):
-                    payload["include"] = list(src["include"])
-                if src.get("exclude"):
-                    payload["exclude"] = list(src["exclude"])
-                slot.queue.enqueue("scan", payload)
+                # jobs sat finished and unreaped).
+                slot.queue.enqueue("scan", build_scan_payload(src, cfg))
         except Exception as exc:
             slot.log(f"scan enqueue error: {exc}")
 

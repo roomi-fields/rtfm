@@ -412,6 +412,9 @@ def quick_diff(
     corpus: str,
     extensions: set[str] | None = None,
     exclude_dirs: set[str] | None = None,
+    honor_gitignore: bool = True,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> SyncDiff:
     """Cheap diff used for status reporting — no MD5, just path + stat.
 
@@ -425,7 +428,12 @@ def quick_diff(
     ``indexed_files``).
     """
     diff = SyncDiff()
-    files_on_disk = scan_directory(root, extensions, exclude_dirs)
+    # Same selection rules as the real scan: a health check that ignored the
+    # source's include/exclude would report every excluded file as "not yet
+    # indexed" and send the user to a sync that will never index it.
+    files_on_disk = scan_directory(root, extensions, exclude_dirs,
+                                   honor_gitignore=honor_gitignore,
+                                   include=include, exclude=exclude)
     indexed = library.list_indexed_files(corpus=corpus)
 
     seen_paths: set[str] = set()

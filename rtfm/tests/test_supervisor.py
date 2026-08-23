@@ -90,7 +90,10 @@ def test_enqueue_scans_one_per_source(tmp_path: Path):
             by_corpus = {j.payload["corpus"]: j for j in scans}
             assert set(by_corpus) == {"alpha", "beta"}
             assert by_corpus["alpha"].payload["extensions"] == ".md,.py"
-            assert by_corpus["beta"].payload["extensions"] is None
+            # A source that restricts nothing says nothing: the queue
+            # deduplicates on the payload JSON, so spelling out defaults
+            # would stop identical scans from matching each other.
+            assert "extensions" not in by_corpus["beta"].payload
         finally:
             q.close()
     finally:

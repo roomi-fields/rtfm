@@ -185,3 +185,138 @@ class TestListSources:
         add_source(tmp_path, "/path/b", "b")
         sources = list_sources(tmp_path)
         assert len(sources) == 2
+
+
+class TestScanPayloadHasOneAuthor:
+    """Issue #6 came from four modules describing a source by hand and
+    drifting apart: ``rtfm sync`` silently dropped the user's include/exclude
+    patterns while the periodic scan honoured them. These guards fail if a
+    caller starts hand-rolling a scan payload again."""
+
+    def test_no_module_hand_builds_a_scan_payload(self):
+        """Every ``enqueue("scan", ...)`` must pass a payload that came from
+        :func:`build_scan_payload`."""
+        import ast
+
+        import rtfm
+
+        pkg_root = Path(rtfm.__file__).parent
+        offenders = []
+        for path in sorted(pkg_root.rglob("*.py")):
+            if "tests" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            blessed = {
+                target.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Call)
+                and getattr(node.value.func, "id", None) == "build_scan_payload"
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            }
+            # Follow one hop of collection: payloads are often gathered in a
+            # list (to be printed, counted, dry-run) before being enqueued.
+            collections = {
+                node.func.value.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "attr", None) == "append"
+                and isinstance(getattr(node.func, "value", None), ast.Name)
+                and node.args
+                and ((isinstance(node.args[0], ast.Name)
+                      and node.args[0].id in blessed)
+                     or (isinstance(node.args[0], ast.Call)
+                         and getattr(node.args[0].func, "id", None)
+                         == "build_scan_payload"))
+            }
+            blessed |= {
+                node.target.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.For)
+                and isinstance(node.target, ast.Name)
+                and isinstance(node.iter, ast.Name)
+                and node.iter.id in collections
+            }
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if getattr(node.func, "attr", None) != "enqueue":
+                    continue
+                if not node.args or not isinstance(node.args[0], ast.Constant):
+                    continue
+                if node.args[0].value != "scan" or len(node.args) < 2:
+                    continue
+                payload = node.args[1]
+                built = (
+                    isinstance(payload, ast.Call)
+                    and getattr(payload.func, "id", None) == "build_scan_payload"
+                ) or (
+                    isinstance(payload, ast.Name) and payload.id in blessed
+                )
+                if not built:
+                    offenders.append(
+                        f"{path.relative_to(pkg_root)}:{node.lineno}")
+        assert not offenders, (
+            "scan payload built by hand instead of build_scan_payload: "
+            + ", ".join(offenders))
+
+    def test_every_enqueue_site_describes_a_source_identically(self, tmp_path):
+        """The supervisor, the read-repair path and ``rtfm sync`` must send
+        byte-identical payloads for the same source — the queue deduplicates
+        on the payload JSON, so a field that only one of them spells out also
+        costs a redundant scan."""
+        from unittest.mock import patch
+
+        from rtfm.config import build_scan_payload
+        from rtfm.core import freshness
+        from rtfm.core.library import Library
+        from rtfm.core.queue import Queue
+
+        root = tmp_path / "proj"
+        docs = root / "docs"
+        docs.mkdir(parents=True)
+        (root / ".rtfm").mkdir()
+        db = root / ".rtfm" / "library.db"
+        Library(str(db)).close()
+        add_source(root, str(docs), "docs", extensions="md",
+                   exclude=["data/*"], include=["*.md"])
+
+        cfg = load_config(root)
+        src = cfg["sources"][0]
+        reference = build_scan_payload(src, cfg)
+        assert reference["exclude"] == ["data/*"]
+
+        # The read-repair path, for real.
+        freshness._enqueue_scans(str(db), str(root))
+        q = Queue(str(db))
+        try:
+            queued = [j.payload for j in q.list_pending(limit=10)
+                      if j.type == "scan"]
+        finally:
+            q.close()
+        assert queued == [reference]
+
+        # And the CLI, whose divergence was the reported bug.
+        cwd = os.getcwd()
+        os.chdir(root)
+        try:
+            from rtfm.cli import main
+            with patch("rtfm.cli_worker.ensure_worker_running",
+                       return_value=42424), \
+                 patch("sys.argv", ["rtfm", "sync", "--background"]):
+                try:
+                    main()
+                except SystemExit:
+                    pass
+        finally:
+            os.chdir(cwd)
+
+        q = Queue(str(db))
+        try:
+            scans = [j.payload for j in q.list_pending(limit=10)
+                     if j.type == "scan"]
+        finally:
+            q.close()
+        # Identical payload → the queue deduplicated it, one job still.
+        assert scans == [reference]
