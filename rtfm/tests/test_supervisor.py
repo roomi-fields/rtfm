@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -783,3 +784,125 @@ class TestProgressiveOpening:
         finally:
             sup._opener.shutdown(wait=False)
             sup._pool.shutdown(wait=False)
+
+
+class TestStrandedClaims:
+    """A ``running`` row is a promise that something is working on it. When
+    that stops being true and nobody notices, the file is silently never
+    indexed. Twenty-six rows sat that way for up to fifty hours on a live,
+    healthy, busy supervisor — because the only reclaim ran at startup."""
+
+    def _count(self, slot, status: str) -> int:
+        row = slot.queue._get_conn().execute(
+            "SELECT COUNT(*) FROM work_queue WHERE status = ?", (status,)
+        ).fetchone()
+        return row[0]
+
+    def _project(self, tmp_path: Path) -> Path:
+        rtfm_dir = tmp_path / "proj" / ".rtfm"
+        src = tmp_path / "src"
+        src.mkdir()
+        _write_config(rtfm_dir, [{"path": str(src), "corpus": "default"}])
+        Library(str(rtfm_dir / "library.db")).close()
+        return rtfm_dir
+
+    def test_a_claim_nobody_runs_is_returned_to_the_queue(self, tmp_path):
+        rtfm_dir = self._project(tmp_path)
+        sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
+        try:
+            _sync(sup)
+            slot = _only_slot(sup)
+            slot.queue.enqueue("ingest", {"f": "stranded"})
+            job = slot.queue.dequeue()            # claimed…
+            assert self._count(slot, "running") == 1
+            # …and nothing in _inflight is running it. That is the whole bug.
+            assert not sup._inflight
+
+            sup._sweep_stale_claims()
+
+            assert self._count(slot, "running") == 0
+            assert self._count(slot, "pending") == 1
+            assert slot.queue.dequeue().id == job.id
+        finally:
+            sup._shutdown()
+
+    def test_the_sweep_never_touches_a_job_actually_in_flight(self, tmp_path):
+        """The sweep runs every minute against live projects, so a false
+        positive would requeue running work and index the same file twice."""
+        rtfm_dir = self._project(tmp_path)
+        sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
+        try:
+            _sync(sup)
+            slot = _only_slot(sup)
+            slot.queue.enqueue("ingest", {"f": "live"})
+            slot.queue.enqueue("ingest", {"f": "stranded"})
+            live = slot.queue.dequeue()
+            slot.queue.dequeue()
+
+            # Stand in for a dispatched job: present in _inflight, unfinished.
+            fut: Future = Future()
+            sup._inflight[fut] = (slot, live)
+
+            sup._sweep_stale_claims()
+
+            assert self._count(slot, "running") == 1, "the live job was reaped"
+            assert self._count(slot, "pending") == 1
+            sup._inflight.pop(fut)
+        finally:
+            sup._shutdown()
+
+    def test_a_failed_submit_hands_the_claim_back(self, tmp_path):
+        """``dequeue`` marks the row running before the future exists. If the
+        submit raises in between, the row belongs to nobody."""
+        rtfm_dir = self._project(tmp_path)
+        sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
+        try:
+            _sync(sup)
+            slot = _only_slot(sup)
+            slot.queue.enqueue("ingest", {"f": "doomed"})
+
+            class _RefusingPool:
+                def submit(self, *a, **k):
+                    raise RuntimeError("cannot schedule new futures")
+
+            sup._pool = _RefusingPool()
+            sup._dispatch()
+
+            assert self._count(slot, "running") == 0, \
+                "claim left dangling after submit"
+            assert self._count(slot, "pending") == 1
+        finally:
+            sup._pool = ThreadPoolExecutor(max_workers=1)
+            sup._shutdown()
+
+    def test_a_close_that_cannot_be_written_is_reported_not_swallowed(
+            self, tmp_path):
+        """The closing write is what releases a claim. Losing it silently is
+        how a row stays running forever with nothing in any log."""
+        rtfm_dir = self._project(tmp_path)
+        lines: list[str] = []
+        sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
+        try:
+            _sync(sup)
+            slot = _only_slot(sup)
+            slot.log = lines.append
+            slot.queue.enqueue("ingest", {"f": "unclosable"})
+            job = slot.queue.dequeue()
+
+            def _refuse(*a, **k):
+                raise sqlite3.OperationalError("database is locked")
+
+            slot.queue.mark_done = _refuse
+            fut: Future = Future()
+            fut.set_result(None)
+            sup._inflight[fut] = (slot, job)
+
+            sup._reap_finished()
+
+            assert any("mark_done failed after 3 tries" in ln for ln in lines), \
+                f"the lost close left no trace: {lines}"
+            # And the sweep is what actually repairs it.
+            sup._sweep_stale_claims()
+            assert self._count(slot, "pending") == 1
+        finally:
+            sup._shutdown()

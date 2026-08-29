@@ -238,6 +238,12 @@ P_USER_RESERVED_LANES = 2
 #: and how often it looks. A healthy step is milliseconds; anything near a
 #: minute means the loop is stuck on something outside its control.
 STALL_WARN_SECONDS = 30.0
+
+#: How often to check every project for ``running`` rows the supervisor is
+#: not actually running. Cheap (one indexed UPDATE per project, almost always
+#: matching nothing), so it can run often enough that a lost claim costs a
+#: minute rather than the rest of the daemon's life.
+CLAIM_SWEEP_SECONDS = 60.0
 STALL_POLL_SECONDS = 5.0
 
 #: How many project databases are integrity-checked at once when they join.
@@ -284,9 +290,10 @@ class _Slot:
         rebuilt = ensure_healthy_db(self.db_path, log=self.log)
         self.queue = Queue(self.db_path)
         # Reap zombies left by a previous supervisor/worker that died
-        # mid-job — every ``running`` row is orphaned now.
+        # mid-job. Nothing can legitimately be in flight at boot, so every
+        # ``running`` row is a stale claim — keep_ids stays empty.
         try:
-            self.queue.reap_zombies(rtfm_dir=None)
+            self.queue.reap_zombies()
         except Exception as exc:  # pragma: no cover - defensive
             log(f"{self.rtfm_dir.parent.name}: boot reap error: {exc}")
         return rebuilt
@@ -334,6 +341,9 @@ class Supervisor:
         self._pool = ThreadPoolExecutor(
             max_workers=self._max_concurrent + P_USER_RESERVED_LANES)
         self._inflight: dict[Future, tuple[_Slot, Job]] = {}
+        # First sweep happens on the first tick, not a minute in: a claim
+        # stranded by the previous incarnation should not outlive boot.
+        self._next_claim_sweep = 0.0
 
         self._stop = False
         self._auto_respawn = False
@@ -369,6 +379,8 @@ class Supervisor:
                     self._collect_opened()
                 with self._step("reap"):
                     self._reap_finished()
+                with self._step("sweep-claims"):
+                    self._sweep_stale_claims()
                 with self._step("enqueue-periodic"):
                     self._enqueue_periodic()
                 with self._step("dispatch"):
@@ -599,10 +611,23 @@ class Supervisor:
                 # dispatcher makes this unexpected; skip the slot this pass.
                 skip.add(id(best_slot))
                 continue
+            # From here the row says 'running'. Until the future exists,
+            # nothing is running it — so a failed submit must hand the claim
+            # back rather than leave a row no one will ever finish.
+            try:
+                fut = self._pool.submit(self._run_job, best_slot, job)
+            except Exception as exc:
+                self._log(f"{best_slot.rtfm_dir.parent.name}: submit error "
+                          f"on job#{job.id}: {exc}")
+                try:
+                    best_slot.queue.mark_pending(job.id)
+                except Exception:
+                    pass  # the claim sweep will pick it up
+                skip.add(id(best_slot))
+                continue
             best_slot.inflight += 1
             if job.type in EXCLUSIVE_JOB_TYPES:
                 best_slot.exclusive = True
-            fut = self._pool.submit(self._run_job, best_slot, job)
             self._inflight[fut] = (best_slot, job)
             dispatched = True
         return dispatched
@@ -657,24 +682,89 @@ class Supervisor:
             slot.inflight = max(0, slot.inflight - 1)
             if job.type in EXCLUSIVE_JOB_TYPES:
                 slot.exclusive = False
+            # BaseException too: a job popped from _inflight owes the queue a
+            # closing write, and letting anything escape here strands the row
+            # for good — the pop already happened.
             try:
                 fut.result()
-            except Exception as exc:
+            except BaseException as exc:
                 tb = traceback.format_exc(limit=20)
-                try:
-                    slot.queue.mark_failed(job.id, f"{type(exc).__name__}: {exc}\n{tb}")
-                except Exception:
-                    pass
+                self._close(slot, job, "mark_failed",
+                            f"{type(exc).__name__}: {exc}\n{tb}")
                 slot.jobs_failed += 1
                 self._jobs_failed += 1
                 slot.log(f"job#{job.id} {job.type} FAILED: {exc}")
                 continue
-            try:
-                slot.queue.mark_done(job.id)
-            except Exception as exc:  # pragma: no cover - defensive
-                slot.log(f"job#{job.id} {job.type} mark_done error: {exc}")
+            self._close(slot, job, "mark_done")
             slot.jobs_done += 1
             self._jobs_done += 1
+
+    def _close(self, slot: _Slot, job: Job, how: str, *args) -> None:
+        """Write a finished job's terminal state, and say so if we cannot.
+
+        The closing write is the only thing that releases a claim. It used to
+        be best-effort — ``mark_failed`` swallowed its exception entirely and
+        ``mark_done`` logged one and moved on — so a write lost to a locked
+        database left the row ``running`` forever with no trace in any log.
+        A lost close is now loud, and the claim sweep repairs it within the
+        minute instead of at the next restart.
+        """
+        for attempt in range(3):
+            try:
+                getattr(slot.queue, how)(job.id, *args)
+                return
+            except Exception as exc:
+                if attempt == 2:
+                    slot.log(f"job#{job.id} {job.type}: {how} failed after "
+                             f"3 tries ({exc}) — the claim sweep will "
+                             f"requeue it")
+                    return
+                time.sleep(0.2 * (attempt + 1))
+
+    def _sweep_stale_claims(self) -> None:
+        """Return ``running`` rows this supervisor is not actually running.
+
+        A ``running`` row is a claim, and the claim is only true while the
+        job sits in ``self._inflight``. Everything that can break that link
+        — a dispatch that raised after the row was already claimed, a closing
+        write that failed, a pool thread killed under us — leaves a row no
+        one will ever finish. Nothing retried those rows and nothing reported
+        them: the file was silently never indexed.
+
+        Until now the only reclaim ran at ``slot.open``, so a claim lost at
+        11:50 on Thursday stayed lost until the daemon next restarted. On this
+        machine that meant twenty-six files stranded for up to fifty hours
+        under a supervisor that was up, healthy and busy the whole time.
+
+        The sweep is cheap because it is exact: we know our own live job ids,
+        so the query touches nothing else and normally matches zero rows.
+        """
+        now = time.monotonic()
+        if now < self._next_claim_sweep:
+            return
+        self._next_claim_sweep = now + CLAIM_SWEEP_SECONDS
+
+        live: dict[int, set[int]] = {}
+        for slot, job in self._inflight.values():
+            live.setdefault(id(slot), set()).add(job.id)
+
+        for slot in self._slots.values():
+            if slot.queue is None:
+                continue
+            try:
+                result = slot.queue.reap_zombies(live.get(id(slot)) or set())
+            except Exception as exc:
+                slot.log(f"claim sweep error: {exc}")
+                continue
+            lost = result["requeued"] + result["failed"] + result["deduped"]
+            if lost:
+                slot.log(
+                    f"claim sweep: {lost} job(s) were marked running with "
+                    f"nothing running them — {result['requeued']} requeued, "
+                    f"{result['failed']} failed, {result['deduped']} dropped "
+                    f"as duplicates")
+                self._log(f"{slot.rtfm_dir.parent.name}: recovered {lost} "
+                          f"stranded job(s)")
 
     # ── periodic scan / reconcile (staggered) ────────────────────────────
 

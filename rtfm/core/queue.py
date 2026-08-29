@@ -488,60 +488,62 @@ class Queue:
 
     def reap_zombies(
         self,
-        rtfm_dir=None,
+        keep_ids: "Optional[set[int]]" = None,
         *,
         max_age_seconds: int = 3 * 3600,
         max_attempts: int = 3,
     ) -> dict[str, int]:
-        """Reset ``running`` rows whose worker is gone (or stuck) back to
-        the queue.
+        """Return ``running`` rows nobody is actually working on to the queue.
 
-        A row is considered a zombie if any of these hold:
+        A ``running`` row is a claim: some executor said "this is mine" and
+        owes the queue a closing write. When that write never comes — the
+        process died, the dispatch raised after the claim, the closing write
+        itself failed — the row is stranded. Nothing retries it and nothing
+        reports it: the file is silently never indexed. Twenty-six rows once
+        sat this way for up to fifty hours under a live supervisor.
 
-        - no worker process is alive for this project, OR
-        - a worker is alive but its ``current_job_id`` is not this row's id,
-          OR
-        - ``started_at`` is older than ``max_age_seconds`` (deadlock fallback,
-          fires even when the worker claims to be on the job).
+        *keep_ids* is the caller's honest answer to "what am I still running?"
+        Everything else in ``running`` is a zombie. ``None`` protects nothing,
+        which is what a fresh start wants: at boot no job can legitimately be
+        in flight, so every claim is stale by definition.
+
+        Kept ids are not protected forever — one older than *max_age_seconds*
+        is reaped anyway. An executor that has held a claim for hours is a
+        deadlock, not a worker, and the alternative is a job that never moves
+        again.
+
+        This replaced a single-``keep_id`` design read from the per-project
+        worker's state file. The supervisor runs a dozen jobs per project at
+        once and never wrote that file, so it could only ever say "keep
+        nothing" — safe at boot and unusable afterwards. That is why the
+        stranded rows survived: there was no way to express the running
+        fleet's actual claims, so no sweep could run while it mattered.
 
         Behaviour:
 
-        - Zombies with ``attempts >= max_attempts`` are marked ``failed`` with
-          a descriptive error — protects against an infinite crash-loop on a
-          single poisonous file.
-        - Other zombies go back to ``pending``; ``started_at``/``finished_at``
-          are cleared. ``attempts`` is left untouched so the next ``dequeue``
-          increments it normally.
+        - Zombies at or past *max_attempts* are marked ``failed`` — a
+          poisonous file must not crash-loop forever.
+        - Duplicates are dropped rather than requeued, so the partial unique
+          index on pending rows still holds.
+        - The rest go back to ``pending`` with ``started_at`` cleared.
 
-        ``rtfm_dir`` lets the reaper consult the worker's on-disk state (the
-        single ``current_job_id`` it's actually working on). When ``None``,
-        every ``running`` row is treated as a zombie.
-
-        Returns ``{"requeued": N, "failed": M}``.
+        Returns ``{"requeued": N, "failed": M, "deduped": K}``.
         """
-        # Determine which job, if any, the live worker is currently on.
-        keep_id: Optional[int] = None
-        if rtfm_dir is not None:
-            try:
-                # Imported lazily to avoid a queue→worker cycle at import.
-                from rtfm.core.worker import read_state, pid_alive  # noqa: WPS433
-                state = read_state(rtfm_dir)
-                if state and pid_alive(state.pid) and state.current_job_id:
-                    keep_id = int(state.current_job_id)
-            except Exception:
-                keep_id = None
-
-        # The deadlock fallback: even a job the worker claims to own is
-        # reaped if it's been "running" for absurdly long.
-        cutoff_sql = (
-            "datetime('now', ?)"
-        )
+        keep = sorted(keep_ids or ())
+        cutoff_sql = "datetime('now', ?)"
         cutoff_arg = f"-{int(max_age_seconds)} seconds"
 
-        keep_clause = "AND id != ?" if keep_id is not None else ""
-        params_failed: list = [max_attempts]
-        if keep_id is not None:
-            params_failed.append(keep_id)
+        # "Not mine, or mine but stuck long past any plausible run."
+        if keep:
+            marks = ",".join("?" * len(keep))
+            zombie_sql = f"(id NOT IN ({marks}) OR started_at < {cutoff_sql})"
+            zombie_args: list = [*keep, cutoff_arg]
+            zombie_sql_z = (f"(z.id NOT IN ({marks}) "
+                            f"OR z.started_at < {cutoff_sql})")
+        else:
+            zombie_sql = "1"
+            zombie_args = []
+            zombie_sql_z = "1"
 
         conn = self._get_conn()
 
@@ -553,23 +555,15 @@ class Queue:
                     error = 'reaped: exceeded retry limit after worker crash'
                 WHERE status = 'running'
                   AND attempts >= ?
-                  {keep_clause}
+                  AND {zombie_sql}
             """,
-            params_failed,
+            [max_attempts, *zombie_args],
         )
         failed_count = cur.rowcount
 
-        # Step 2: remaining zombies → pending. Combines "worker not on it"
-        # with the deadlock fallback in one statement.
-        # First, drop zombies that would violate the dedup index after
-        # requeuing — either because an identical pending row exists, or
-        # because several zombies share the same (type, payload).
-        if keep_id is not None:
-            zombie_filter = f"AND (z.id != ? OR z.started_at < {cutoff_sql})"
-            zombie_params: list = [keep_id, cutoff_arg]
-        else:
-            zombie_filter = ""
-            zombie_params = []
+        # Step 2: remaining zombies → pending. First drop the ones that would
+        # violate the dedup index on requeue — either an identical pending row
+        # already exists, or several zombies share one (type, payload).
 
         # 2a) zombies whose twin is already pending
         cur = conn.execute(
@@ -577,7 +571,7 @@ class Queue:
                 WHERE id IN (
                     SELECT z.id FROM work_queue z
                     WHERE z.status = 'running'
-                      {zombie_filter}
+                      AND {zombie_sql_z}
                       AND EXISTS (
                           SELECT 1 FROM work_queue p
                           WHERE p.status = 'pending'
@@ -586,7 +580,7 @@ class Queue:
                       )
                 )
             """,
-            zombie_params,
+            zombie_args,
         )
         deduped = cur.rowcount
 
@@ -598,7 +592,7 @@ class Queue:
                 WHERE id IN (
                     SELECT z.id FROM work_queue z
                     WHERE z.status = 'running'
-                      {zombie_filter}
+                      AND {zombie_sql_z}
                       AND z.id NOT IN (
                           SELECT id FROM (
                               SELECT id,
@@ -613,33 +607,21 @@ class Queue:
                       )
                 )
             """,
-            zombie_params,
+            zombie_args,
         )
         deduped += cur.rowcount
 
-        if keep_id is not None:
-            sql = (
-                "UPDATE work_queue "
-                "SET status = 'pending', "
-                "    started_at = NULL, "
-                "    finished_at = NULL, "
-                "    error = 'reaped: worker crashed mid-job' "
-                "WHERE status = 'running' "
-                f"  AND (id != ? OR started_at < {cutoff_sql})"
-            )
-            params_requeue: list = [keep_id, cutoff_arg]
-        else:
-            sql = (
-                "UPDATE work_queue "
-                "SET status = 'pending', "
-                "    started_at = NULL, "
-                "    finished_at = NULL, "
-                "    error = 'reaped: worker crashed mid-job' "
-                "WHERE status = 'running'"
-            )
-            params_requeue = []
-
-        cur = conn.execute(sql, params_requeue)
+        cur = conn.execute(
+            f"""UPDATE work_queue
+                SET status = 'pending',
+                    started_at = NULL,
+                    finished_at = NULL,
+                    error = 'reaped: worker crashed mid-job'
+                WHERE status = 'running'
+                  AND {zombie_sql}
+            """,
+            zombie_args,
+        )
         requeued = cur.rowcount
 
         return {"requeued": requeued, "failed": failed_count, "deduped": deduped}

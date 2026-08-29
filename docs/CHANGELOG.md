@@ -7,6 +7,55 @@ description: >-
 
 # Changelog
 
+## [0.28.2] — 2026-08-29
+
+### Fixed — a job nobody is running gets handed back
+
+A `running` row is a claim: something said "this one is mine" and owes the
+queue a closing write. When the claim broke and nobody noticed, the file was
+silently never indexed — no retry, no failure, no log line. On one machine
+twenty-six jobs sat that way for up to **fifty hours**, under a supervisor
+that was up, healthy and busy the whole time.
+
+The reason they never came back is that the only reclaim ran at startup.
+`reap_zombies` could be told to protect exactly **one** live job, read from
+the per-project worker's state file — the model where one worker owned one job
+at a time. The supervisor runs a dozen jobs per project and never wrote that
+file, so the reaper's only honest answer was "nothing is live", and reaping on
+that answer would have yanked every in-flight job back into the queue. It was
+therefore safe exactly once, at boot, and unusable for the rest of the
+daemon's life.
+
+`reap_zombies` now takes the set of job ids the caller is actually running,
+and the supervisor — the only place those ids exist — sweeps every minute
+against its own in-flight set. A claim broken at 11:50 is repaired by 11:51
+instead of at the next restart. Kept ids are still released after three hours:
+a claim held that long is a deadlock, not a worker.
+
+Three ways a claim could break, all closed:
+
+- **A dispatch that raised after claiming.** `dequeue` marks the row running
+  before the pool accepts the job; a refused submit left a row belonging to
+  nobody. The claim is handed back now.
+- **A closing write that failed.** `mark_failed` swallowed its exception
+  outright and `mark_done` logged one and moved on, so a write lost to a
+  locked database stranded the row with no trace anywhere. Closes are retried,
+  and a lost one is reported.
+- **An error the reaper did not catch.** A `BaseException` from a finished job
+  escaped after the job had already been removed from the in-flight set.
+
+Also fixed: `rtfm sync`'s progress watcher reaped stale rows on the same blind
+"nothing is live" answer, every ten seconds, while the supervisor worked —
+requeueing jobs from under it so the same file could be indexed twice at once.
+The watcher no longer reaps; `rtfm queue reap` now declines while a supervisor
+is alive and says why.
+
+### Removed
+
+The per-project `worker_state.json` model — `WorkerState`, `read_state`,
+`write_state`, `worker_running`. Nothing had written it since the supervisor
+replaced the per-project worker; the zombie reaper was its last reader.
+
 ## [0.28.1] — 2026-08-23
 
 ### Fixed — `rtfm sync` obeys the selection rules you registered

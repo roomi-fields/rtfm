@@ -292,7 +292,7 @@ def test_reap_no_worker_marks_all_running_pending(queue: Queue):
     queue.dequeue(); queue.dequeue()  # both now 'running'
 
     # rtfm_dir=None → treat all running as zombies
-    result = queue.reap_zombies(rtfm_dir=None)
+    result = queue.reap_zombies()
     assert result["requeued"] == 2
     assert result["failed"] == 0
     assert queue.stats()["ingest"]["pending"] == 2
@@ -314,7 +314,7 @@ def test_reap_failed_after_max_attempts(queue: Queue):
         )
     queue.dequeue()  # 4th dequeue, attempts now = 4, status='running'
 
-    result = queue.reap_zombies(rtfm_dir=None, max_attempts=3)
+    result = queue.reap_zombies(max_attempts=3)
     assert result["failed"] == 1
     assert queue.stats()["ingest"].get("failed", 0) == 1
 
@@ -333,43 +333,38 @@ def test_reap_dedups_running_twins(queue: Queue):
     )
     assert queue.stats()["ingest"]["running"] == 2
 
-    result = queue.reap_zombies(rtfm_dir=None)
+    result = queue.reap_zombies()
     assert result["deduped"] >= 1
     assert queue.stats()["ingest"]["pending"] == 1
     assert queue.stats()["ingest"].get("running", 0) == 0
 
 
-def test_reap_preserves_current_worker_job(queue: Queue, tmp_path: Path):
-    """When a worker is alive and is on job X, X must NOT be reaped."""
-    import json, os
+def test_reap_preserves_the_jobs_the_caller_is_running(queue: Queue):
+    """The caller names what it is actually running; only the rest is
+    reaped. Getting this wrong yanks live work back into the queue and
+    indexes the same file twice at once."""
     queue.enqueue("ingest", {"f": "active"})
     queue.enqueue("ingest", {"f": "zombie"})
     job_a = queue.dequeue()
-    job_b = queue.dequeue()
+    queue.dequeue()
 
-    rtfm_dir = tmp_path / ".rtfm"
-    rtfm_dir.mkdir(exist_ok=True)
-    # Write a worker_state.json pointing to job_a; use our own PID as
-    # "alive". The reaper's pid_alive(os.getpid()) is True by definition.
-    state = {
-        "pid": os.getpid(),
-        "host": "test",
-        "status": "busy",
-        "current_job_id": job_a.id,
-        "current_job_type": "ingest",
-        "current_job_payload": {"f": "active"},
-        "started_at": "2026-01-01T00:00:00Z",
-        "last_update": "2026-01-01T00:00:00Z",
-        "jobs_done": 0,
-        "jobs_failed": 0,
-        "installed_version": "test",
-    }
-    (rtfm_dir / "worker_state.json").write_text(json.dumps(state))
-
-    result = queue.reap_zombies(rtfm_dir=rtfm_dir)
-    assert result["requeued"] == 1  # only job_b
-    # job_a still running, job_b back to pending
+    result = queue.reap_zombies({job_a.id})
+    assert result["requeued"] == 1  # only the one nobody claimed
     assert queue.stats()["ingest"]["running"] == 1
+    assert queue.stats()["ingest"]["pending"] == 1
+
+
+def test_reap_frees_a_kept_job_that_has_been_held_far_too_long(queue: Queue):
+    """A claim held for hours is a deadlock, not a worker. The age fallback
+    must override the caller's own keep list, or the job never moves again."""
+    queue.enqueue("ingest", {"f": "wedged"})
+    job = queue.dequeue()
+    queue._get_conn().execute(
+        "UPDATE work_queue SET started_at = datetime('now', '-9 hours') "
+        "WHERE id = ?", (job.id,))
+
+    result = queue.reap_zombies({job.id}, max_age_seconds=3 * 3600)
+    assert result["requeued"] == 1
     assert queue.stats()["ingest"]["pending"] == 1
 
 

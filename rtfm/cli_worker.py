@@ -404,7 +404,20 @@ def cmd_queue(args):
             if not zombies:
                 print("queue: nothing to reap (no jobs in 'running' state).")
                 return
-            result = queue.reap_zombies(rtfm_dir=rtfm_dir)
+            # A running supervisor owns those rows and sweeps its own stale
+            # claims every minute. From out here we cannot tell its live jobs
+            # from stale ones, and reaping blind would yank work out from
+            # under it — the row goes back to pending, gets dispatched a
+            # second time, and the same file is indexed twice concurrently.
+            from rtfm.core.supervisor import supervisor_running
+            live = supervisor_running()
+            if live is not None:
+                print(f"queue: {len(zombies)} job(s) running, but the "
+                      f"supervisor (PID {live.pid}) is alive and reaps its "
+                      f"own stale claims. Nothing to do from here — stop it "
+                      f"first if you really mean to reset every claim.")
+                return
+            result = queue.reap_zombies()
             deduped_msg = (
                 f", {result.get('deduped', 0)} duplicates dropped"
                 if result.get("deduped") else ""

@@ -9,18 +9,19 @@ need:
     each handler.
   - The interval / memory-ceiling constants and the RSS / package-version
     probes the supervisor uses to decide when to recycle.
-  - :class:`WorkerState` and the ``read_state`` / ``pid_alive`` helpers the
-    queue's zombie-reaper reads.
+  - :func:`pid_alive`, the liveness probe the spawn path uses.
+
+The per-project ``worker_state.json`` model that used to live here is gone.
+It described one worker owning one job at a time; the supervisor runs a dozen
+per project and never wrote the file, so its last reader — the queue's
+zombie-reaper — could only ever conclude "no job is live" and reap the lot.
+The reaper now takes the live job ids from whoever calls it.
 """
 from __future__ import annotations
 
-import json
 import os
 import time
-from dataclasses import dataclass, asdict
-from pathlib import Path
 from typing import Callable, Optional
-
 
 # How long to sleep when the queue is empty before polling again.
 # Short enough to feel responsive; long enough that an idle worker
@@ -68,7 +69,6 @@ WORKER_RSS_EXIT_MB = 5 * 1024
 
 # Status snapshot lives next to the DB so ``rtfm status`` can find it
 # without re-reading config.
-STATE_FILENAME = "worker_state.json"
 
 
 class JobContext:
@@ -87,26 +87,6 @@ class JobContext:
     def __init__(self, db_path: str, log: Callable[[str], None]):
         self.db_path = db_path
         self._log = log
-
-
-@dataclass
-class WorkerState:
-    """On-disk worker status. Mirrors what ``rtfm status`` will show."""
-    pid: int
-    host: str
-    status: str  # 'idle' | 'busy' | 'stopping'
-    current_job_id: Optional[int]
-    current_job_type: Optional[str]
-    current_job_payload: Optional[dict]
-    started_at: str
-    last_update: str
-    jobs_done: int
-    jobs_failed: int
-    # rtfm-ai version this worker imported at startup. Compared to the
-    # current on-disk version by the CLI's lazy-check (and the worker's
-    # own idle-tick check) to decide whether the in-memory code is
-    # stale and the worker should respawn.
-    installed_version: str = "unknown"
 
 
 def _now_iso() -> str:
@@ -211,34 +191,6 @@ def _read_rss_mb() -> float:
     return 0.0
 
 
-def _state_path(rtfm_dir: Path) -> Path:
-    return rtfm_dir / STATE_FILENAME
-
-
-def write_state(rtfm_dir: Path, state: WorkerState) -> None:
-    """Atomic-replace the state file via temp + rename."""
-    path = _state_path(rtfm_dir)
-    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(asdict(state), indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def read_state(rtfm_dir: Path) -> Optional[WorkerState]:
-    path = _state_path(rtfm_dir)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return WorkerState(**data)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
-
-
-def clear_state(rtfm_dir: Path) -> None:
-    path = _state_path(rtfm_dir)
-    path.unlink(missing_ok=True)
-
-
 def pid_alive(pid: int) -> bool:
     """Cheap liveness check via ``kill(pid, 0)``."""
     if pid <= 0:
@@ -254,19 +206,4 @@ def pid_alive(pid: int) -> bool:
     except OSError:
         return False
 
-
-def worker_running(rtfm_dir: Path) -> Optional[WorkerState]:
-    """Return the live worker state if one is running, else ``None``.
-
-    A stale state file (PID dead) is treated as no worker — caller is
-    expected to clean it up before spawning a new one.
-    """
-    state = read_state(rtfm_dir)
-    if state is None:
-        return None
-    if state.status == "stopping":
-        return None
-    if not pid_alive(state.pid):
-        return None
-    return state
 

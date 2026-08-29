@@ -29,7 +29,6 @@ def _watch_jobs(
     label: str = "",
     rtfm_dir: Path | None = None,
     timeout_s: float | None = None,
-    reap_every_s: float = 10.0,
     stall_bail_s: float = 45.0,
 ) -> int:
     """Block until every pending/running job has reached a terminal
@@ -41,12 +40,13 @@ def _watch_jobs(
     user expects ``rtfm sync`` to return only when all of that has
     drained.
 
-    To stay robust when a previous worker died mid-job (which leaves
-    ``running`` rows that no live worker is touching), we call
-    ``queue.reap_zombies(rtfm_dir)`` once before the loop and then every
-    ``reap_every_s`` seconds. The reaper consults the on-disk worker
-    state to decide what counts as a zombie, so a long-running OCR is
-    safe — only jobs without a live worker behind them get requeued.
+    This watcher does not reap stale ``running`` rows. It used to, and it
+    was reaching into rows it had no way to judge: it asked the retired
+    per-project worker's state file which job was live, the supervisor never
+    writes that file, so every answer came back "none of them" and every one
+    of the supervisor's in-flight jobs looked like a zombie — requeued from
+    under it, then dispatched a second time. The supervisor sweeps its own
+    stale claims now, which is the only place the live job ids are known.
 
     ``timeout_s`` (optional) caps the total wait; on expiry the function
     returns ``2`` and prints a notice (the worker keeps draining in the
@@ -65,20 +65,9 @@ def _watch_jobs(
     if background:
         return 0
     start = time.time()
-    last_reap = 0.0
     last_progress = -1
     last_progress_at = start
     try:
-        # One-shot reap before entering the loop: clears anything left
-        # over from a previous crash so the exit condition isn't
-        # poisoned from the start.
-        if rtfm_dir is not None:
-            try:
-                queue.reap_zombies(rtfm_dir=rtfm_dir)
-                last_reap = time.time()
-            except Exception:
-                pass
-
         while True:
             stats = queue.stats()
             pending = sum(s.get("pending", 0) for s in stats.values())
@@ -127,14 +116,6 @@ def _watch_jobs(
                     f"running={running})\n"
                 )
                 return 2
-            # Periodic reap: catches zombies that appeared mid-wait
-            # (worker crashed while we were watching).
-            if rtfm_dir is not None and (time.time() - last_reap) >= reap_every_s:
-                try:
-                    queue.reap_zombies(rtfm_dir=rtfm_dir)
-                except Exception:
-                    pass
-                last_reap = time.time()
             time.sleep(poll_s)
     except KeyboardInterrupt:
         sys.stderr.write("\n(interrupted — worker keeps draining in background)\n")
