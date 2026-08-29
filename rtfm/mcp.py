@@ -426,8 +426,25 @@ _library = None
 _embed_lock = threading.Lock()
 
 
+class NoIndexHere(RuntimeError):
+    """Raised when this directory has no RTFM index. Not an error state —
+    just an honest answer, and far better than the alternative."""
+
+
 def _get_library():
-    """Return (and lazily create) the Library singleton."""
+    """Return the Library singleton, opening an existing index only.
+
+    The server never creates one. It is a reader, and creating on open is
+    how a 27 GB index once appeared in a directory nobody had indexed: the
+    plugin points ``RTFM_DB`` at the *relative* ``.rtfm/library.db``, so a
+    session opened anywhere aimed the server at a database in that
+    directory — and opening it brought it into being, schema and all. A
+    scan then found 151 416 files there (a tree of twenty-six already-indexed
+    projects, their virtualenvs and their vendored dependencies) and spent
+    three days and three cores indexing them.
+
+    Refusing to create it costs a clear message; creating it costs the disk.
+    """
     global _library
     if _library is None:
         from rtfm.core.library import Library
@@ -435,7 +452,15 @@ def _get_library():
         if not db_path:
             from rtfm.config import resolve_db
             db_path = resolve_db()
-        _library = Library(db_path)
+        try:
+            _library = Library(db_path, create=False)
+        except FileNotFoundError:
+            raise NoIndexHere(
+                f"No RTFM index for this directory (looked for {db_path}). "
+                f"RTFM indexes a project only once you ask it to: run "
+                f"`rtfm init` here if this directory should be indexed. "
+                f"Use your own file tools in the meantime."
+            ) from None
     return _library
 
 

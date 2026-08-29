@@ -7,6 +7,29 @@ description: >-
 
 # Changelog
 
+## [0.28.3] — 2026-08-29
+
+### Fixed — the server no longer conjures an index where none was asked for
+
+The plugin points `RTFM_DB` at the **relative** `.rtfm/library.db`, so opening a
+session in any directory aimed the server at a database in *that* directory —
+and opening a SQLite database creates it. A session opened once in a parent
+directory was enough: an index appeared, the periodic scan found 151 416 files
+under it (twenty-six already-indexed projects, their virtualenvs, their
+vendored dependencies), and three days later it was **27 GB** and still going,
+holding three cores the whole time on a machine whose owner had not written a
+line of code since.
+
+Nothing had gone wrong, exactly. Every part did its job. The index simply
+should never have existed.
+
+The server opens an existing index now and creates nothing. Asked to read where
+there is no index, it says so and points at `rtfm init` — which remains the
+only thing that creates one. Refusing costs a sentence; creating cost the disk.
+
+The edit hooks were never part of this: they already checked that the database
+existed before doing anything.
+
 ## [0.28.2] — 2026-08-29
 
 ### Fixed — a job nobody is running gets handed back

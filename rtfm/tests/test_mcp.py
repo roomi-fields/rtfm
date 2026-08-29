@@ -1061,3 +1061,45 @@ class TestFreshnessReadRepair:
         monkeypatch.setattr(freshness, "wait_for", lambda *a, **k: False)
         (tmp_path / "doc.md").write_text("# Philosophy\n\nconsciousness moved on.\n")
         assert "modified since indexing" in rtfm_search("consciousness", limit=3)
+
+
+class TestTheServerNeverConjuresAnIndex:
+    """The plugin points ``RTFM_DB`` at the *relative* ``.rtfm/library.db``,
+    so the server aims at whatever directory the session was opened in.
+    Creating that database on open is how a 27 GB index appeared in a
+    directory nobody had ever indexed — a tree of twenty-six already-indexed
+    projects, their virtualenvs and their vendored dependencies, 151 416
+    files, three days and three cores."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_singleton(self, monkeypatch, tmp_path):
+        import rtfm.mcp as mcp_mod
+        monkeypatch.setattr(mcp_mod, "_library", None)
+        monkeypatch.chdir(tmp_path)
+        yield
+
+    def test_an_unindexed_directory_stays_unindexed(self, monkeypatch, tmp_path):
+        import rtfm.mcp as mcp_mod
+
+        monkeypatch.setenv("RTFM_DB", ".rtfm/library.db")
+        with pytest.raises(mcp_mod.NoIndexHere):
+            mcp_mod._get_library()
+
+        assert not (tmp_path / ".rtfm").exists(), \
+            "the server created an index in a directory nobody indexed"
+
+    def test_the_refusal_says_what_to_do(self, monkeypatch):
+        import rtfm.mcp as mcp_mod
+
+        monkeypatch.setenv("RTFM_DB", ".rtfm/library.db")
+        with pytest.raises(mcp_mod.NoIndexHere) as exc:
+            mcp_mod._get_library()
+        assert "rtfm init" in str(exc.value)
+
+    def test_an_existing_index_opens_normally(self, monkeypatch, tmp_path):
+        import rtfm.mcp as mcp_mod
+
+        (tmp_path / ".rtfm").mkdir()
+        Library(tmp_path / ".rtfm" / "library.db").close()
+        monkeypatch.setenv("RTFM_DB", str(tmp_path / ".rtfm" / "library.db"))
+        assert mcp_mod._get_library() is not None
