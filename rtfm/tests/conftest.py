@@ -6,6 +6,27 @@ from pathlib import Path
 from rtfm import Library
 
 
+@pytest.fixture(autouse=True)
+def never_touch_the_real_fleet(monkeypatch):
+    """Keep the test suite out of the developer's live supervisor.
+
+    ``cli.main`` opens every command with a version-drift check that reads the
+    real ``~/.rtfm/workers.json`` and, on a mismatch, respawns the supervisor
+    with ``sys.executable`` — the test venv. Bumping the version and running
+    the suite therefore restarted the machine's production daemon from the
+    working checkout: an unlocked second supervisor over the user's twenty-six
+    real projects, burning three cores until someone noticed it by hand.
+
+    Tests exercise ``main()`` constantly and none of them mean to manage a
+    daemon, so the check is disabled for all of them. A test that wants it
+    asserts on it directly by patching this back.
+    """
+    monkeypatch.setattr(
+        "rtfm.cli_worker._maybe_lazy_restart_stale_workers",
+        lambda *a, **k: None,
+    )
+
+
 @pytest.fixture
 def temp_db():
     """Create a temporary database file."""
