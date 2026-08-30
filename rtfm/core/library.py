@@ -2453,6 +2453,48 @@ class Library:
         conn.commit()
         return True
 
+    def book_slug_for(self, filepath: str, corpus: str) -> str | None:
+        """The identity this file was indexed under, or None if it is new.
+
+        A file that has not moved keeps its slug whatever the naming rule
+        does later, so every writer must ask here before computing one.
+        """
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT book_slug FROM indexed_files WHERE filepath = ? AND corpus = ?",
+            (filepath, corpus),
+        ).fetchone()
+        return row["book_slug"] if row and row["book_slug"] else None
+
+    def allocate_book_slug(self, preferred: str, filepath: str,
+                           corpus: str) -> str:
+        """Return a slug for this file that no other file already owns.
+
+        The slug scheme keeps distinct files distinct, but no naming rule can
+        promise that for ever — two different paths can always normalise to
+        the same string. When they did, the second file raised a UNIQUE
+        violation and was dropped from the index without a word. So the write
+        side settles it: if the preferred slug belongs to a different file, a
+        counter is appended until one is free.
+
+        Returns ``preferred`` unchanged in the ordinary case, and for a file
+        that already owns it.
+        """
+        conn = self._get_conn()
+        candidate = preferred
+        n = 1
+        while True:
+            row = conn.execute(
+                "SELECT filename, corpus FROM books WHERE slug = ?",
+                (candidate,),
+            ).fetchone()
+            if row is None:
+                return candidate
+            if row["filename"] == filepath and (row["corpus"] or "") == corpus:
+                return candidate          # already this file's own slug
+            n += 1
+            candidate = f"{preferred}-{n}"
+
     def set_sync_root(self, corpus: str, root_path: str):
         """Record an absolute source directory for a corpus.
 

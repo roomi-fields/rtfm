@@ -334,10 +334,12 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
                 lib.save_file_version(old_slug, old_hash, prune_limit=50)
             except Exception:
                 pass  # versioning is best-effort
-            if old_slug != book_slug:
-                # Slug format changed (rare): drop the old book row so
-                # the new ingest doesn't UNIQUE-collide.
-                lib.delete_book(old_slug)
+            # A file that has not moved keeps the identity it was indexed
+            # under. Recomputing it would re-index the whole fleet — and
+            # throw away every embedding — the day the naming rule changes.
+            book_slug = old_slug
+        else:
+            book_slug = lib.allocate_book_slug(book_slug, rel, corpus)
 
         file_hash = _compute_hash(abs_path)
         try:
@@ -534,7 +536,6 @@ def handle_ocr(job: Job, worker: "JobContext") -> None:
     if abs_path.suffix.lower() != ".pdf":
         raise ValueError(f"P3 OCR only handles .pdf — got {abs_path.suffix}")
 
-    book_slug = _path_to_slug(rel, corpus)
     book_title = extract_title_from_filename(abs_path.stem)
     backend, langs = _ocr_config(worker.db_path)
 
@@ -547,10 +548,15 @@ def handle_ocr(job: Job, worker: "JobContext") -> None:
 
     lib = Library(str(worker.db_path))
     try:
+        # OCR appends to a book that already exists, so it must use the
+        # identity that book was indexed under — never recompute one.
+        book_slug = lib.book_slug_for(rel, corpus)
+
         # Ensure the book row exists (P1 created an empty one; if it was
         # cleaned up, recreate via a 0-chunk ingest-less insert).
-        existing = lib.list_indexed_files(corpus=corpus).get(rel)
-        if not existing:
+        if book_slug is None:
+            book_slug = lib.allocate_book_slug(
+                _path_to_slug(rel, corpus), rel, corpus)
             lib.set_sync_root(corpus, str(root))
             lib.update_indexed_file(
                 filepath=rel, file_hash=_compute_hash(abs_path),

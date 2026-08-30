@@ -45,7 +45,7 @@ class TestSaveFileVersion:
              generate_embeddings=False)
 
         # Manually save a version
-        vid = version_db.save_file_version("test--notes", "hash_v1")
+        vid = version_db.save_file_version("test--notes-py", "hash_v1")
         assert vid is not None
 
     def test_save_version_nonexistent_book(self, version_db):
@@ -56,11 +56,11 @@ class TestSaveFileVersion:
         sync(version_db, version_project, corpus="test",
              generate_embeddings=False)
 
-        version_db.save_file_version("test--notes", "hash_v1")
-        version_db.save_file_version("test--notes", "hash_v2")
-        version_db.save_file_version("test--notes", "hash_v3")
+        version_db.save_file_version("test--notes-py", "hash_v1")
+        version_db.save_file_version("test--notes-py", "hash_v2")
+        version_db.save_file_version("test--notes-py", "hash_v3")
 
-        history = version_db.get_file_history("test--notes")
+        history = version_db.get_file_history("test--notes-py")
         assert len(history) == 3
         assert [v["version_num"] for v in history] == [1, 2, 3]
 
@@ -75,8 +75,8 @@ class TestGetFileHistory:
         sync(version_db, version_project, corpus="test",
              generate_embeddings=False)
 
-        version_db.save_file_version("test--notes", "hash_v1")
-        history = version_db.get_file_history("test--notes")
+        version_db.save_file_version("test--notes-py", "hash_v1")
+        history = version_db.get_file_history("test--notes-py")
 
         assert len(history) == 1
         v = history[0]
@@ -95,8 +95,8 @@ class TestGetFileVersion:
         sync(version_db, version_project, corpus="test",
              generate_embeddings=False)
 
-        version_db.save_file_version("test--notes", "hash_v1")
-        ver = version_db.get_file_version("test--notes", 1)
+        version_db.save_file_version("test--notes-py", "hash_v1")
+        ver = version_db.get_file_version("test--notes-py", 1)
 
         assert ver is not None
         assert ver["version_num"] == 1
@@ -109,7 +109,7 @@ class TestGetFileVersion:
     def test_get_nonexistent_version(self, version_db, version_project):
         sync(version_db, version_project, corpus="test",
              generate_embeddings=False)
-        assert version_db.get_file_version("test--notes", 999) is None
+        assert version_db.get_file_version("test--notes-py", 999) is None
 
     def test_get_nonexistent_book(self, version_db):
         assert version_db.get_file_version("nonexistent", 1) is None
@@ -122,7 +122,7 @@ class TestCompareFileVersions:
         sync(version_db, version_project, corpus="test",
              generate_embeddings=False)
 
-        version_db.save_file_version("test--notes", "hash_v1")
+        version_db.save_file_version("test--notes-py", "hash_v1")
 
         # Modify file and resync
         (version_project / "notes.py").write_text(
@@ -135,18 +135,18 @@ class TestCompareFileVersions:
              generate_embeddings=False)
 
         # Version 2 was auto-saved by sync
-        history = version_db.get_file_history("test--notes")
+        history = version_db.get_file_history("test--notes-py")
         if len(history) >= 2:
-            result = version_db.compare_file_versions("test--notes", 1, 2)
+            result = version_db.compare_file_versions("test--notes-py", 1, 2)
             assert "error" not in result
-            assert result["book_slug"] == "test--notes"
+            assert result["book_slug"] == "test--notes-py"
             assert "size_diff" in result
             assert "content_changed" in result
 
     def test_compare_missing_version(self, version_db, version_project):
         sync(version_db, version_project, corpus="test",
              generate_embeddings=False)
-        result = version_db.compare_file_versions("test--notes", 1, 2)
+        result = version_db.compare_file_versions("test--notes-py", 1, 2)
         assert "error" in result
 
 
@@ -168,7 +168,7 @@ class TestSyncVersioning:
              generate_embeddings=False)
 
         # Version should have been saved automatically
-        history = version_db.get_file_history("test--notes")
+        history = version_db.get_file_history("test--notes-py")
         assert len(history) >= 1
 
     def test_added_file_no_version(self, version_db, version_project):
@@ -177,7 +177,7 @@ class TestSyncVersioning:
              generate_embeddings=False)
 
         # Check that newly added files don't have versions
-        history = version_db.get_file_history("test--notes")
+        history = version_db.get_file_history("test--notes-py")
         assert len(history) == 0  # No version for initial add
 
     def test_multiple_modifications(self, version_db, version_project):
@@ -193,7 +193,7 @@ class TestSyncVersioning:
             sync(version_db, version_project, corpus="test",
                  generate_embeddings=False)
 
-        history = version_db.get_file_history("test--notes")
+        history = version_db.get_file_history("test--notes-py")
         assert len(history) == 3  # 3 modifications → 3 versions
 
     def test_version_prune_limit(self, version_db, version_project):
@@ -202,9 +202,9 @@ class TestSyncVersioning:
 
         # Create 55 versions manually (beyond the 50 limit)
         for i in range(55):
-            version_db.save_file_version("test--notes", f"hash_{i}")
+            version_db.save_file_version("test--notes-py", f"hash_{i}")
 
-        history = version_db.get_file_history("test--notes")
+        history = version_db.get_file_history("test--notes-py")
         assert len(history) <= 50
 
     def test_unlimited_history_via_prune_none(self, version_db, version_project):
@@ -213,9 +213,9 @@ class TestSyncVersioning:
              generate_embeddings=False)
 
         for i in range(75):
-            version_db.save_file_version("test--notes", f"hash_{i}", prune_limit=None)
+            version_db.save_file_version("test--notes-py", f"hash_{i}", prune_limit=None)
 
-        history = version_db.get_file_history("test--notes")
+        history = version_db.get_file_history("test--notes-py")
         assert len(history) == 75
 
     def test_custom_prune_limit(self, version_db, version_project):
@@ -224,9 +224,9 @@ class TestSyncVersioning:
              generate_embeddings=False)
 
         for i in range(30):
-            version_db.save_file_version("test--notes", f"hash_{i}", prune_limit=10)
+            version_db.save_file_version("test--notes-py", f"hash_{i}", prune_limit=10)
 
-        history = version_db.get_file_history("test--notes")
+        history = version_db.get_file_history("test--notes-py")
         assert len(history) == 10
 
     def test_sync_retain_history_none_is_unlimited(self, version_db, version_project):
@@ -242,7 +242,10 @@ class TestSyncVersioning:
             sync(version_db, version_project, corpus="test",
                  generate_embeddings=False, retain_history=None)
 
-        history = version_db.get_file_history("test--notes")
+        # notes.md, not the fixture's notes.py — two different files. Under
+        # the old naming they shared one identity, which is the collision
+        # this test was unknowingly relying on.
+        history = version_db.get_file_history("test--notes-md")
         assert len(history) >= 55
 
 

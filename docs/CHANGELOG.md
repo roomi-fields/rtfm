@@ -7,6 +7,26 @@ description: >-
 
 # Changelog
 
+## [0.31.0] — 2026-08-30
+
+### Fixed — two files with the same name are two files
+
+A file's identity was built from its *stem*, which drops everything after the
+last dot. `timed_events.h` and `timed_events.c` became one identity. So did
+`+sc.Ruwet` and `+sc.tryMe`, where the stem stops at the first dot and leaves
+both called `+sc`. Whichever arrived second hit a UNIQUE violation and never
+entered the index — silently, with no error anywhere a person would look.
+**1 750 files across this fleet were missing for that reason.**
+
+The identity now comes from the file name, extension included, and the write
+side refuses to hand one identity to two files even if a future naming rule
+collides again — the second file gets a free one instead of being dropped.
+
+A file that has not moved keeps the identity it was indexed under, so the
+change costs no re-indexing and no embeddings: only files that were never
+indexable get a new one. (One test turned out to depend on the collision: it
+wrote `notes.md` and read back the history of `notes.py`.)
+
 ## [0.30.1] — 2026-08-30
 
 ### Fixed — one last look before a removal destroys anything

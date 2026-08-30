@@ -840,19 +840,31 @@ class TestLibraryFileTracking:
 
 class TestPathToSlug:
     def test_root_file_no_corpus(self):
-        assert _path_to_slug("README.md") == "readme"
+        assert _path_to_slug("README.md") == "readme-md"
 
     def test_root_file_with_corpus(self):
         slug = _path_to_slug("README.md", corpus="pub")
-        assert slug == "pub--readme"
+        assert slug == "pub--readme-md"
 
     def test_subdirectory_with_corpus(self):
         slug = _path_to_slug("_en/B4_Flags.md", corpus="pub")
-        assert slug == "pub-en--b4_flags"
+        assert slug == "pub-en--b4_flags-md"
 
     def test_subdirectory_no_corpus(self):
         slug = _path_to_slug("_en/B4_Flags.md")
-        assert slug == "en--b4_flags"
+        assert slug == "en--b4_flags-md"
+
+    def test_same_name_different_extension(self):
+        """Two different files. They used to share one identity, and the
+        second one never entered the index — 1 750 files across this fleet."""
+        assert (_path_to_slug("bp3/timed_events.h", "c")
+                != _path_to_slug("bp3/timed_events.c", "c"))
+
+    def test_a_dot_in_the_name_is_not_an_extension(self):
+        """`Path.stem` stops at the last dot, so `+sc.Ruwet` and `+sc.tryMe`
+        both read as `+sc`."""
+        assert (_path_to_slug("scripts/+sc.Ruwet", "bp")
+                != _path_to_slug("scripts/+sc.tryMe", "bp"))
 
     def test_nested_subdirectory(self):
         slug = _path_to_slug("src/utils/helper.py", corpus="proj")

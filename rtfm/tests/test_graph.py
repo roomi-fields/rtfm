@@ -209,7 +209,7 @@ class TestSyncEdges:
              generate_embeddings=False)
 
         # main.py imports utils and config
-        neighbors = graph_db.get_neighbors("test--main", direction="outgoing")
+        neighbors = graph_db.get_neighbors("test--main-py", direction="outgoing")
         target_filenames = {n["filename"] for n in neighbors}
         assert "utils.py" in target_filenames
         assert "config.py" in target_filenames
@@ -219,7 +219,7 @@ class TestSyncEdges:
              generate_embeddings=False)
 
         # config.py is imported by both main.py and utils.py
-        neighbors = graph_db.get_neighbors("test--config", direction="incoming")
+        neighbors = graph_db.get_neighbors("test--config-py", direction="incoming")
         assert len(neighbors) == 2
 
     def test_markdown_edges_created(self, graph_db, markdown_project):
@@ -252,11 +252,11 @@ class TestSyncEdges:
              generate_embeddings=False)
 
         # Delete config.py → edges referencing it should be removed
-        graph_db.delete_book("test--config")
+        graph_db.delete_book("test--config-py")
 
-        neighbors = graph_db.get_neighbors("test--main", direction="outgoing")
+        neighbors = graph_db.get_neighbors("test--main-py", direction="outgoing")
         target_slugs = {n["slug"] for n in neighbors}
-        assert "test--config" not in target_slugs
+        assert "test--config-py" not in target_slugs
 
 
 # ── Library graph method tests ───────────────────────────────────────────
@@ -269,9 +269,9 @@ class TestLibraryGraphMethods:
         sync(graph_db, python_project, corpus="test",
              generate_embeddings=False)
 
-        outgoing = graph_db.get_neighbors("test--main", direction="outgoing")
-        incoming = graph_db.get_neighbors("test--main", direction="incoming")
-        both = graph_db.get_neighbors("test--main", direction="both")
+        outgoing = graph_db.get_neighbors("test--main-py", direction="outgoing")
+        incoming = graph_db.get_neighbors("test--main-py", direction="incoming")
+        both = graph_db.get_neighbors("test--main-py", direction="both")
 
         assert len(outgoing) > 0
         assert all(n["direction"] == "outgoing" for n in outgoing)
@@ -288,7 +288,7 @@ class TestLibraryGraphMethods:
 
         # config.py should have the highest in-degree (imported by main + utils)
         config_row = graph_db._get_conn().execute(
-            "SELECT id FROM books WHERE slug = ?", ("test--config",)
+            "SELECT id FROM books WHERE slug = ?", ("test--config-py",)
         ).fetchone()
         assert config_row
         assert degrees.get(config_row["id"], 0) == 2
@@ -427,11 +427,11 @@ class TestWikilinkSyncIntegration:
         assert stats["total_edges"] > 0, "Wikilinks should produce edges"
 
         # index.md links to guide.md → outgoing edge
-        neighbors = graph_db.get_neighbors("test--index", direction="outgoing")
+        neighbors = graph_db.get_neighbors("test--index-md", direction="outgoing")
         neighbor_files = [n["filename"] for n in neighbors]
         assert "guide.md" in neighbor_files, f"Expected guide.md in {neighbor_files}"
 
         # guide.md links back to index.md → index has incoming
-        incoming = graph_db.get_neighbors("test--index", direction="incoming")
+        incoming = graph_db.get_neighbors("test--index-md", direction="incoming")
         incoming_files = [n["filename"] for n in incoming]
         assert "guide.md" in incoming_files, f"Expected guide.md in {incoming_files}"

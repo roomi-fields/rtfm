@@ -333,22 +333,34 @@ def _clean_part(s: str) -> str:
 
 
 def _path_to_slug(rel_path: str, corpus: str = "") -> str:
-    """Convert a relative file path + corpus to a globally unique slug.
+    """Convert a relative file path + corpus to an identity for the file.
 
-    The slug always encodes ``corpus--dirs--stem`` so that:
+    The slug encodes ``corpus--dirs--filename`` so that:
     - same filename in different corpora → different slugs
     - same filename in different directories → different slugs
+    - **same name, different extension → different slugs**
+
+    That last one is the whole point of using the file name rather than its
+    stem. ``bp3_timed_events.h`` and ``bp3_timed_events.c`` are two different
+    files; so are ``+sc.Ruwet`` and ``+sc.tryMe``, where the stem stops at the
+    first dot and leaves both called ``+sc``. They used to collapse onto one
+    identity, the second one hit a UNIQUE violation, and it simply never
+    entered the index — silently, for ever. 1 750 files across this fleet.
+
+    Slugs are never recomputed for a file that is already indexed at the same
+    path (see the ingest handler), so this scheme applies to newcomers without
+    disturbing anything already in place.
 
     Examples (corpus="pub"):
-        ``B4_Flags.md``      → ``pub--b4_flags``
-        ``_en/B4_Flags.md``  → ``pub--en--b4_flags``
+        ``B4_Flags.md``      → ``pub--b4_flags-md``
+        ``_en/B4_Flags.md``  → ``pub--en--b4_flags-md``
 
     Examples (no corpus):
-        ``B4_Flags.md``      → ``b4_flags``
-        ``_en/B4_Flags.md``  → ``en--b4_flags``
+        ``B4_Flags.md``      → ``b4_flags-md``
+        ``notes.tar.gz``     → ``notes-tar-gz``
     """
     p = Path(rel_path)
-    stem = _clean_part(p.stem)
+    stem = _clean_part(p.name)
 
     prefix_parts: list[str] = []
 
@@ -1023,13 +1035,15 @@ def sync(
 
         try:
             file_hash = compute_file_hash(fpath)
-            book_slug = _path_to_slug(rel, corpus)
+            # A file that has not moved keeps the identity it was indexed
+            # under; only a newcomer is given one.
+            book_slug = library.book_slug_for(rel, corpus)
+            if book_slug is None:
+                book_slug = library.allocate_book_slug(
+                    _path_to_slug(rel, corpus), rel, corpus)
 
-            # If file was modified and slug format changed, clean up old book
             if fpath in diff.modified:
                 old_info = indexed.get(rel)
-                if old_info and old_info.get("book_slug") and old_info["book_slug"] != book_slug:
-                    library.delete_book(old_info["book_slug"])
 
                 # Save version snapshot before re-ingest
                 snap_slug = old_info["book_slug"] if old_info and old_info.get("book_slug") else book_slug

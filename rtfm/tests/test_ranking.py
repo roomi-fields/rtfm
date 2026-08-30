@@ -114,13 +114,13 @@ class TestRerank:
 
         # Create search results with equal scores
         sr = _make_search_results([
-            {"slug": "test--main", "score": 1.0},    # 0 incoming
-            {"slug": "test--config", "score": 1.0},   # 2 incoming (imported by main + utils)
+            {"slug": "test--main-py", "score": 1.0},    # 0 incoming
+            {"slug": "test--config-py", "score": 1.0},   # 2 incoming (imported by main + utils)
         ])
 
         result = ranking_db.rerank(sr, centrality_weight=0.5)
         # config should rank higher (more incoming edges)
-        assert result[0].chunk.book_slug == "test--config"
+        assert result[0].chunk.book_slug == "test--config-py"
         assert result[0].score > result[1].score
 
     def test_combined_weights(self, ranking_db, python_project):
@@ -128,9 +128,9 @@ class TestRerank:
              generate_embeddings=False)
 
         sr = _make_search_results([
-            {"slug": "test--main", "score": 1.0},
-            {"slug": "test--config", "score": 1.0},
-            {"slug": "test--utils", "score": 1.0},
+            {"slug": "test--main-py", "score": 1.0},
+            {"slug": "test--config-py", "score": 1.0},
+            {"slug": "test--utils-py", "score": 1.0},
         ])
 
         result = ranking_db.rerank(sr, freshness_weight=0.1, centrality_weight=0.3)

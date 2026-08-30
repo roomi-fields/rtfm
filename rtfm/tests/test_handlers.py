@@ -142,6 +142,8 @@ def test_handle_ingest_requeues_on_partial_write(tmp_path: Path, monkeypatch):
         def __init__(self, *a, **k): pass
         def set_sync_root(self, *a, **k): pass
         def list_indexed_files(self, *a, **k): return {}
+        def book_slug_for(self, *a, **k): return None
+        def allocate_book_slug(self, preferred, *a, **k): return preferred
         def ingest(self, *a, **k):
             f.write_bytes(b"%PDF-partial-and-then-more")  # completes mid-parse
             raise ValueError("PDFium: Data format error")
@@ -184,6 +186,8 @@ def test_handle_ingest_reraises_genuine_failure(tmp_path: Path, monkeypatch):
         def __init__(self, *a, **k): pass
         def set_sync_root(self, *a, **k): pass
         def list_indexed_files(self, *a, **k): return {}
+        def book_slug_for(self, *a, **k): return None
+        def allocate_book_slug(self, preferred, *a, **k): return preferred
         def ingest(self, *a, **k):
             raise ValueError("PDFium: Data format error")
         def close(self): pass
