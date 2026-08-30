@@ -906,3 +906,57 @@ class TestStrandedClaims:
             assert self._count(slot, "pending") == 1
         finally:
             sup._shutdown()
+
+
+class TestTheSupervisorChecksItsOwnIndexes:
+    """Findings have to reach a log, not wait for someone to run a command.
+
+    Every defect the audit looks for ran for weeks while the logs said
+    nothing was wrong. An hourly line the day it starts is the whole point.
+    """
+
+    def test_findings_are_written_to_the_project_log(self, tmp_path, monkeypatch):
+        import rtfm.core.supervisor as sup
+        from rtfm.core.library import Library
+
+        rtfm_dir = tmp_path / "proj" / ".rtfm"
+        rtfm_dir.mkdir(parents=True)
+        db = rtfm_dir / "library.db"
+        lib = Library(str(db))
+        lib.record_ingest_failure("broken.pdf", "c", "h", 10, "boom")
+        lib.close()
+
+        logged: list[str] = []
+        slot = sup._Slot(rtfm_dir)
+        slot.log = logged.append
+
+        supervisor = sup.Supervisor.__new__(sup.Supervisor)
+        supervisor._slots = {str(rtfm_dir): slot}
+        supervisor._next_audit = 0.0
+
+        supervisor._audit_indexes()
+
+        assert any("audit: silent-drops" in line for line in logged), logged
+
+    def test_it_only_runs_on_its_own_schedule(self, tmp_path):
+        import time
+
+        import rtfm.core.supervisor as sup
+        from rtfm.core.library import Library
+
+        rtfm_dir = tmp_path / "proj" / ".rtfm"
+        rtfm_dir.mkdir(parents=True)
+        lib = Library(str(rtfm_dir / "library.db"))
+        lib.record_ingest_failure("broken.pdf", "c", "h", 10, "boom")
+        lib.close()
+
+        logged: list[str] = []
+        slot = sup._Slot(rtfm_dir)
+        slot.log = logged.append
+
+        supervisor = sup.Supervisor.__new__(sup.Supervisor)
+        supervisor._slots = {str(rtfm_dir): slot}
+        supervisor._next_audit = time.monotonic() + 3600
+
+        supervisor._audit_indexes()
+        assert logged == []

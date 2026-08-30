@@ -244,6 +244,14 @@ STALL_WARN_SECONDS = 30.0
 #: matching nothing), so it can run often enough that a lost claim costs a
 #: minute rather than the rest of the daemon's life.
 CLAIM_SWEEP_SECONDS = 60.0
+
+# How often the supervisor checks its own indexes against the invariants a
+# healthy one holds (rtfm/core/audit.py). Hourly: the checks are SQL-only and
+# cost milliseconds, and every defect they look for is one that ran for weeks
+# before anyone noticed. The first pass runs a few minutes after boot, once
+# the slots are open and the initial scans have settled.
+AUDIT_INTERVAL_SECONDS = 3600.0
+AUDIT_FIRST_DELAY_SECONDS = 300.0
 STALL_POLL_SECONDS = 5.0
 
 #: How many project databases are integrity-checked at once when they join.
@@ -344,6 +352,7 @@ class Supervisor:
         # First sweep happens on the first tick, not a minute in: a claim
         # stranded by the previous incarnation should not outlive boot.
         self._next_claim_sweep = 0.0
+        self._next_audit = time.monotonic() + AUDIT_FIRST_DELAY_SECONDS
 
         self._stop = False
         self._auto_respawn = False
@@ -381,6 +390,8 @@ class Supervisor:
                     self._reap_finished()
                 with self._step("sweep-claims"):
                     self._sweep_stale_claims()
+                with self._step("audit"):
+                    self._audit_indexes()
                 with self._step("enqueue-periodic"):
                     self._enqueue_periodic()
                 with self._step("dispatch"):
@@ -720,6 +731,31 @@ class Supervisor:
                              f"requeue it")
                     return
                 time.sleep(0.2 * (attempt + 1))
+
+    def _audit_indexes(self) -> None:
+        """Check every open index against the invariants, and say what fails.
+
+        Nothing here repairs anything: the supervisor's job is to make the
+        state legible, not to act on a heuristic. Every serious defect this
+        index has had was plain in the data for weeks while the logs and the
+        test suite said everything was fine — a line in the log the day it
+        starts is the whole point.
+        """
+        now = time.monotonic()
+        if now < self._next_audit:
+            return
+        self._next_audit = now + AUDIT_INTERVAL_SECONDS
+
+        from rtfm.core.audit import audit_project
+
+        for slot in list(self._slots.values()):
+            try:
+                findings = audit_project(slot.db_path, slot.rtfm_dir.parent)
+            except Exception as exc:
+                slot.log(f"audit error: {exc}")
+                continue
+            for finding in findings:
+                slot.log(f"audit: {finding.check}: {finding.detail}")
 
     def _sweep_stale_claims(self) -> None:
         """Return ``running`` rows this supervisor is not actually running.

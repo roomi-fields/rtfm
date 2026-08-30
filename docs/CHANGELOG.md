@@ -7,6 +7,44 @@ description: >-
 
 # Changelog
 
+## [0.32.0] — 2026-08-30
+
+### Added — RTFM checks itself
+
+Every serious defect this index has had passed the whole test suite and was
+plain in the data: a README re-ingested 82 000 times, 1 750 files that never
+entered any index, a corpus of PDFs searchable but unreadable. Each ran for
+weeks, and each was found the same way — by someone noticing a symptom and
+then querying live databases by hand. The suite could not see any of them: it
+tests one project, one directory, one pass, and these needed several projects
+over time.
+
+`rtfm audit` closes that gap. It checks every registered index against the
+properties a healthy one holds, and names what fails:
+
+- **churn** — a file re-indexed a dozen times in a day is two scans undoing
+  each other, not work;
+- **silent drops** — files RTFM refuses to index are remembered so scans stop
+  offering them, which also means nobody is told;
+- **unreadable** — passages that search can find and nothing can display;
+- **pagination** — a document split into many passages cannot be one page;
+- **stranded** — claims nobody will ever close;
+- **orphan books** — catalogue entries no scan tracks, never refreshed, never
+  removed, still answering searches;
+- **untracked roots** — a configured directory the index has never recorded.
+
+The checks are SQL over the queue and the catalogue, so they cost
+milliseconds. The supervisor runs the same ones hourly and writes findings
+into each project's log; `rtfm audit` runs them on demand (`--here` for the
+current project) and exits non-zero when something fires, so a scheduled run
+is noticed without anyone reading it.
+
+### Changed — `rtfm audit` found a seventh thing on its first run
+
+6 283 books across this fleet are tracked by no scan. They are never
+refreshed and never removed, and they keep answering searches with content
+that may have left the disk long ago. Reported, not yet repaired.
+
 ## [0.31.1] — 2026-08-30
 
 ### Fixed — retrying a failure also forgets it

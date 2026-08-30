@@ -2338,6 +2338,46 @@ def cmd_memory(args):
     lib.close()
 
 
+def cmd_audit(args):
+    """Check what RTFM must be able to say about itself, and say it.
+
+    Every serious defect this index has had was invisible to the test suite
+    and plain in the data. This runs those checks on demand; the supervisor
+    runs the same ones hourly.
+    """
+    from rtfm.core.audit import audit_fleet, audit_project
+    from rtfm.config import find_rtfm_root
+
+    if getattr(args, "here", False):
+        root = find_rtfm_root()
+        if root is None:
+            sys.exit("audit: no .rtfm/ project root in the cwd chain.")
+        findings = audit_project(root / ".rtfm" / "library.db", root)
+        projects = 1
+    else:
+        report = audit_fleet()
+        findings, projects = report.findings, report.projects
+
+    if not findings:
+        print(f"audit: {projects} index(es), nothing to report.")
+        return
+
+    by_check: dict[str, list] = {}
+    for f in findings:
+        by_check.setdefault(f.check, []).append(f)
+
+    print(f"audit: {projects} index(es), "
+          f"{len(findings)} finding(s) across {len(by_check)} check(s).\n")
+    for check, group in sorted(by_check.items(),
+                               key=lambda kv: -sum(f.count for f in kv[1])):
+        print(f"── {check}")
+        for f in sorted(group, key=lambda f: -f.count):
+            print(f"   {f.project:<22} {f.detail}")
+        print()
+    # Non-zero so a scheduled run is noticed without anyone reading it.
+    sys.exit(1)
+
+
 def cmd_monitor(args):
     """Tail the RTFM log file — shows live MCP and hook activity."""
     import subprocess
@@ -2872,6 +2912,15 @@ def main():
     p_memory.add_argument("--install-hook", action="store_true",
                           help="Install a global Claude Code Stop hook that auto-snapshots memory files")
     p_memory.set_defaults(func=cmd_memory)
+
+    # audit — the invariants RTFM checks about itself.
+    p_audit = subparsers.add_parser(
+        "audit",
+        help="Check every index against the invariants a healthy one holds")
+    p_audit.add_argument(
+        "--here", action="store_true",
+        help="Only this project (default: every registered index).")
+    p_audit.set_defaults(func=cmd_audit)
 
     # monitor
     p_monitor = subparsers.add_parser("monitor", help="Tail the RTFM log (live MCP/hook activity)")
