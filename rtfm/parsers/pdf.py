@@ -241,7 +241,7 @@ except Exception as e:
 try:
     print(json.dumps({"result": run_pdfium_op(json.loads(sys.argv[1]))}))
 except Exception as e:
-    print(json.dumps({"error": "%s: %s" % (type(e).__name__, e),
+    print(json.dumps({"error": str(e), "kind": type(e).__name__,
                       "trace": traceback.format_exc()}))
     sys.exit(3)
 """
@@ -322,6 +322,11 @@ def _call_pdfium_child(request: dict, timeout: int, what: str):
         msg = proc.stderr.strip() or proc.stdout.strip() or "no output"
         raise PDFExtractionError(f"{what} failed: {msg}")
     if "error" in payload:
+        # A PDFExtractionError already reads as a full sentence about this
+        # file — prefixing it again would say "pdftext extraction failed:
+        # pdftext extraction failed: ...". Anything else needs the context.
+        if payload.get("kind") == "PDFExtractionError":
+            raise PDFExtractionError(payload["error"])
         raise PDFExtractionError(f"{what} failed: {payload['error']}")
     return payload.get("result")
 

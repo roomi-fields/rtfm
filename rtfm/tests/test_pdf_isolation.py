@@ -78,6 +78,33 @@ class TestTheChildDoesTheWork:
             {"page": 1, "text": "hello"}
         ]
 
+    def test_a_failure_reads_as_one_sentence(self, monkeypatch):
+        """The child already says what went wrong with this file; saying it
+        twice ("extraction failed: extraction failed: ...") helps nobody."""
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args, 3,
+                stdout='{"error": "pdftext extraction failed: /a/b.pdf",'
+                       ' "kind": "PDFExtractionError"}\n',
+                stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(PDFExtractionError) as exc:
+            extract_with_pdftext(Path("/a/b.pdf"))
+        assert str(exc.value) == "pdftext extraction failed: /a/b.pdf"
+
+    def test_an_unexpected_failure_keeps_its_context(self, monkeypatch):
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args, 3,
+                stdout='{"error": "disk on fire", "kind": "OSError"}\n',
+                stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(PDFExtractionError) as exc:
+            extract_with_pdftext(Path("/a/b.pdf"))
+        assert str(exc.value) == "pdftext extraction failed: disk on fire"
+
 
 class TestNothingCallsPdfiumInProcess:
     """Guard: the in-process bodies have exactly one live caller.
