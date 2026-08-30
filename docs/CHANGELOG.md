@@ -7,6 +7,16 @@ description: >-
 
 # Changelog
 
+## [0.31.1] — 2026-08-30
+
+### Fixed — retrying a failure also forgets it
+
+A failure is remembered twice: as a queue row, and as "this content does not
+parse" so scans stop re-proposing the file. That second memory is right while
+the reason persists and wrong the moment the reason is fixed in RTFM itself —
+`rtfm queue retry-failed` cleared the row and the file still never came back.
+It now clears both, and says how many files the next scan will offer again.
+
 ## [0.31.0] — 2026-08-30
 
 ### Fixed — two files with the same name are two files

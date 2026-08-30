@@ -128,3 +128,23 @@ class TestAnIndexedFileKeepsItsIdentity:
             assert len(lib.list_books(corpus="c")) == 1, "no orphan left behind"
         finally:
             lib.close()
+
+
+class TestRetryingAFailureAlsoForgetsIt:
+    """A failure is remembered twice: as a queue row, and as "this content
+    does not parse" so scans stop re-proposing the file. When the reason is
+    fixed in RTFM itself, clearing only the queue row leaves the file out of
+    the index anyway — which is what kept 58 files invisible after the
+    identity fix landed."""
+
+    def test_the_memory_is_cleared_too(self, tmp_path):
+        lib = Library(str(tmp_path / "library.db"))
+        try:
+            lib.record_ingest_failure("a.md", "c", "hash", 10, "boom")
+            lib.record_ingest_failure("b.md", "c", "hash", 10, "boom")
+            assert len(lib.list_ingest_failures()) == 2
+
+            assert lib.forget_ingest_failures() == 2
+            assert lib.list_ingest_failures() == {}
+        finally:
+            lib.close()

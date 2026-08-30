@@ -2325,6 +2325,21 @@ class Library:
         )
         conn.commit()
 
+    def forget_ingest_failures(self) -> int:
+        """Forget every remembered parse failure. Returns how many.
+
+        A remembered failure keeps a scan from re-proposing a file whose
+        content it already choked on — which is right while the reason
+        persists, and wrong the moment the reason is fixed in RTFM itself.
+        After such a fix the memory is what keeps the file out of the index,
+        so retrying failures has to clear it too.
+        """
+        conn = self._get_conn()
+        n = conn.execute("SELECT COUNT(*) FROM ingest_failures").fetchone()[0]
+        conn.execute("DELETE FROM ingest_failures")
+        conn.commit()
+        return n
+
     def clear_ingest_failure(self, filepath: str, corpus: str) -> None:
         """Forget a past failure — the file parsed this time."""
         conn = self._get_conn()

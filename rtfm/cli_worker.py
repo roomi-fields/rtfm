@@ -430,6 +430,18 @@ def cmd_queue(args):
         if action == "retry-failed":
             n = queue.retry_failed()
             print(f"queue: moved {n} failed row(s) back to pending.")
+            # A failure is remembered twice: as a queue row, and as "this
+            # content does not parse" so scans stop re-proposing it. Clearing
+            # only the first leaves the file out of the index anyway.
+            from rtfm.core.library import Library
+            lib = Library(str(db_path), create=False)
+            try:
+                forgotten = lib.forget_ingest_failures()
+            finally:
+                lib.close()
+            if forgotten:
+                print(f"queue: forgot {forgotten} remembered parse failure(s) "
+                      f"— the next scan will offer those files again.")
             return
 
         if action == "reap":
