@@ -51,8 +51,60 @@ def resolve_db(explicit_db: str | None = None) -> str:
     return "library.db"
 
 
+def normalize_patterns(value) -> list[str] | None:
+    """Coerce a hand-written ``include``/``exclude`` value into a pattern list.
+
+    ``config.json`` is edited by hand at least as often as it is written by
+    ``rtfm add``, and the natural thing to type is the same comma-separated
+    string the CLI flag takes: ``"exclude": "data/*,build/*"``. A bare string
+    is iterable, so every pattern matcher downstream then walked it character
+    by character — ``d``, ``a``, ``t``, ``a``, ``/``, ``*`` — and the scan
+    silently selected nothing. The only visible trace was ``rtfm sources``
+    printing the rule one letter per line.
+
+    Accepting the string and splitting it on commas costs nothing and makes
+    the two spellings mean the same thing.
+
+    Args:
+        value: A list of patterns, a comma-separated string, or None.
+
+    Returns:
+        A list of non-empty patterns, or None when nothing was configured.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        # A number, a dict, anything else: no sane reading. Treat it as
+        # unset rather than letting it match nothing in silence.
+        return None
+    out = [str(p).strip() for p in items]
+    out = [p for p in out if p]
+    return out or None
+
+
+def normalize_source(src: dict) -> dict:
+    """Return a ``sources`` entry with its selection rules in canonical form."""
+    out = dict(src)
+    for key in ("include", "exclude"):
+        patterns = normalize_patterns(out.get(key))
+        if patterns is None:
+            out.pop(key, None)
+        else:
+            out[key] = patterns
+    return out
+
+
 def load_config(project_root: Path) -> dict:
     """Load .rtfm/config.json from a project root.
+
+    Selection rules are normalised on the way out (see
+    :func:`normalize_patterns`), so every consumer — scan, sync, doctor,
+    ``rtfm sources`` — sees the same canonical lists whether the entry was
+    written by ``rtfm add`` or typed by hand.
 
     Args:
         project_root: Project root directory.
@@ -61,12 +113,18 @@ def load_config(project_root: Path) -> dict:
         Config dict (empty dict if file doesn't exist).
     """
     config_path = Path(project_root) / ".rtfm" / "config.json"
-    if config_path.exists():
-        try:
-            return json.loads(config_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+    if not config_path.exists():
+        return {}
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if isinstance(config, dict) and isinstance(config.get("sources"), list):
+        config["sources"] = [
+            normalize_source(s) if isinstance(s, dict) else s
+            for s in config["sources"]
+        ]
+    return config
 
 
 def save_config(project_root: Path, config: dict) -> None:
@@ -133,10 +191,14 @@ def build_scan_payload(
     }
     if src.get("extensions"):
         payload["extensions"] = src["extensions"]
-    if src.get("include"):
-        payload["include"] = list(src["include"])
-    if src.get("exclude"):
-        payload["exclude"] = list(src["exclude"])
+    # normalize_patterns again, not only in load_config: `rtfm sync` builds
+    # ad-hoc source dicts from CLI flags, and they deserve the same reading.
+    include = normalize_patterns(src.get("include"))
+    if include:
+        payload["include"] = include
+    exclude = normalize_patterns(src.get("exclude"))
+    if exclude:
+        payload["exclude"] = exclude
 
     effective_gitignore = src.get("honor_gitignore")
     if effective_gitignore is None:
@@ -180,6 +242,7 @@ def add_source(
     extensions: str | None = None,
     include: list[str] | None = None,
     exclude: list[str] | None = None,
+    honor_gitignore: bool | None = None,
 ) -> str:
     """Add a source to .rtfm/config.json.
 
@@ -195,6 +258,9 @@ def add_source(
         include: Selection patterns (prefix/suffix/glob: ``-gr.*``, ``*.bps``,
             ``fixtures/*``). When set, only matching files are indexed.
         exclude: Rejection patterns, same syntax — matched files are skipped.
+        honor_gitignore: Pass False to index a directory the project
+            deliberately keeps out of version control — heavy PDFs, datasets,
+            downloaded corpora. Omit to keep the default (gitignore obeyed).
 
     Returns:
         "added" or "already exists".
@@ -212,10 +278,14 @@ def add_source(
     entry: dict = {"path": resolved, "corpus": corpus}
     if extensions:
         entry["extensions"] = extensions
-    if include:
-        entry["include"] = list(include)
-    if exclude:
-        entry["exclude"] = list(exclude)
+    inc = normalize_patterns(include)
+    if inc:
+        entry["include"] = inc
+    exc = normalize_patterns(exclude)
+    if exc:
+        entry["exclude"] = exc
+    if honor_gitignore is False:
+        entry["honor_gitignore"] = False
 
     sources.append(entry)
     config["sources"] = sources

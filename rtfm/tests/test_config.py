@@ -320,3 +320,83 @@ class TestScanPayloadHasOneAuthor:
             q.close()
         # Identical payload → the queue deduplicated it, one job still.
         assert scans == [reference]
+
+
+class TestHandWrittenSelectionRules:
+    """A rule typed into config.json means what it looks like it means.
+
+    `"exclude": "data/*,build/*"` is the natural thing to write — it is
+    exactly what the CLI flag takes. A bare string is iterable, so every
+    matcher downstream used to walk it letter by letter and the scan
+    silently selected nothing; the only visible trace was `rtfm sources`
+    printing the rule one character per line.
+    """
+
+    def _write(self, root, source):
+        (root / ".rtfm").mkdir(exist_ok=True)
+        save_config(root, {"sources": [source]})
+
+    def test_a_comma_separated_string_is_read_as_the_patterns_it_lists(
+            self, tmp_path):
+        self._write(tmp_path, {"path": "/x", "corpus": "c",
+                               "exclude": "data/*,build/*"})
+        src = load_config(tmp_path)["sources"][0]
+        assert src["exclude"] == ["data/*", "build/*"]
+
+    def test_include_gets_the_same_reading(self, tmp_path):
+        self._write(tmp_path, {"path": "/x", "corpus": "c",
+                               "include": " *.md , docs/* "})
+        assert load_config(tmp_path)["sources"][0]["include"] == [
+            "*.md", "docs/*"]
+
+    def test_a_single_pattern_string_stays_one_pattern(self, tmp_path):
+        self._write(tmp_path, {"path": "/x", "corpus": "c",
+                               "exclude": "node_modules/*"})
+        assert load_config(tmp_path)["sources"][0]["exclude"] == [
+            "node_modules/*"]
+
+    def test_a_list_is_left_alone(self, tmp_path):
+        self._write(tmp_path, {"path": "/x", "corpus": "c",
+                               "exclude": ["a/*", "b/*"]})
+        assert load_config(tmp_path)["sources"][0]["exclude"] == ["a/*", "b/*"]
+
+    def test_an_empty_rule_is_no_rule_at_all(self, tmp_path):
+        """Better absent than present-and-matching-nothing: an empty string
+        used to survive as a pattern and could reject every file."""
+        self._write(tmp_path, {"path": "/x", "corpus": "c", "exclude": " , "})
+        assert "exclude" not in load_config(tmp_path)["sources"][0]
+
+    def test_the_rules_reach_the_scan(self, tmp_path):
+        from rtfm.config import build_scan_payload
+
+        self._write(tmp_path, {"path": "/x", "corpus": "c",
+                               "exclude": "data/*,build/*"})
+        src = load_config(tmp_path)["sources"][0]
+        assert build_scan_payload(src)["exclude"] == ["data/*", "build/*"]
+
+
+class TestIndexingWhatGitIgnores:
+    """A corpus of heavy files is routinely kept out of version control.
+    Registering it must not require hand-editing config.json afterwards."""
+
+    def test_add_source_records_the_choice(self, tmp_path):
+        (tmp_path / ".rtfm").mkdir()
+        add_source(tmp_path, str(tmp_path / "pdfs"), "papers",
+                   honor_gitignore=False)
+        assert list_sources(tmp_path)[0]["honor_gitignore"] is False
+
+    def test_the_default_stays_unwritten(self, tmp_path):
+        """Omitted, not spelled out: the queue deduplicates pending jobs on
+        the exact payload, so a default written out would fail to match."""
+        (tmp_path / ".rtfm").mkdir()
+        add_source(tmp_path, str(tmp_path / "docs"), "docs")
+        assert "honor_gitignore" not in list_sources(tmp_path)[0]
+
+    def test_the_choice_reaches_the_scan(self, tmp_path):
+        from rtfm.config import build_scan_payload
+
+        (tmp_path / ".rtfm").mkdir()
+        add_source(tmp_path, str(tmp_path / "pdfs"), "papers",
+                   honor_gitignore=False)
+        src = list_sources(tmp_path)[0]
+        assert build_scan_payload(src)["honor_gitignore"] is False

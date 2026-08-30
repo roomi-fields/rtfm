@@ -13,6 +13,7 @@ Install dependencies:
 
 import re
 import hashlib
+import threading
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -183,7 +184,9 @@ def measure_pdf_text(path: Path, sample_pages: int = SCAN_SAMPLE_PAGES) -> dict:
 
     import warnings
     try:
-        with warnings.catch_warnings():
+        # The one pdfium call left in-process (CLI `rtfm doctor`). The lock
+        # keeps it from ever overlapping another one — see _PDFIUM_LOCK.
+        with _PDFIUM_LOCK, warnings.catch_warnings():
             warnings.simplefilter("ignore")
             doc = pdfium.PdfDocument(data)
             try:
@@ -206,12 +209,136 @@ def measure_pdf_text(path: Path, sample_pages: int = SCAN_SAMPLE_PAGES) -> dict:
             "chars_per_page": total / sampled, "error": None}
 
 
-def extract_with_pdftext(path: Path) -> list[dict]:
+# pdfium carries process-global, unsynchronised state. Two threads that
+# open or page through a document at the same time corrupt it: the field
+# report was "Failed to load document (PDFium: Data format error)" on
+# files that read perfectly on their own, and — often enough — a segfault
+# inside libpdfium.so. A segfault is not catchable: it took down the whole
+# supervisor, stranding every claim its twelve lanes were holding, so one
+# awkward PDF cost a fleet-wide stall.
+#
+# So no pdfium work runs in the daemon's own process any more. Every
+# document goes through a one-shot child (the same shape as the marker
+# child below): separate address space, separate pdfium globals, and a
+# crash costs exactly one file. The lock below is what remains for the
+# one in-process caller, ``measure_pdf_text``, which runs from the CLI.
+_PDFIUM_LOCK = threading.Lock()
+
+# Wall-clock budgets for the child. Text extraction of even a large book
+# is seconds; ten minutes means pdfium is wedged (a dead network mount,
+# a pathological file) and the lane is better spent elsewhere. OCR is
+# legitimately slow, and is already cut into page tranches upstream.
+_PDFTEXT_TIMEOUT_S = 10 * 60
+_TESSERACT_TIMEOUT_S = 30 * 60
+
+_PDFIUM_CHILD_CODE = r"""
+import json, sys, traceback
+try:
+    from rtfm.parsers.pdf import run_pdfium_op
+except Exception as e:
+    print(json.dumps({"error": "import: %s" % e}))
+    sys.exit(2)
+try:
+    print(json.dumps({"result": run_pdfium_op(json.loads(sys.argv[1]))}))
+except Exception as e:
+    print(json.dumps({"error": "%s: %s" % (type(e).__name__, e),
+                      "trace": traceback.format_exc()}))
+    sys.exit(3)
+"""
+
+
+def run_pdfium_op(request: dict):
+    """Execute one pdfium operation in the current process.
+
+    The child's entry point — and the only place the in-process bodies are
+    called from in the daemon. Kept public because the child imports it by
+    name.
     """
-    Extract text using pdftext (fast, basic).
+    op = request.get("op")
+    path = Path(request["path"])
+    with _PDFIUM_LOCK:
+        if op == "text":
+            return _pdftext_inprocess(path)
+        if op == "metadata":
+            return _pdfmeta_inprocess(path)
+        if op == "ocr":
+            return _tesseract_inprocess(
+                path,
+                langs=request.get("langs", TESSERACT_DEFAULT_LANGS),
+                page_start=request.get("page_start", 1),
+                page_end=request.get("page_end"),
+                scale=request.get("scale", TESSERACT_RENDER_SCALE),
+            )
+    raise PDFExtractionError(f"unknown pdfium operation: {op!r}")
+
+
+def _call_pdfium_child(request: dict, timeout: int, what: str):
+    """Run one pdfium operation in a disposable child process.
+
+    Raises:
+        PDFExtractionError: on crash, timeout, or a failure reported by the
+            child. A crash names the signal — the caller's job fails, the
+            worker does not.
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+
+    # The child imports rtfm; make sure it can even when the interpreter
+    # running us was started from somewhere else entirely.
+    package_parent = str(Path(__file__).resolve().parents[2])
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env["PYTHONPATH"] = os.pathsep.join(
+        [package_parent, env["PYTHONPATH"]] if env.get("PYTHONPATH")
+        else [package_parent]
+    )
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _PDFIUM_CHILD_CODE, json.dumps(request)],
+            capture_output=True, text=True, errors="replace",
+            timeout=timeout, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        raise PDFExtractionError(
+            f"{what} timed out after {timeout}s on {request['path']}"
+        )
+
+    if proc.returncode < 0:
+        raise PDFExtractionError(
+            f"pdfium crashed (signal {-proc.returncode}) on {request['path']} "
+            f"— the file is skipped; the worker is unaffected"
+        )
+
+    payload = None
+    if proc.stdout.strip():
+        try:
+            payload = json.loads(proc.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            payload = None
+
+    if payload is None:
+        msg = proc.stderr.strip() or proc.stdout.strip() or "no output"
+        raise PDFExtractionError(f"{what} failed: {msg}")
+    if "error" in payload:
+        raise PDFExtractionError(f"{what} failed: {payload['error']}")
+    return payload.get("result")
+
+
+def extract_with_pdftext(path: Path) -> list[dict]:
+    """Extract text using pdftext, in a disposable child process.
 
     Returns list of dicts with 'page' and 'text' keys.
     """
+    return _call_pdfium_child(
+        {"op": "text", "path": str(path)},
+        _PDFTEXT_TIMEOUT_S, "pdftext extraction",
+    )
+
+
+def _pdftext_inprocess(path: Path) -> list[dict]:
+    """The pdftext body itself. Only ever called inside the child."""
     try:
         from pdftext.extraction import plain_text_output
     except ImportError:
@@ -259,7 +386,28 @@ def extract_with_tesseract(
     page_end: Optional[int] = None,
     scale: float = TESSERACT_RENDER_SCALE,
 ) -> list[dict]:
-    """OCR a (range of) PDF page(s) with tesseract — fast and CPU-light.
+    """OCR a (range of) PDF page(s) with tesseract, in a child process.
+
+    ``page_start``/``page_end`` are 1-indexed and inclusive; this is what
+    lets the worker split a big scan into short, resumable P3 tranches.
+
+    Returns ``[{'page': n, 'text': ...}, ...]`` for pages with text.
+    """
+    return _call_pdfium_child(
+        {"op": "ocr", "path": str(path), "langs": langs,
+         "page_start": page_start, "page_end": page_end, "scale": scale},
+        _TESSERACT_TIMEOUT_S, "tesseract extraction",
+    )
+
+
+def _tesseract_inprocess(
+    path: Path,
+    langs: str = TESSERACT_DEFAULT_LANGS,
+    page_start: int = 1,
+    page_end: Optional[int] = None,
+    scale: float = TESSERACT_RENDER_SCALE,
+) -> list[dict]:
+    """The tesseract body itself. Only ever called inside the child.
 
     Renders each page to an image via pypdfium2 (already a dependency)
     and OCRs it with tesseract (a fast C binary, no multi-GB ML models
@@ -425,6 +573,16 @@ def extract_with_marker(path: Path) -> list[dict]:
     return [{"page": 1, "text": payload.get("markdown", "")}]
 
 
+def _pdfmeta_inprocess(path: Path) -> dict:
+    """Read a PDF's own title/author. Only ever called inside the child."""
+    from pdftext.extraction import dictionary_output
+
+    info = dictionary_output(str(path), page_range=[0])
+    if info and isinstance(info, dict):
+        return info.get("metadata") or {}
+    return {}
+
+
 def pages_to_chunks(
     pages: list[dict],
     book_slug: str,
@@ -552,16 +710,17 @@ class PDFParser(BaseParser):
 
         # Try to extract PDF metadata
         try:
-            from pdftext.extraction import dictionary_output
-            info = dictionary_output(str(path), page_range=[0])
-            if info and isinstance(info, dict):
-                if 'metadata' in info:
-                    pdf_meta = info['metadata']
-                    if pdf_meta.get('title'):
-                        metadata['title'] = pdf_meta['title']
-                    if pdf_meta.get('author'):
-                        metadata['author'] = pdf_meta['author']
-        except:
+            pdf_meta = _call_pdfium_child(
+                {"op": "metadata", "path": str(path)},
+                _PDFTEXT_TIMEOUT_S, "pdf metadata",
+            ) or {}
+            if pdf_meta.get('title'):
+                metadata['title'] = pdf_meta['title']
+            if pdf_meta.get('author'):
+                metadata['author'] = pdf_meta['author']
+        except Exception:
+            # Title and author are a nicety; the filename already gives a
+            # usable title. Never let metadata cost us the document.
             pass
 
         return metadata

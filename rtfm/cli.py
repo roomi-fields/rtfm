@@ -2022,8 +2022,10 @@ def cmd_add(args):
         if getattr(args, "include", None) else None
     exc = [p.strip() for p in args.exclude.split(",") if p.strip()] \
         if getattr(args, "exclude", None) else None
+    no_git = bool(getattr(args, "no_gitignore", False))
     result = add_source(root, args.path, corpus=args.corpus, extensions=ext,
-                        include=inc, exclude=exc)
+                        include=inc, exclude=exc,
+                        honor_gitignore=False if no_git else None)
     resolved = str(Path(args.path).resolve())
 
     if result == "added":
@@ -2036,6 +2038,8 @@ def cmd_add(args):
             print(f"  Include: {', '.join(inc)}")
         if exc:
             print(f"  Exclude: {', '.join(exc)}")
+        if no_git:
+            print("  Gitignore: off (files ignored by git are indexed too)")
     else:
         print(f"Source already registered: [{args.corpus}] {resolved}")
 
@@ -2761,6 +2765,11 @@ def main():
     p_add.add_argument("--exclude", "-x",
                        help="Comma-separated rejection patterns, same syntax "
                             "(e.g. '*.min.js,package-lock.json').")
+    p_add.add_argument(
+        "--no-gitignore", action="store_true",
+        help="Index this source even where .gitignore excludes it — the usual "
+             "case for a corpus of heavy files kept out of version control. "
+             "Recorded on the source, so every later scan honours it.")
     p_add.set_defaults(func=cmd_add)
 
     # remove (unregister a source — the counterpart to `add`)

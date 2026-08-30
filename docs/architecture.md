@@ -350,3 +350,11 @@ Thanks to everyone who reported issues and tested RTFM.
   the two enqueue sites that built the same payload by hand. The diagnosis
   named the fix: one shared description of a source, which turned out to
   correct four callers rather than two. Fixed in 0.28.1.
+
+  Also found why no PDF in their project could ever be indexed: pdfium is not
+  reentrant, and twelve worker lanes sharing one process were corrupting it —
+  and sometimes segfaulting, killing the supervisor outright. They ruled out
+  the files themselves (each extracted perfectly alone) and brought the kernel
+  log that showed the crash inside `libpdfium.so`, which is the whole diagnosis:
+  the reported "data format error" was a symptom of an already-corrupted
+  process. Fixed in 0.29.0 by giving every document its own child process.

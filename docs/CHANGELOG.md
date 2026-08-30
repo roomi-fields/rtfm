@@ -7,6 +7,48 @@ description: >-
 
 # Changelog
 
+## [0.29.0] — 2026-08-30
+
+### Fixed — PDF work no longer runs in the daemon's own process
+
+pdfium keeps process-global, unsynchronised state. The supervisor runs twelve
+lanes in one process, so twelve documents were being opened and paged through
+at once, in the same address space. The library does not survive that: healthy
+files came back as `Failed to load document (PDFium: Data format error)`, and
+often enough the process **segfaulted** — which is not catchable. The whole
+supervisor died mid-flight, leaving every claim its lanes were holding stuck in
+`running` forever. On the reporting project, all ~122 PDFs failed this way and
+none could ever be indexed.
+
+The files were fine: each one extracted perfectly when opened on its own. It was
+the concurrency, and it is reproducible in twenty lines — twelve threads over a
+dozen sound PDFs fail; the same dozen read one after another do not.
+
+Every document now goes through a one-shot child process (the shape the marker
+backend has used since 0.9.5): its own address space, its own pdfium globals,
+and a crash costs exactly one file with a message that names the signal. Text
+extraction, document metadata and tesseract OCR all take that route; the single
+in-process caller left, `rtfm doctor`'s text-density probe, holds a lock. A
+guard test fails if any module starts calling the in-process bodies directly.
+
+Reported by @t0mmyf3rr3ira, with the kernel log that identified the segfault.
+
+### Fixed — a selection rule typed by hand means what it looks like it means
+
+`"exclude": "data/*,build/*"` in `.rtfm/config.json` — exactly what the
+command-line flag takes — was read character by character: `d`, `a`, `t`, `a`,
+`/`, `*`. The scan then selected nothing, silently. The only visible trace was
+`rtfm sources` printing the rule one letter per line. A comma-separated string
+is now read as the list of patterns it obviously is, wherever it appears.
+
+### Added — `rtfm add --no-gitignore`
+
+A corpus of heavy files is routinely kept out of version control, which made it
+invisible to indexing with no documented way through: the option existed on
+`rtfm sync` only, and persisting it meant hand-editing `config.json` after
+finding the key in the supervisor's source. It is now an option on `add`, and
+recorded on the source so every later scan honours it.
+
 ## [0.28.3] — 2026-08-29
 
 ### Fixed — the server no longer conjures an index where none was asked for
