@@ -156,7 +156,8 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
         }
     """
     from rtfm.core.sync import (
-        confirm_removals, _path_to_slug, compute_diff, scan_directory,
+        _path_to_slug, _sibling_roots, build_disk_check, compute_diff,
+        confirm_removals, scan_directory,
     )
 
     payload = job.payload or {}
@@ -186,6 +187,9 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
 
     lib = Library(str(worker.db_path))
     try:
+        # Read the corpus's other directories *before* recording this one,
+        # so the list is what the scan must protect from removal.
+        sibling_roots = _sibling_roots(lib, corpus, root)
         lib.set_sync_root(corpus, str(root))
         files_on_disk = scan_directory(root, ext_set,
                                        honor_gitignore=honor_gitignore,
@@ -197,11 +201,12 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
             indexed_global=indexed_global,
             current_corpus=corpus,
             known_failures=lib.list_ingest_failures(corpus=corpus),
+            still_on_disk=build_disk_check(lib, root),
         )
 
         # Cross-corpus moves: cheap, in-place — no parsing, no re-embed.
         cross_moved = 0
-        for old_rel, _old_corpus, new_path in diff.cross_moved:
+        for old_rel, _old_corpus, new_path in diff.cross_moved:  # noqa: B007
             try:
                 new_rel = str(new_path.relative_to(root))
             except ValueError:
@@ -209,7 +214,7 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
             try:
                 new_slug = _path_to_slug(new_rel, corpus)
                 if lib.move_file(old_rel, new_rel, new_slug,
-                                 new_corpus=corpus):
+                                 corpus=_old_corpus, new_corpus=corpus):
                     cross_moved += 1
             except Exception as exc:
                 worker._log(f"scan [{corpus}] cross-move error {old_rel}: {exc}")
@@ -225,7 +230,7 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
                 new_rel = str(new_path)
             try:
                 new_slug = _path_to_slug(new_rel, corpus)
-                if lib.move_file(old_rel, new_rel, new_slug):
+                if lib.move_file(old_rel, new_rel, new_slug, corpus=corpus):
                     moved += 1
             except Exception as exc:
                 worker._log(f"scan [{corpus}] move error {old_rel}: {exc}")
@@ -242,7 +247,8 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
     try:
         if diff.removed:
             confirmed, kept = confirm_removals(
-                root, list(diff.removed), force=force_remove)
+                root, list(diff.removed), force=force_remove,
+                sibling_roots=sibling_roots)
             skipped_removed = len(kept)
             if confirmed:
                 payloads = [{"filepath": rel, "corpus": corpus}
@@ -637,7 +643,7 @@ def handle_remove(job: Job, worker: "JobContext") -> None:
 
     lib = Library(str(worker.db_path))
     try:
-        removed = lib.remove_file(rel)
+        removed = lib.remove_file(rel, corpus)
         if removed:
             worker._log(f"remove [{corpus}] {rel}")
         else:

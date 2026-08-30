@@ -145,3 +145,59 @@ class TestNothingCallsPdfiumInProcess:
         assert not offenders, (
             "pdfium must never run in the daemon's process — route these "
             "through _call_pdfium_child:\n  " + "\n  ".join(offenders))
+
+
+class TestPagesAreRealPages:
+    """Extraction returned the whole document as one string.
+
+    pdftext's plain output has no reliable page separator, so every PDF came
+    back as a single page: 45 passages all labelled "Page 1", 118 of 119
+    documents recorded with a page count of 1, and no landmark to navigate a
+    400-page book by. The paginated output gives one string per page.
+    """
+
+    def _fake_pages(self, monkeypatch, pages):
+        import rtfm.parsers.pdf as pdf
+
+        monkeypatch.setattr(pdf, "_call_pdfium_child",
+                            lambda *a, **k: pages)
+
+    def test_each_page_keeps_its_own_number(self, monkeypatch, tmp_path):
+        from rtfm.parsers.pdf import PDFParser
+
+        self._fake_pages(monkeypatch, [
+            {"page": 1, "text": "First page. " * 30},
+            {"page": 2, "text": "Second page. " * 30},
+            {"page": 3, "text": "Third page. " * 30},
+        ])
+        meta: dict = {}
+        chunks = list(PDFParser().parse(tmp_path / "doc.pdf", meta))
+        assert sorted({c.page_start for c in chunks}) == [1, 2, 3]
+        assert meta["page_count"] == 3
+
+    def test_a_blank_page_does_not_shift_the_ones_after_it(
+            self, monkeypatch, tmp_path):
+        """An image-only or empty page yields no text. The pages that follow
+        keep their true numbers, and the count stays the document's."""
+        from rtfm.parsers.pdf import PDFParser
+
+        self._fake_pages(monkeypatch, [
+            {"page": 1, "text": "Only text is here. " * 30},
+            {"page": 7, "text": "Much later in the book. " * 30},
+        ])
+        meta: dict = {}
+        chunks = list(PDFParser().parse(tmp_path / "doc.pdf", meta))
+        assert sorted({c.page_start for c in chunks}) == [1, 7]
+        assert meta["page_count"] == 7
+
+    def test_the_page_count_reaches_a_caller_who_passed_an_empty_dict(
+            self, monkeypatch, tmp_path):
+        """`metadata or {}` quietly replaced an empty dict with a new one, so
+        the count was written somewhere the caller never saw."""
+        from rtfm.parsers.pdf import PDFParser
+
+        self._fake_pages(monkeypatch, [{"page": 1, "text": "Body. " * 50},
+                                       {"page": 2, "text": "More. " * 50}])
+        meta: dict = {}
+        list(PDFParser().parse(tmp_path / "doc.pdf", meta))
+        assert meta["page_count"] == 2

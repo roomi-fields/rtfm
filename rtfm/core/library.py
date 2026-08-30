@@ -130,14 +130,21 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
 END;
 
 -- Indexed files tracking (for incremental sync)
+-- Tracking of indexed files. The path is relative to the source directory
+-- it came from, so it is unique *within a corpus*, never globally: the same
+-- README.md legitimately exists in two indexed trees. A global UNIQUE made
+-- them fight over one row — each scan claimed the file from the other corpus
+-- and the next scan claimed it back, for ever (932 000 re-ingestions on one
+-- project here, 82 000 of them for a single file).
 CREATE TABLE IF NOT EXISTS indexed_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    filepath TEXT UNIQUE NOT NULL,
+    filepath TEXT NOT NULL,
     file_hash TEXT NOT NULL,
     corpus TEXT DEFAULT 'default',
     book_slug TEXT,
     indexed_at TEXT,
-    file_size INTEGER
+    file_size INTEGER,
+    UNIQUE (filepath, corpus)
 );
 CREATE INDEX IF NOT EXISTS idx_indexed_filepath ON indexed_files(filepath);
 
@@ -160,11 +167,14 @@ CREATE TABLE IF NOT EXISTS ingest_failures (
     PRIMARY KEY (filepath, corpus)
 );
 
--- Sync roots tracking (absolute project roots per corpus)
+-- Sync roots tracking (absolute source directories, one row per root).
+-- A corpus may gather several directories — `rtfm add` allows it and real
+-- projects use it — so the key is the pair, not the corpus alone.
 CREATE TABLE IF NOT EXISTS sync_roots (
-    corpus TEXT PRIMARY KEY,
+    corpus TEXT NOT NULL,
     root_path TEXT NOT NULL,
-    updated_at TEXT DEFAULT (datetime('now'))
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (corpus, root_path)
 );
 
 -- Dependency graph edges (book-level: imports, links, includes, citations)
@@ -278,7 +288,72 @@ class Library:
             # Fresh database - create full schema
             conn.executescript(SCHEMA)
 
+        # Key widenings run either way: a database can carry an old table
+        # even when the schema script has just run (CREATE IF NOT EXISTS
+        # leaves it alone), and a wrong key here is not a missing column —
+        # it is a permanent index/de-index loop.
+        self._migrate_keys(conn)
         conn.commit()
+
+    def _migrate_keys(self, conn: sqlite3.Connection):
+        """Widen keys that were once too narrow.
+
+        Both of these treated a name as if it identified a file on its own:
+
+        * ``sync_roots`` keyed on the corpus, so a corpus gathering several
+          directories kept only the last one scanned. Nothing then knew where
+          the other directories' files lived, and every scan of one directory
+          saw the others' files as deleted.
+        * ``indexed_files`` had ``filepath`` globally UNIQUE, so the same
+          relative path in two corpora fought over one row — each scan
+          claiming the file from the other corpus, for ever.
+
+        Rebuilding is the only way to change a key in SQLite. Both are
+        idempotent and keep every existing row.
+        """
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='sync_roots'"
+        ).fetchone()
+        if row and "PRIMARY KEY (corpus, root_path)" not in (row[0] or ""):
+            conn.executescript("""
+                CREATE TABLE sync_roots_new (
+                    corpus TEXT NOT NULL,
+                    root_path TEXT NOT NULL,
+                    updated_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (corpus, root_path)
+                );
+                INSERT OR IGNORE INTO sync_roots_new (corpus, root_path, updated_at)
+                    SELECT corpus, root_path, updated_at FROM sync_roots;
+                DROP TABLE sync_roots;
+                ALTER TABLE sync_roots_new RENAME TO sync_roots;
+            """)
+
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='indexed_files'"
+        ).fetchone()
+        if row and "UNIQUE (filepath, corpus)" not in (row[0] or ""):
+            conn.executescript("""
+                CREATE TABLE indexed_files_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filepath TEXT NOT NULL,
+                    file_hash TEXT NOT NULL,
+                    corpus TEXT DEFAULT 'default',
+                    book_slug TEXT,
+                    indexed_at TEXT,
+                    file_size INTEGER,
+                    UNIQUE (filepath, corpus)
+                );
+                INSERT OR IGNORE INTO indexed_files_new
+                    (filepath, file_hash, corpus, book_slug, indexed_at, file_size)
+                    SELECT filepath, file_hash, corpus, book_slug, indexed_at,
+                           file_size FROM indexed_files;
+                DROP TABLE indexed_files;
+                ALTER TABLE indexed_files_new RENAME TO indexed_files;
+                CREATE INDEX IF NOT EXISTS idx_indexed_filepath
+                    ON indexed_files(filepath);
+            """)
 
     def _migrate_schema(self, conn: sqlite3.Connection):
         """Add new columns to existing database."""
@@ -310,7 +385,7 @@ class Library:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS indexed_files (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    filepath TEXT UNIQUE NOT NULL,
+                    filepath TEXT NOT NULL,
                     file_hash TEXT NOT NULL,
                     corpus TEXT DEFAULT 'default',
                     book_slug TEXT,
@@ -339,16 +414,19 @@ class Library:
                 );
             """)
 
-        # Create sync_roots table if missing
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='sync_roots'"
-        )
-        if not cursor.fetchone():
+        # sync_roots: create if missing. Widening its key is handled by
+        # :meth:`_migrate_keys`, which runs for every database.
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='sync_roots'"
+        ).fetchone()
+        if not row:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS sync_roots (
-                    corpus TEXT PRIMARY KEY,
+                    corpus TEXT NOT NULL,
                     root_path TEXT NOT NULL,
-                    updated_at TEXT DEFAULT (datetime('now'))
+                    updated_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (corpus, root_path)
                 );
             """)
 
@@ -2264,7 +2342,7 @@ class Library:
         conn.execute(
             """INSERT INTO indexed_files (filepath, file_hash, corpus, book_slug, indexed_at, file_size)
                VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(filepath) DO UPDATE SET
+               ON CONFLICT(filepath, corpus) DO UPDATE SET
                    file_hash = excluded.file_hash,
                    corpus = excluded.corpus,
                    book_slug = excluded.book_slug,
@@ -2275,14 +2353,19 @@ class Library:
         )
         conn.commit()
 
-    def remove_file(self, filepath: str) -> bool:
-        """Remove a file from the index: chunks + book + tracking."""
+    def remove_file(self, filepath: str, corpus: str) -> bool:
+        """Remove a file from the index: chunks + book + tracking.
+
+        ``corpus`` is required: a relative path identifies a file only within
+        its own corpus, and removing "the" README.md without saying which one
+        would take a different corpus's copy with it.
+        """
         conn = self._get_conn()
 
         # Find the book_slug from tracking
         cursor = conn.execute(
-            "SELECT book_slug FROM indexed_files WHERE filepath = ?",
-            (filepath,)
+            "SELECT book_slug FROM indexed_files WHERE filepath = ? AND corpus = ?",
+            (filepath, corpus)
         )
         row = cursor.fetchone()
         if not row:
@@ -2295,7 +2378,9 @@ class Library:
             self.delete_book(book_slug)
 
         # Remove tracking entry
-        conn.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
+        conn.execute(
+            "DELETE FROM indexed_files WHERE filepath = ? AND corpus = ?",
+            (filepath, corpus))
         conn.commit()
         return True
 
@@ -2304,6 +2389,7 @@ class Library:
         old_filepath: str,
         new_filepath: str,
         new_slug: str,
+        corpus: str,
         new_corpus: str | None = None,
     ) -> bool:
         """Update tracking for a moved file (same content, new path).
@@ -2312,16 +2398,19 @@ class Library:
         Chunks are linked by book_id (FK) so they follow automatically;
         embeddings (FK on chunk_id) and tags (FK on chunk_id) follow too.
 
-        When *new_corpus* is provided, the file is reassigned to that
-        corpus — used for cross-corpus moves where the user reorganises
-        their tree across corpus boundaries without re-indexing.
+        ``corpus`` names the corpus the file is moving *from* — a relative
+        path is unique only within one. When *new_corpus* is provided, the
+        file is reassigned to that corpus — used for cross-corpus moves where
+        the user reorganises their tree across corpus boundaries without
+        re-indexing.
         """
         conn = self._get_conn()
 
         # Get old tracking info
         cursor = conn.execute(
-            "SELECT book_slug, file_hash, corpus, file_size FROM indexed_files WHERE filepath = ?",
-            (old_filepath,)
+            "SELECT book_slug, file_hash, corpus, file_size FROM indexed_files "
+            "WHERE filepath = ? AND corpus = ?",
+            (old_filepath, corpus)
         )
         row = cursor.fetchone()
         if not row:
@@ -2347,7 +2436,7 @@ class Library:
         conn.execute(
             """INSERT INTO indexed_files (filepath, file_hash, corpus, book_slug, indexed_at, file_size)
                VALUES (?, ?, ?, ?, datetime('now'), ?)
-               ON CONFLICT(filepath) DO UPDATE SET
+               ON CONFLICT(filepath, corpus) DO UPDATE SET
                    file_hash = excluded.file_hash,
                    corpus = excluded.corpus,
                    book_slug = excluded.book_slug,
@@ -2357,32 +2446,48 @@ class Library:
         )
         # Clean up the old tracking row only if it differs from the new one,
         # otherwise the upsert above already covered it.
-        if old_filepath != new_filepath:
-            conn.execute("DELETE FROM indexed_files WHERE filepath = ?", (old_filepath,))
+        if (old_filepath, corpus) != (new_filepath, target_corpus):
+            conn.execute(
+                "DELETE FROM indexed_files WHERE filepath = ? AND corpus = ?",
+                (old_filepath, corpus))
         conn.commit()
         return True
 
     def set_sync_root(self, corpus: str, root_path: str):
-        """Store the absolute root path for a corpus (used to resolve file paths)."""
+        """Record an absolute source directory for a corpus.
+
+        Adds to what the corpus already has — a corpus may gather several
+        directories. Re-recording one just refreshes its timestamp.
+        """
         conn = self._get_conn()
         conn.execute(
             """INSERT INTO sync_roots (corpus, root_path, updated_at)
                VALUES (?, ?, datetime('now'))
-               ON CONFLICT(corpus) DO UPDATE SET
-                   root_path = excluded.root_path,
+               ON CONFLICT(corpus, root_path) DO UPDATE SET
                    updated_at = excluded.updated_at""",
             (corpus, root_path),
         )
         conn.commit()
 
-    def get_sync_root(self, corpus: str) -> str | None:
-        """Return the stored absolute root path for a corpus, or None."""
+    def list_sync_roots(self, corpus: str | None = None) -> list[str]:
+        """Every source directory recorded for a corpus, most recent first.
+
+        Path resolution tries them in order, and a scan uses the others to
+        tell a genuinely deleted file from one that simply lives under a
+        sibling directory of the same corpus.
+        """
         conn = self._get_conn()
-        row = conn.execute(
-            "SELECT root_path FROM sync_roots WHERE corpus = ?",
-            (corpus,),
-        ).fetchone()
-        return row["root_path"] if row else None
+        if corpus is None:
+            rows = conn.execute(
+                "SELECT root_path FROM sync_roots ORDER BY updated_at DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT root_path FROM sync_roots WHERE corpus = ? "
+                "ORDER BY updated_at DESC",
+                (corpus,),
+            ).fetchall()
+        return [r["root_path"] for r in rows]
 
     def sync(
         self,

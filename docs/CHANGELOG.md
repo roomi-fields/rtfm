@@ -7,6 +7,64 @@ description: >-
 
 # Changelog
 
+## [0.30.0] — 2026-08-30
+
+### Fixed — the indexer no longer fights itself
+
+Two directories in one corpus, or the same file in two corpora, put the
+indexer in a loop that never ended. Both are ordinary configurations — `rtfm
+add` accepts them and real projects use them — and both came down to a name
+being treated as if it identified a file on its own.
+
+* **`sync_roots` was keyed on the corpus**, so a corpus gathering several
+  directories kept only the last one scanned. Nothing then knew where the
+  other directories' files lived, and every scan of one directory saw the
+  others' files as deleted. It removed them; the next scan re-indexed them.
+  One project here reached **515 000 removal jobs**.
+* **`indexed_files.filepath` was globally UNIQUE**, so the same relative path
+  in two corpora fought over a single row — each scan claiming the file from
+  the other corpus and the next claiming it back. **932 000 re-ingestions**
+  on that same project, 82 000 of them for one README.
+* **A cross-corpus move fired on matching content alone**, with no check that
+  the file had actually left. The same document genuinely living in two
+  indexed trees is common, and it was read as a move every single pass.
+
+Both keys are widened on open — existing databases keep every row — a scan
+now protects the other directories of its corpus from removal, and a
+cross-corpus move requires the old location to be genuinely gone. This is
+what had the daemon holding three cores around the clock.
+
+Removal also got stricter: a file is deleted only when *every* directory of
+its corpus could be read and none of them holds it. One dark mount now holds
+the removal back instead of counting as proof of absence.
+
+### Fixed — a PDF's text can finally be read
+
+`rtfm_expand` served `[file not available — no path or line info]` for every
+PDF. It read the source file to keep line numbers honest, and a PDF has no
+lines — so search named the right document and then nothing could be read out
+of it. The text was in the index the whole time, which is how search found it.
+Passages from formats that have no lines are now served as indexed.
+
+### Fixed — PDF pages are real pages again
+
+Extraction used pdftext's plain output, which returns the whole document as
+one string with no reliable page separator. Every PDF came back as a single
+page: 45 passages all labelled "Page 1", 118 of 119 documents recorded with a
+page count of 1, and no landmark to navigate a 400-page book by. The
+paginated output gives one string per page, and an empty page no longer
+shifts the numbering of the ones after it.
+
+`rtfm backfill-pages` only looked for a *missing* page count, so it reported
+"0 missing" while 118 files were wrong. It now also picks up a document split
+into several passages that all claim to be on page one.
+
+### Fixed — a dead supervisor says what is waiting
+
+`rtfm worker status` answered "supervisor not running" and stopped there,
+leaving whoever noticed the index had stopped moving to connect the two facts
+themselves. It now names how many jobs are stranded, in how many projects.
+
 ## [0.29.0] — 2026-08-30
 
 ### Fixed — PDF work no longer runs in the daemon's own process

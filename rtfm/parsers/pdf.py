@@ -343,9 +343,16 @@ def extract_with_pdftext(path: Path) -> list[dict]:
 
 
 def _pdftext_inprocess(path: Path) -> list[dict]:
-    """The pdftext body itself. Only ever called inside the child."""
+    """The pdftext body itself. Only ever called inside the child.
+
+    Uses pdftext's paginated output, which returns one string per page.
+    The plain output returns the whole document as a single string with no
+    reliable page separator, so every PDF came back as one page: 45 passages
+    all labelled "Page 1", a page count of 1 on 118 of 119 documents, and no
+    usable landmark anywhere in a 400-page book.
+    """
     try:
-        from pdftext.extraction import plain_text_output
+        from pdftext.extraction import paginated_plain_text_output
     except ImportError:
         raise PDFExtractionError(
             "\n\n  ❌ PDF parsing requires the pdf extra.\n"
@@ -353,25 +360,16 @@ def _pdftext_inprocess(path: Path) -> list[dict]:
         )
 
     try:
-        # pdftext returns text per page
-        pages_text = plain_text_output(str(path))
+        pages = paginated_plain_text_output(str(path))
+        if isinstance(pages, str):
+            pages = pages.split('\f') if '\f' in pages else [pages]
 
-        # Handle different return types
-        if isinstance(pages_text, str):
-            # Single string - split by form feeds or treat as one page
-            if '\f' in pages_text:
-                pages = pages_text.split('\f')
-            else:
-                pages = [pages_text]
-        elif isinstance(pages_text, list):
-            pages = pages_text
-        else:
-            pages = [str(pages_text)]
-
+        # Page numbers stay true to the document: an empty page is dropped
+        # from the output but does not shift the ones after it.
         return [
             {'page': i + 1, 'text': text}
             for i, text in enumerate(pages)
-            if text.strip()
+            if text and text.strip()
         ]
     except Exception as e:
         raise PDFExtractionError(f"pdftext extraction failed: {e}")
@@ -671,7 +669,9 @@ class PDFParser(BaseParser):
         metadata: Optional[dict] = None
     ) -> Iterator[Chunk]:
         """Parse a PDF file into chunks."""
-        metadata = metadata or {}
+        # `metadata or {}` would replace an empty dict the caller passed in,
+        # and the page count written below would never reach them.
+        metadata = {} if metadata is None else metadata
         path = Path(path)
 
         # Extract text based on backend
@@ -693,7 +693,11 @@ class PDFParser(BaseParser):
         # compute a deterministic chars-per-page scan signal. ``metadata``
         # is the same dict ``Library.ingest`` passes to ``_index_chunks``,
         # so this write is visible there.
-        metadata['page_count'] = len(pages)
+        # The highest page number, not the number of extracted pages: a
+        # scanned insert or a blank page yields no text and is dropped, and
+        # counting the survivors would report a 400-page book as 380.
+        metadata['page_count'] = max(
+            (p.get('page') or 0) for p in pages) or len(pages)
 
         # Document metadata
         book_title = metadata.get('title') or extract_title_from_filename(path.stem)

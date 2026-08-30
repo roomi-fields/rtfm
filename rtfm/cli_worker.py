@@ -195,6 +195,43 @@ def cmd_worker_daemon(args):
     run_supervisor()
 
 
+def _report_stalled_work() -> None:
+    """Say what is waiting when there is nobody to do it.
+
+    A dead supervisor used to be reported as one line — "supervisor not
+    running" — with no hint that thousands of jobs were sitting still because
+    of it. Whoever noticed the index had stopped moving had to work out on
+    their own that the two facts were the same fact.
+    """
+    import sqlite3
+
+    stalled: list[tuple[str, int]] = []
+    for entry in _load_registry():
+        db = Path(entry) / "library.db"
+        if not db.exists():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+            n = conn.execute(
+                "SELECT COUNT(*) FROM work_queue "
+                "WHERE status IN ('pending', 'running')"
+            ).fetchone()[0]
+            conn.close()
+        except Exception:
+            continue
+        if n:
+            stalled.append((Path(entry).parent.name, n))
+
+    if not stalled:
+        return
+    total = sum(n for _, n in stalled)
+    stalled.sort(key=lambda x: -x[1])
+    head = ", ".join(f"{name} ({n})" for name, n in stalled[:5])
+    more = f", +{len(stalled) - 5} more" if len(stalled) > 5 else ""
+    print(f"  {total} job(s) waiting in {len(stalled)} project(s): {head}{more}")
+    print("  Nothing will move until it is running again: rtfm worker start")
+
+
 # ── ``rtfm worker [start|stop|status|restart-all]`` ──────────────────────
 
 def cmd_worker(args):
@@ -207,6 +244,7 @@ def cmd_worker(args):
         state = supervisor_running()
         if not state:
             print("worker: supervisor not running.")
+            _report_stalled_work()
             return
         print(f"worker: supervisor running (PID {state.pid}, host {state.host})")
         print(f"  concurrency: {state.concurrency}")

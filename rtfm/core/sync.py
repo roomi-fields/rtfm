@@ -17,7 +17,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Sequence
 
 from rtfm.core.freshness import probably_unchanged
 from rtfm.parsers.base import ParserRegistry
@@ -149,52 +149,119 @@ def _load_rtfmignore_spec(root: Path):
 # a deliberate bulk delete.
 
 
-def _removal_is_real(root: Path, rel: str) -> bool:
-    """Whether a scan-detected removal of ``rel`` reflects a genuine deletion.
+def build_disk_check(library, scanning_root: Path) -> "Callable[[str, str], bool]":
+    """Return "is this tracked file still on disk *elsewhere* than here?".
 
-    Safe to remove only when the file is really absent *and* a readable
-    directory ancestor up to ``root`` proves the location was actually
-    scanned. ``Path.exists``/``Path.is_dir`` swallow OSError and return
-    ``False``, so a path on a mount that went dark reads as "absent" — hence
-    the ancestor probe: if ``root`` itself is unreadable, absence is not
-    evidence of deletion and the file is kept.
+    Used to gate cross-corpus moves. The directory currently being scanned is
+    deliberately excluded: renaming a corpus keeps the same directory, so the
+    old corpus's files are all still there, and counting them as present would
+    turn a rename into a full re-ingestion — losing every embedding. Excluding
+    it also gives the right answer for the case this gate exists for: content
+    that lives under a *different* directory of another corpus has not moved,
+    it is simply present in both.
+
+    Errs on the side of *present*: an unreadable path (a mount that went dark)
+    must never be read as "the file left this corpus", or the next scan hands
+    its book, chunks and embeddings to whichever corpus holds the same bytes.
+    """
+    here = str(scanning_root)
+    cache: dict[str, list[Path]] = {}
+
+    def still_there(rel: str, corpus: str) -> bool:
+        if corpus not in cache:
+            try:
+                cache[corpus] = [Path(r) for r in library.list_sync_roots(corpus)
+                                 if r and r != here]
+            except Exception:
+                cache[corpus] = []
+        for root in cache[corpus]:
+            try:
+                if (root / rel).exists():
+                    return True
+            except OSError:
+                return True
+        return False
+
+    return still_there
+
+
+def _sibling_roots(library, corpus: str, root: Path) -> list[Path]:
+    """The other source directories of ``corpus`` — everything but ``root``.
+
+    A corpus may gather several directories, and a stored path is relative to
+    whichever one it came from. Scanning one of them must not read the others'
+    files as deleted.
+    """
+    try:
+        recorded = library.list_sync_roots(corpus)
+    except Exception:
+        return []
+    here = str(root)
+    return [Path(r) for r in recorded if r and r != here]
+
+
+def _absence_is_proven(root: Path, rel: str) -> bool | None:
+    """Under this one root: True if ``rel`` is genuinely gone, False if it is
+    still there, None if the root proves nothing (unreadable, mount down).
+
+    ``Path.exists``/``Path.is_dir`` swallow OSError and return ``False``, so a
+    path on a mount that went dark reads as "absent" — hence the ancestor
+    probe. If ``root`` itself is unreadable, absence is not evidence of
+    deletion.
     """
     p = root / rel
     try:
         if p.exists():
             return False            # still present → transient scan miss, keep
     except OSError:
-        return False                # unreadable path → not evidence of deletion
+        return None                 # unreadable path → proves nothing
     anc = p.parent
     while True:
         try:
             if anc.is_dir():
                 return True         # a readable ancestor exists → real deletion
         except OSError:
-            return False
+            return None
         if anc == root:
-            return False            # root itself unreadable → mount down, keep
+            return None             # root itself unreadable → mount down
         parent = anc.parent
         if parent == anc:
-            return False            # reached filesystem root without hitting root
+            return None             # reached filesystem root without hitting root
         anc = parent
 
 
 def confirm_removals(
     root: Path, removed: list[str], force: bool = False,
+    sibling_roots: "Sequence[Path] | None" = None,
 ) -> tuple[list[str], list[str]]:
     """Partition scan-detected removals into ``(confirmed, kept)``.
 
     ``confirmed`` are genuine deletions safe to apply; ``kept`` are held back
     (file reappeared, or its location is unreadable). ``force`` bypasses the
     check for a deliberate bulk delete.
+
+    ``sibling_roots`` are the other source directories of the same corpus. A
+    stored path is relative to whichever directory it came from, so scanning
+    one directory sees every *other* directory's files as missing. Without
+    this, two directories in one corpus deleted each other's index on every
+    pass and re-indexed it on the next — a permanent churn that ran to half a
+    million removal jobs on one project. A file that is present under any
+    sibling is not deleted.
     """
     if force:
         return list(removed), []
+    roots = [root, *(sibling_roots or ())]
     confirmed: list[str] = []
     kept: list[str] = []
     for rel in removed:
-        (confirmed if _removal_is_real(root, rel) else kept).append(rel)
+        verdicts = [_absence_is_proven(r, rel) for r in roots]
+        # Gone only when every directory gave a definite answer and none of
+        # them still holds the file. One unreadable directory (a mount that
+        # went dark) is enough to hold the removal back — absence there is
+        # not evidence, and this is the check that stands between a glitch
+        # and deleting books, chunks and their embeddings.
+        gone = bool(verdicts) and all(v is True for v in verdicts)
+        (confirmed if gone else kept).append(rel)
     return confirmed, kept
 
 
@@ -472,6 +539,7 @@ def compute_diff(
     indexed_global: dict[str, dict] | None = None,
     current_corpus: str | None = None,
     known_failures: dict[str, dict] | None = None,
+    still_on_disk: "Callable[[str, str], bool] | None" = None,
 ) -> SyncDiff:
     """Compare the filesystem state against the DB tracking table.
 
@@ -487,6 +555,16 @@ def compute_diff(
     content. A failed ingest writes no tracking row, so without this every
     scan would offer the same broken file again — for ever. They are skipped
     while their content is unchanged, and picked up again the moment it is.
+
+    *still_on_disk* answers "does this tracked file still exist in its own
+    corpus?" and gates cross-corpus moves. Matching content alone does not
+    make a move: the same file genuinely lives in two corpora often enough (a
+    shared document, a copied README, one tree indexed under two names), and
+    treating that as a move made each corpus steal the file back from the
+    other on every scan. One project here logged 932 000 re-ingestions of a
+    handful of such files, which is what kept the indexer at three cores
+    around the clock. Without the callback the old behaviour stands, so the
+    caller that knows where files live must supply it.
     """
     diff = SyncDiff()
     known_failures = known_failures or {}
@@ -573,7 +651,20 @@ def compute_diff(
             if not candidates:
                 remaining_added.append(new_path)
                 continue
-            old_path, old_info = candidates.pop(0)
+            # Take the first candidate that has genuinely left its corpus.
+            # One that is still on disk there is not a move — the same
+            # content simply lives in both places.
+            match = None
+            for i, (old_path, old_info) in enumerate(candidates):
+                if still_on_disk is not None and still_on_disk(
+                        old_path, old_info.get("corpus") or ""):
+                    continue
+                match = candidates.pop(i)
+                break
+            if match is None:
+                remaining_added.append(new_path)
+                continue
+            old_path, old_info = match
             diff.cross_moved.append((old_path, old_info["corpus"], new_path))
             if not candidates:
                 del cross_by_hash[h]
@@ -848,8 +939,9 @@ def sync(
                 diff.removed.append(db_path)
     else:
         diff = compute_diff(files_on_disk, indexed, root,
-                             indexed_global=indexed_global,
-                             current_corpus=corpus)
+                            indexed_global=indexed_global,
+                            current_corpus=corpus,
+                            still_on_disk=build_disk_check(library, root))
 
     result.unchanged = diff.unchanged
 
@@ -869,7 +961,7 @@ def sync(
 
         try:
             new_slug = _path_to_slug(new_rel, corpus)
-            library.move_file(old_rel, new_rel, new_slug)
+            library.move_file(old_rel, new_rel, new_slug, corpus=corpus)
             result.moved += 1
             if on_progress:
                 on_progress("move", f"{old_rel} -> {new_rel}", "renamed")
@@ -889,7 +981,8 @@ def sync(
 
         try:
             new_slug = _path_to_slug(new_rel, corpus)
-            library.move_file(old_rel, new_rel, new_slug, new_corpus=corpus)
+            library.move_file(old_rel, new_rel, new_slug,
+                              corpus=old_corpus, new_corpus=corpus)
             result.moved += 1
             if on_progress:
                 on_progress(
@@ -1032,7 +1125,8 @@ def sync(
                 on_progress("remove", rel, "skipped (file-list mode)")
     else:
         confirmed, kept = confirm_removals(
-            root, list(diff.removed), force=force_remove)
+            root, list(diff.removed), force=force_remove,
+            sibling_roots=_sibling_roots(library, corpus, root))
         if kept:
             msg = (f"kept {len(kept)} unconfirmed removal(s) in corpus "
                    f"'{corpus}' (file present or location unreadable)")
@@ -1042,7 +1136,7 @@ def sync(
                     on_progress("remove", rel, "kept (unconfirmed)")
         for rel in confirmed:
             try:
-                library.remove_file(rel)
+                library.remove_file(rel, corpus)
                 result.removed += 1
                 if on_progress:
                     on_progress("remove", rel, "removed")

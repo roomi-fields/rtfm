@@ -11,32 +11,60 @@ install but not on another. One rule, used by both, removes the divergence.
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence  # noqa: F401 — Sequence in annotations
 
 
-def resolve_source_path(filepath: str, root: Optional[str]) -> str:
-    """Return the absolute on-disk path when the file exists under ``root``,
-    otherwise the stored ``filepath`` unchanged.
+def resolve_source_path(filepath: str, roots: "Sequence[str] | str | None") -> str:
+    """Return the absolute on-disk path when the file exists under one of
+    ``roots``, otherwise the stored ``filepath`` unchanged.
 
-    Absolute inputs and empty inputs pass through untouched. This is the single
-    rule both the CLI and the MCP server apply, so identical results always
-    report identical paths.
+    A corpus may gather several source directories, and a stored path is
+    relative to whichever one it came from — so every root of the corpus is
+    tried, in the order given, and the first that actually holds the file
+    wins. Absolute inputs and empty inputs pass through untouched. This is
+    the single rule both the CLI and the MCP server apply, so identical
+    results always report identical paths.
     """
     if not filepath or os.path.isabs(filepath):
         return filepath
-    if root:
+    if isinstance(roots, str):
+        roots = [roots]
+    for root in roots or ():
+        if not root:
+            continue
         abs_path = os.path.join(root, filepath)
         if os.path.exists(abs_path):
             return abs_path
     return filepath
 
 
-def build_slug_root_resolver(lib) -> Callable[[str], Optional[str]]:
-    """Return a ``book_slug -> sync-root`` lookup for one result set.
+def owning_root(abs_path: str, roots: "Sequence[str] | str | None") -> Optional[str]:
+    """Which of ``roots`` a resolved path actually sits under.
 
-    Batches ``books(slug, corpus)`` once and caches ``corpus -> sync_root`` so
+    Re-indexing a single file needs the one directory it belongs to, not the
+    whole list its corpus gathers. Returns None when the path belongs to none
+    of them — a caller must not guess in that case.
+    """
+    if not abs_path:
+        return None
+    if isinstance(roots, str):
+        roots = [roots]
+    best = None
+    for root in roots or ():
+        if not root:
+            continue
+        prefix = root.rstrip(os.sep) + os.sep
+        if abs_path.startswith(prefix) and (best is None or len(root) > len(best)):
+            best = root
+    return best
+
+
+def build_slug_root_resolver(lib) -> Callable[[str], list]:
+    """Return a ``book_slug -> source directories`` lookup for one result set.
+
+    Batches ``books(slug, corpus)`` once and caches ``corpus -> roots`` so
     resolving a whole result set costs two queries rather than per-row SQL.
-    Callers feed the returned root into :func:`resolve_source_path`.
+    Callers feed the returned list into :func:`resolve_source_path`.
     """
     slug_corpus: dict[str, str] = {}
     try:
@@ -45,15 +73,15 @@ def build_slug_root_resolver(lib) -> Callable[[str], Optional[str]]:
             slug_corpus[row["slug"]] = row["corpus"] or ""
     except Exception:
         pass
-    root_cache: dict[str, Optional[str]] = {}
+    root_cache: dict[str, list] = {}
 
-    def root_for_slug(slug: str) -> Optional[str]:
+    def roots_for_slug(slug: str) -> list:
         corpus = slug_corpus.get(slug, "")
         if corpus not in root_cache:
             try:
-                root_cache[corpus] = lib.get_sync_root(corpus)
+                root_cache[corpus] = lib.list_sync_roots(corpus)
             except Exception:
-                root_cache[corpus] = None
+                root_cache[corpus] = []
         return root_cache[corpus]
 
-    return root_for_slug
+    return roots_for_slug

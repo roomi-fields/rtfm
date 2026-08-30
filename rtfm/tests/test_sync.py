@@ -797,7 +797,7 @@ class TestLibraryFileTracking:
         assert sync_db.get_stats()["chunks"] > 0
 
         # Remove
-        result = sync_db.remove_file("test.txt")
+        result = sync_db.remove_file("test.txt", "test")
         assert result is True
 
         # Tracking should be gone
@@ -819,7 +819,8 @@ class TestLibraryFileTracking:
         )
 
         # Move
-        result = sync_db.move_file("test.txt", "docs/test.txt", "docs--test-txt")
+        result = sync_db.move_file("test.txt", "docs/test.txt",
+                                   "docs--test-txt", corpus="test")
         assert result is True
 
         # Old path gone, new path tracked

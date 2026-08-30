@@ -135,8 +135,8 @@ def _deduplicate_by_source(results, limit: int):
     # Batch-resolve book_slug → sync-root (avoids per-result SQL). The shared
     # resolver is the *same* one the CLI uses, so both report identical paths.
     from rtfm.core.pathresolve import (
-        resolve_source_path, build_slug_root_resolver)
-    root_for_slug = build_slug_root_resolver(_get_library())
+        build_slug_root_resolver, owning_root, resolve_source_path)
+    roots_for_slug = build_slug_root_resolver(_get_library())
 
     for entry in ranked:
         entry["count"] = len(entry["all"])
@@ -150,11 +150,12 @@ def _deduplicate_by_source(results, limit: int):
         # Pre-resolve absolute path via the shared rule.
         r = entry["best"]
         filepath = r.chunk.book_file or ""
-        root = root_for_slug(r.chunk.book_slug)
+        corpus_roots = roots_for_slug(r.chunk.book_slug)
         entry["filepath"] = filepath
-        entry["root"] = root
         entry["abs_path"] = (
-            resolve_source_path(filepath, root) if filepath else "")
+            resolve_source_path(filepath, corpus_roots) if filepath else "")
+        # The one directory this file belongs to — what re-indexing needs.
+        entry["root"] = owning_root(entry["abs_path"], corpus_roots)
 
     return ranked[:limit]
 
@@ -291,12 +292,21 @@ def _expand_freshness(abs_path: str, filepath: str, corpus: str,
         return "", False
 
 
-def _render_chunk(abs_path: str, line_start: int | None, line_end: int | None) -> str:
-    """Read raw lines from the actual file and format with line numbers.
+def _render_chunk(abs_path: str, line_start: int | None, line_end: int | None,
+                  indexed_text: str | None = None) -> str:
+    """Return the passage: raw lines off disk, or the indexed text.
 
-    Guarantees line numbers match what Read/Edit see — always reads the real
-    file on disk.  Returns an error message if the file is unavailable.
+    For a text file the lines are read live so they match exactly what
+    Read/Edit see. A PDF, an ebook or a spreadsheet has no lines to read —
+    its text exists only as extracted, in the index — and this used to answer
+    "[file not available]" for every one of them. Search found the right
+    document and then nothing could be read out of it, which left a corpus of
+    PDFs searchable but unreadable.
+
+    So: lines when there are lines, the indexed text otherwise.
     """
+    if indexed_text is not None and (not abs_path or not line_start):
+        return indexed_text
     if not abs_path or not line_start:
         return "[file not available — no path or line info]"
     try:
@@ -869,17 +879,20 @@ def rtfm_tag_chunks(chunk_ids: str, tags: str) -> str:
 
 
 @_admin_tool()
-def rtfm_remove(filepath: str) -> str:
+def rtfm_remove(filepath: str, corpus: str = "default") -> str:
     """Remove a file and its chunks from the library.
 
     Args:
         filepath: The filepath (as tracked in the index) to remove.
+        corpus: Which corpus it belongs to. A relative path identifies a file
+            only within its corpus — the same README.md can be indexed in
+            several — so removing without saying which one is ambiguous.
     """
-    log("remove", f"filepath={filepath!r}")
+    log("remove", f"filepath={filepath!r} corpus={corpus!r}")
     lib = _get_library()
-    if lib.remove_file(filepath):
-        return f"Removed: {filepath}"
-    return f"Not found in index: {filepath}"
+    if lib.remove_file(filepath, corpus):
+        return f"Removed: [{corpus}] {filepath}"
+    return f"Not found in index: [{corpus}] {filepath}"
 
 
 # ── Plugin tools ──────────────────────────────────────────────────────────
@@ -1003,9 +1016,10 @@ def rtfm_expand(
     book_title = book_row["title"]
     book_file = book_row["filename"] or ""
     corpus = book_row["corpus"] or ""
-    from rtfm.core.pathresolve import resolve_source_path
-    sync_root = _get_library().get_sync_root(corpus)
-    abs_path = resolve_source_path(book_file, sync_root)
+    from rtfm.core.pathresolve import owning_root, resolve_source_path
+    corpus_roots = _get_library().list_sync_roots(corpus)
+    abs_path = resolve_source_path(book_file, corpus_roots)
+    sync_root = owning_root(abs_path, corpus_roots)
 
     # Content below is read live off disk, so it is never stale — but the
     # chunk boundaries come from the index, and they drift as soon as lines
@@ -1067,7 +1081,8 @@ def rtfm_expand(
         if line_info:
             header += f" — {line_info}"
 
-        lines = [header, "", _render_chunk(display_path, ls, le)]
+        lines = [header, "", _render_chunk(display_path, ls, le,
+                                           r0.chunk.content)]
         if stale_note:
             lines.insert(1, stale_note)
 
@@ -1082,7 +1097,8 @@ def rtfm_expand(
                 0,
             )
             lines.append(f"\n─── {s} [{r_idx + 1}/{total}] — {r_line} ───\n")
-            lines.append(_render_chunk(display_path, r_ls, r_le))
+            lines.append(_render_chunk(display_path, r_ls, r_le,
+                                       r.chunk.content))
 
         # Navigation hints
         if n_shown == 1 and chunk_idx + 1 < total:
@@ -1155,7 +1171,8 @@ def rtfm_expand(
     if line_info:
         header += f" — {line_info}"
 
-    lines = [header, "", _render_chunk(display_path, ls, first["line_end"])]
+    lines = [header, "", _render_chunk(display_path, ls, first["line_end"],
+                                       first["content"])]
     if stale_note:
         lines.insert(1, stale_note)
 
@@ -1167,7 +1184,7 @@ def rtfm_expand(
         r_line = f"L{r_ls}-{r_le}" if r_ls and r_le else (f"L{r_ls}" if r_ls else "")
         r_idx = chunk_idx + j
         lines.append(f"\n─── {s} [{r_idx + 1}/{total}] — {r_line} ───\n")
-        lines.append(_render_chunk(display_path, r_ls, r_le))
+        lines.append(_render_chunk(display_path, r_ls, r_le, row["content"]))
 
     # Navigation: next in file
     if end_idx < total:

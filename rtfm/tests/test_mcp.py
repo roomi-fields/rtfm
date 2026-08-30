@@ -1103,3 +1103,61 @@ class TestTheServerNeverConjuresAnIndex:
         Library(tmp_path / ".rtfm" / "library.db").close()
         monkeypatch.setenv("RTFM_DB", str(tmp_path / ".rtfm" / "library.db"))
         assert mcp_mod._get_library() is not None
+
+
+class TestReadingWhatHasNoLines:
+    """A PDF, an ebook, a spreadsheet: the text exists only as extracted.
+
+    `_render_chunk` read the source file to guarantee its line numbers match
+    what Read/Edit see. With no lines to read it gave up — so every search
+    over a PDF corpus named the right document and then served
+    "[file not available]". Searchable, unreadable.
+    """
+
+    def test_the_indexed_text_is_served_when_there_are_no_lines(self):
+        from rtfm.mcp import _render_chunk
+        passage = "Binaural beats entrain cortical oscillations."
+        assert _render_chunk("/some/paper.pdf", None, None, passage) == passage
+
+    def test_lines_still_win_when_the_file_has_them(self, tmp_path):
+        """A text file must keep reading live off disk — that is what keeps
+        the line numbers honest."""
+        from rtfm.mcp import _render_chunk
+        f = tmp_path / "a.py"
+        f.write_text("real line\n")
+        out = _render_chunk(str(f), 1, 1, "stale copy from the index")
+        assert "real line" in out
+        assert "stale copy" not in out
+
+    def test_without_any_text_the_message_is_unchanged(self):
+        from rtfm.mcp import _render_chunk
+        assert "not available" in _render_chunk("", None, None).lower()
+
+    def test_expand_serves_a_pdf_passage(self, tmp_path, monkeypatch):
+        """End to end: a book with no line information still reads."""
+        import rtfm.mcp as mcp
+        from rtfm.core.library import Library
+        from rtfm.core.models import Chunk
+
+        db = tmp_path / "library.db"
+        lib = Library(str(db))
+        pdf = tmp_path / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4 binary")
+        passage = "Auditory beat stimulation and its effects on cognition."
+        lib._index_chunks([Chunk(
+            id="paper-p003-001", content=passage, book_title="Paper",
+            book_slug="paper", book_file=str(pdf), chapter_title="Page 3",
+            chapter_num=3, page_start=3, page_end=3, paragraph=1,
+            section_type="page", content_chars=len(passage),
+            content_hash="h",
+        )], corpus="papers", metadata={})
+        lib.close()
+
+        monkeypatch.setattr(mcp, "_library", None)
+        monkeypatch.setenv("RTFM_DB", str(db))
+        try:
+            out = mcp.rtfm_expand(str(pdf))
+            assert passage in out
+            assert "not available" not in out.lower()
+        finally:
+            mcp._library = None

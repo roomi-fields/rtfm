@@ -52,12 +52,14 @@ def test_slug_root_resolver_maps_slug_to_correct_corpus_root(tmp_path):
             ("doc-slug", "Doc", "doc.md", "A"))
         conn.commit()
 
-        root_for_slug = build_slug_root_resolver(lib)
-        assert root_for_slug("doc-slug") == str(root_a)
+        roots_for_slug = build_slug_root_resolver(lib)
+        # A corpus may gather several directories, so the resolver hands back
+        # every one of them, most recently scanned first.
+        assert roots_for_slug("doc-slug") == [str(root_a)]
         # End-to-end: an existing file resolves to its absolute path.
-        assert resolve_source_path("doc.md", root_for_slug("doc-slug")) \
+        assert resolve_source_path("doc.md", roots_for_slug("doc-slug")) \
             == str(root_a / "doc.md")
         # Unknown slug → no root → relative passthrough (never crashes).
-        assert resolve_source_path("x.md", root_for_slug("nope")) == "x.md"
+        assert resolve_source_path("x.md", roots_for_slug("nope")) == "x.md"
     finally:
         lib.close()

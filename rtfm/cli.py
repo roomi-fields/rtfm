@@ -148,7 +148,7 @@ def _deduplicate_by_source(results, limit: int):
     return ranked[:limit]
 
 
-def _repair_stale_sources(lib, deduped, root_for_slug) -> tuple[dict[str, str], bool]:
+def _repair_stale_sources(lib, deduped, roots_for_slug) -> tuple[dict[str, str], bool]:
     """Reconcile the answered files with disk before printing them.
 
     The CLI reads the same eventually-consistent index the MCP tools do, and
@@ -158,7 +158,7 @@ def _repair_stale_sources(lib, deduped, root_for_slug) -> tuple[dict[str, str], 
     """
     try:
         from rtfm.core import freshness
-        from rtfm.core.pathresolve import resolve_source_path
+        from rtfm.core.pathresolve import owning_root, resolve_source_path
 
         pairs, roots = [], {}
         for entry in deduped:
@@ -166,10 +166,13 @@ def _repair_stale_sources(lib, deduped, root_for_slug) -> tuple[dict[str, str], 
             filepath = chunk.book_file or ""
             if not filepath:
                 continue
-            root = root_for_slug(chunk.book_slug)
-            abs_path = resolve_source_path(filepath, root)
+            corpus_roots = roots_for_slug(chunk.book_slug)
+            abs_path = resolve_source_path(filepath, corpus_roots)
             pairs.append((abs_path, filepath))
-            roots[abs_path] = (chunk.book_slug, root)
+            # Re-indexing needs the one directory the file belongs to, not
+            # every directory the corpus gathers.
+            roots[abs_path] = (chunk.book_slug,
+                               owning_root(abs_path, corpus_roots))
 
         verdicts = freshness.verify(lib, pairs)
         if not verdicts:
@@ -223,8 +226,8 @@ def cmd_search(args):
         else:
             from rtfm.core.pathresolve import (
                 resolve_source_path, build_slug_root_resolver)
-            root_for_slug = build_slug_root_resolver(lib)
-            stale, repaired = _repair_stale_sources(lib, deduped, root_for_slug)
+            roots_for_slug = build_slug_root_resolver(lib)
+            stale, repaired = _repair_stale_sources(lib, deduped, roots_for_slug)
             if repaired:
                 # Something was re-indexed — the ranking above was computed
                 # from the rows it replaced, so ask again.
@@ -234,7 +237,7 @@ def cmd_search(args):
                 r = entry["best"]
                 count = entry["count"]
                 filepath = resolve_source_path(
-                    r.chunk.book_file or "", root_for_slug(r.chunk.book_slug)
+                    r.chunk.book_file or "", roots_for_slug(r.chunk.book_slug)
                 )
                 parts = [f"{r.source} ({r.page})"]
                 parts.append(f"score: {r.score:.2f}")
@@ -1073,14 +1076,51 @@ def _classify_pdf(abs_path: Path) -> dict:
     return out
 
 
+def _roots_by_corpus(conn) -> dict[str, list[str]]:
+    """``corpus -> its source directories``, most recently scanned first.
+
+    A corpus may gather several; the old one-root-per-corpus reading kept
+    whichever row came last and lost the files under the others.
+    """
+    out: dict[str, list[str]] = {}
+    for r in conn.execute(
+            "SELECT corpus, root_path FROM sync_roots ORDER BY updated_at DESC"):
+        out.setdefault(r["corpus"], []).append(r["root_path"])
+    return out
+
+
+def _root_holding(roots, rel: str) -> str | None:
+    """Which of a corpus's directories actually holds ``rel``.
+
+    Falls back to the first one so a temporarily unreadable mount still
+    yields a usable root rather than skipping the file outright.
+    """
+    if not roots:
+        return None
+    for root in roots:
+        try:
+            if (Path(root) / rel).exists():
+                return root
+        except OSError:
+            continue
+    return roots[0]
+
+
 def cmd_backfill_pages(args):
-    """Re-ingest every PDF whose ``books.page_count`` is missing.
+    """Re-ingest every PDF whose recorded pagination is missing or impossible.
 
     Enqueues a P0 ingest job per PDF — the worker's ingest path runs the
     real PDF parser, which populates ``page_count`` and the scan signal
     deterministically. With ``ocr_fallback: true`` in config, scans will
     chain into P0/P3 OCR jobs automatically (no special path in this
     command anymore).
+
+    "Missing" was not enough. Extraction used to return every document as a
+    single page, so the count was *present and wrong* — 118 of 119 PDFs on
+    one project recorded as one page, every passage labelled "Page 1", and
+    this command reporting "0 missing". A book split into several passages
+    that all claim to be on page one is the signature of that, so it is
+    picked up too.
     """
     from rtfm.config import find_rtfm_root
     from rtfm.core.queue import Queue, P_USER
@@ -1097,17 +1137,17 @@ def cmd_backfill_pages(args):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=60000")
 
-    roots = {r["corpus"]: r["root_path"]
-             for r in conn.execute("SELECT corpus, root_path FROM sync_roots")}
+    roots = _roots_by_corpus(conn)
 
     pdfs = conn.execute(
         """SELECT id, corpus, filename
            FROM books
            WHERE (filename LIKE '%.pdf' OR filename LIKE '%.PDF')
-             AND (page_count IS NULL OR page_count = 0)"""
+             AND (page_count IS NULL OR page_count = 0
+                  OR (page_count = 1 AND chunk_count > 1))"""
     ).fetchall()
     conn.close()
-    print(f"PDFs missing page_count: {len(pdfs)}")
+    print(f"PDFs with missing or impossible pagination: {len(pdfs)}")
 
     if not pdfs:
         return
@@ -1115,7 +1155,7 @@ def cmd_backfill_pages(args):
     payloads = []
     skipped_no_root = 0
     for b in pdfs:
-        root = roots.get(b["corpus"])
+        root = _root_holding(roots.get(b["corpus"]), b["filename"])
         if not root:
             skipped_no_root += 1
             continue
@@ -1254,8 +1294,7 @@ def cmd_reindex(args):
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=60000")
-    roots = {r["corpus"]: r["root_path"]
-             for r in conn.execute("SELECT corpus, root_path FROM sync_roots")}
+    roots = _roots_by_corpus(conn)
 
     # Build the query: books whose filename ends with a target extension,
     # optionally scoped to a corpus.
@@ -1282,7 +1321,7 @@ def cmd_reindex(args):
     payloads = []
     skipped_no_root = 0
     for b in books:
-        root = roots.get(b["corpus"])
+        root = _root_holding(roots.get(b["corpus"]), b["filename"])
         if not root:
             skipped_no_root += 1
             continue
@@ -1391,8 +1430,7 @@ def cmd_doctor(args):
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=60000")
-    roots = {r["corpus"]: r["root_path"]
-             for r in conn.execute("SELECT corpus, root_path FROM sync_roots")}
+    roots = _roots_by_corpus(conn)
 
     pdfs = conn.execute(
         """SELECT corpus, filename FROM books
@@ -1404,7 +1442,7 @@ def cmd_doctor(args):
         cats: dict[str, list] = {"ok": [], "scan": [], "unreadable": [],
                                  "wrong-format": [], "missing": []}
         for b in pdfs:
-            root = roots.get(b["corpus"])
+            root = _root_holding(roots.get(b["corpus"]), b["filename"])
             if not root:
                 cats["missing"].append((b["corpus"], b["filename"], None))
                 continue

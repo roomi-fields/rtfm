@@ -177,6 +177,7 @@ def test_move_file_preexisting_target_filepath(library, tmp_path):
         old_filepath="foo.md",
         new_filepath="foo.md",
         new_slug="new-slug",
+        corpus="corp_old",
         new_corpus="corp_new",
     )
     row = conn.execute(
