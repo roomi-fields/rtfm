@@ -31,8 +31,6 @@ extraction, document metadata and tesseract OCR all take that route; the single
 in-process caller left, `rtfm doctor`'s text-density probe, holds a lock. A
 guard test fails if any module starts calling the in-process bodies directly.
 
-Reported by @t0mmyf3rr3ira, with the kernel log that identified the segfault.
-
 ### Fixed — a selection rule typed by hand means what it looks like it means
 
 `"exclude": "data/*,build/*"` in `.rtfm/config.json` — exactly what the
