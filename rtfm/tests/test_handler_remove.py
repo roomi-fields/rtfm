@@ -49,6 +49,10 @@ def test_remove_deletes_book_and_chunks(tmp_path: Path):
     finally:
         lib.close()
 
+    # The file is gone from disk — that is what a scan detects and what the
+    # handler re-checks before destroying anything.
+    (root / "doc.md").unlink()
+
     sink: list[str] = []
     job = Job(id=1, type="remove", priority=2,
               payload={"filepath": "doc.md", "corpus": "test"},
@@ -114,6 +118,8 @@ def test_remove_via_worker_dispatch(tmp_path: Path):
     # Enqueue the remove job and run one worker tick on it. We dequeue
     # in a loop because P1 also queued P2 embed jobs; we only act on
     # the ``remove`` one (same pattern as the embed-drain test).
+    (root / "doc.md").unlink()
+
     q = Queue(db)
     try:
         q.enqueue("remove", {"filepath": "doc.md", "corpus": "test"})
@@ -138,3 +144,83 @@ def test_remove_via_worker_dispatch(tmp_path: Path):
         assert "doc.md" not in lib.list_indexed_files(corpus="test")
     finally:
         lib.close()
+
+
+class TestOneLastLookBeforeDestroying:
+    """A removal job carries out a decision the scan made earlier.
+
+    Queues run minutes or days behind. The file may have come back since, or
+    the job may predate a fix to the detection that queued it — as happened
+    here: jobs enqueued by a buggy scan were still sitting in queues, each one
+    ready to destroy a live file's chunks and its embeddings. One stat before
+    the delete is the difference between an out-of-date index and a destroyed
+    one.
+    """
+
+    def test_a_file_that_is_back_on_disk_is_kept(self, tmp_path):
+        from rtfm.core.handlers import handle_remove
+        from rtfm.core.library import Library
+        from rtfm.core.queue import Job
+
+        root = tmp_path / "src"
+        root.mkdir()
+        (root / "alive.md").write_text("still here\n")
+
+        db = tmp_path / "library.db"
+        lib = Library(str(db))
+        lib.set_sync_root("code", str(root))
+        lib.update_indexed_file(filepath="alive.md", file_hash="h",
+                                corpus="code", book_slug="alive")
+        lib.close()
+
+        worker = _StubWorker(db)
+        handle_remove(
+            Job(id=1, type="remove", priority=10,
+                payload={"filepath": "alive.md", "corpus": "code"},
+                status="running", created_at="", started_at=None,
+                finished_at=None, error=None, attempts=1),
+            worker)
+
+        lib = Library(str(db))
+        try:
+            assert "alive.md" in lib.list_indexed_files(corpus="code")
+        finally:
+            lib.close()
+        assert any("kept" in line for line in worker.logs)
+
+    def test_a_genuinely_deleted_file_is_still_removed(self, tmp_path):
+        from rtfm.core.handlers import handle_remove
+        from rtfm.core.library import Library
+        from rtfm.core.queue import Job
+
+        root = tmp_path / "src"
+        root.mkdir()
+        db = tmp_path / "library.db"
+        lib = Library(str(db))
+        lib.set_sync_root("code", str(root))
+        lib.update_indexed_file(filepath="gone.md", file_hash="h",
+                                corpus="code", book_slug="gone")
+        lib.close()
+
+        worker = _StubWorker(db)
+        handle_remove(
+            Job(id=1, type="remove", priority=10,
+                payload={"filepath": "gone.md", "corpus": "code"},
+                status="running", created_at="", started_at=None,
+                finished_at=None, error=None, attempts=1),
+            worker)
+
+        lib = Library(str(db))
+        try:
+            assert "gone.md" not in lib.list_indexed_files(corpus="code")
+        finally:
+            lib.close()
+
+
+class _StubWorker:
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self.logs: list[str] = []
+
+    def _log(self, msg):
+        self.logs.append(msg)

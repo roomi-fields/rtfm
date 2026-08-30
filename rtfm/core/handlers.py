@@ -643,6 +643,23 @@ def handle_remove(job: Job, worker: "JobContext") -> None:
 
     lib = Library(str(worker.db_path))
     try:
+        # Last look before destroying chunks and their embeddings. The scan
+        # confirmed this deletion when it queued the job, but a queue can be
+        # minutes or days behind: the file may have come back, or the job may
+        # date from before a bug in the detection was fixed. Re-checking here
+        # costs one stat and is the difference between an out-of-date index
+        # and a destroyed one.
+        for root in lib.list_sync_roots(corpus):
+            try:
+                if (Path(root) / rel).exists():
+                    worker._log(
+                        f"remove [{corpus}] {rel}: still on disk, kept")
+                    return
+            except OSError:
+                worker._log(
+                    f"remove [{corpus}] {rel}: location unreadable, kept")
+                return
+
         removed = lib.remove_file(rel, corpus)
         if removed:
             worker._log(f"remove [{corpus}] {rel}")

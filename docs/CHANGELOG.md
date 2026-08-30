@@ -7,6 +7,17 @@ description: >-
 
 # Changelog
 
+## [0.30.1] — 2026-08-30
+
+### Fixed — one last look before a removal destroys anything
+
+A removal job carries out a decision the scan made earlier, and a queue runs
+minutes or days behind. Deploying 0.30.0 showed the consequence directly: jobs
+queued by the buggy scan were still sitting in queues, each one ready to
+destroy the chunks and embeddings of a file that is on disk right now. The
+handler now re-checks the file's own directories immediately before deleting,
+and keeps anything still present or unreadable.
+
 ## [0.30.0] — 2026-08-30
 
 ### Fixed — the indexer no longer fights itself
