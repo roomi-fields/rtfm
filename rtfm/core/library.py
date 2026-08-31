@@ -796,6 +796,14 @@ class Library:
         """Index a list of chunks into the database."""
         conn = self._get_conn()
 
+        # A passage with no text is findable and unreadable: search matches
+        # the document, the reader is handed nothing. A parser that produces
+        # one has produced noise, not content — the HTML parser did, on
+        # markup with no text in it. Never store them.
+        chunks = [c for c in chunks if (c.content or "").strip()]
+        if not chunks:
+            return {"chunks": 0, "chars": 0}
+
         first_chunk = chunks[0]
         book_slug = first_chunk.book_slug
         book_title = first_chunk.book_title

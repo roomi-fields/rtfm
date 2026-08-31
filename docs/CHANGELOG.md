@@ -7,6 +7,30 @@ description: >-
 
 # Changelog
 
+## [0.35.0] — 2026-08-31
+
+### Fixed — the catalogue and the disk are made to agree
+
+Indexing writes a document and its passages first, then the tracking row that
+says "this file is indexed". A worker that dies between the two leaves a
+document nothing follows: never refreshed, never removed, still answering
+searches with content that may have left the disk months ago. This worker died
+often — pdfium segfaults, memory kills, several supervisor restarts a night —
+and **6 283 such documents** had piled up across this fleet, 5 772 on one
+project.
+
+Reconciliation now settles each one against the disk and nothing else: the
+file is there and the document is re-indexed properly, or the file is gone and
+the document goes with it, passages included. A corpus whose source
+directories are unknown is left alone and reported rather than guessed at, and
+an unreadable mount is never taken as proof that a file is gone.
+
+### Fixed — a passage with no text is never stored
+
+Search could match a document and then hand the reader nothing. The HTML
+parser produced these on markup containing no text. They are refused at the
+door now, and reconciliation purges the ones already stored.
+
 ## [0.34.1] — 2026-08-31
 
 ### Fixed — the churn check tells a busy file from a loop
