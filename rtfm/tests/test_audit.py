@@ -48,20 +48,30 @@ def _ro(db: Path):
 
 
 class TestChurn:
-    """The loop that ran for three weeks: two scans handing a file back and
-    forth, each undoing the other, the queue never emptying and nothing in
-    the ordinary output saying so."""
+    """Telling a busy file from a loop.
 
-    def test_a_file_indexed_over_and_over_is_reported(self, index):
+    A file an agent appends to every few minutes is re-indexed dozens of
+    times a day, and that is simply true. A check that flags it is a check
+    nobody reads for long — which is how a watchdog stops working.
+    """
+
+    def _jobs(self, index, filepath, ingests=0, removes=0, age="now"):
         q = Queue(str(index))
-        for _ in range(CHURN_THRESHOLD + 3):
-            conn = q._get_conn()
-            conn.execute(
-                "INSERT INTO work_queue (type, priority, payload, status, "
-                "created_at) VALUES ('ingest', 10, ?, 'done', datetime('now'))",
-                (json.dumps({"corpus": "c", "filepath": "README.md"}),))
-            conn.commit()
+        conn = q._get_conn()
+        payload = json.dumps({"corpus": "c", "filepath": filepath})
+        when = "datetime('now')" if age == "now" else f"datetime('now', '{age}')"
+        for kind, count in (("ingest", ingests), ("remove", removes)):
+            for _ in range(count):
+                conn.execute(
+                    "INSERT INTO work_queue (type, priority, payload, status, "
+                    f"created_at) VALUES (?, 10, ?, 'done', {when})",
+                    (kind, payload))
+        conn.commit()
         q.close()
+
+    def test_indexing_and_removing_the_same_file_is_a_loop(self, index):
+        """Nothing but two scans undoing each other produces this."""
+        self._jobs(index, "caught.md", ingests=4, removes=4)
 
         conn = _ro(index)
         try:
@@ -69,21 +79,38 @@ class TestChurn:
         finally:
             conn.close()
         assert result is not None
-        count, detail = result
-        assert count == 1
-        assert "README.md" in detail
+        assert result[0] == 1
+        assert "caught.md" in result[1]
+        assert "removals" in result[1]
 
-    def test_ordinary_re_indexing_is_not_reported(self, index):
-        """A file edited a few times a day is normal and must stay quiet."""
-        q = Queue(str(index))
-        conn = q._get_conn()
-        for _ in range(3):
-            conn.execute(
-                "INSERT INTO work_queue (type, priority, payload, status, "
-                "created_at) VALUES ('ingest', 10, ?, 'done', datetime('now'))",
-                (json.dumps({"corpus": "c", "filepath": "notes.md"}),))
-        conn.commit()
-        q.close()
+    def test_a_file_someone_keeps_editing_is_left_alone(self, index):
+        """The journal an agent appends to every few minutes: indexed often,
+        never removed. Real activity, not a defect."""
+        self._jobs(index, "journal.jsonl", ingests=48)
+
+        conn = _ro(index)
+        try:
+            assert check_churn(conn) is None
+        finally:
+            conn.close()
+
+    def test_sheer_volume_is_reported_even_without_removals(self, index):
+        """Cross-corpus theft produced no removals at all — 82 000 passes
+        over one README. Past a hundred a day it is worth a line whatever
+        the reason."""
+        self._jobs(index, "README.md", ingests=CHURN_THRESHOLD + 5)
+
+        conn = _ro(index)
+        try:
+            result = check_churn(conn)
+        finally:
+            conn.close()
+        assert result is not None and result[0] == 1
+        assert "README.md" in result[1]
+
+    def test_a_single_delete_and_re_add_is_not_a_loop(self, index):
+        """Moving a file legitimately produces one of each."""
+        self._jobs(index, "moved.md", ingests=1, removes=1)
 
         conn = _ro(index)
         try:
@@ -93,16 +120,8 @@ class TestChurn:
 
     def test_old_churn_falls_out_of_the_window(self, index):
         """The check reports what is happening, not what happened."""
-        q = Queue(str(index))
-        conn = q._get_conn()
-        for _ in range(CHURN_THRESHOLD + 3):
-            conn.execute(
-                "INSERT INTO work_queue (type, priority, payload, status, "
-                "created_at) VALUES ('ingest', 10, ?, 'done', "
-                "datetime('now', '-8 days'))",
-                (json.dumps({"corpus": "c", "filepath": "README.md"}),))
-        conn.commit()
-        q.close()
+        self._jobs(index, "README.md", ingests=CHURN_THRESHOLD + 5,
+                   age="-8 days")
 
         conn = _ro(index)
         try:

@@ -22,10 +22,20 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# A file legitimately re-indexed a few times a day (an agent's mailbox, a
-# file being edited) is normal. Dozens is not: it is the signature of two
-# scans handing the same file back and forth.
-CHURN_THRESHOLD = 12
+# Telling a busy file from a loop.
+#
+# A file an agent appends to every few minutes is re-indexed dozens of times a
+# day, and that is simply true — a check that flags it is a check nobody will
+# read for long. Two signals separate the two cases:
+#
+#  * **Alternation.** A file being edited is only ever indexed. A file caught
+#    between two scans is indexed *and removed*, over and over: that is the
+#    delete/re-index loop, and nothing else produces it.
+#  * **Sheer volume.** Cross-corpus theft produced no removals at all, only
+#    indexing — 82 000 passes over one README. Above a hundred in a day,
+#    whatever the reason, it is worth a line.
+CHURN_ALTERNATION = 3
+CHURN_THRESHOLD = 100
 CHURN_WINDOW_HOURS = 24
 
 # A claim held this long by nobody is stranded work, not slow work.
@@ -83,21 +93,25 @@ def check_churn(conn) -> tuple[int, str] | None:
     rows = conn.execute(
         """SELECT json_extract(payload, '$.corpus'),
                   json_extract(payload, '$.filepath'),
-                  COUNT(*) AS n
+                  SUM(type = 'ingest') AS indexed,
+                  SUM(type = 'remove') AS removed
            FROM work_queue
            WHERE type IN ('ingest', 'remove')
              AND created_at > datetime('now', ?)
            GROUP BY 1, 2
-           HAVING n >= ?
-           ORDER BY n DESC""",
-        (f"-{CHURN_WINDOW_HOURS} hours", CHURN_THRESHOLD),
+           HAVING (indexed >= ? AND removed >= ?) OR indexed >= ?
+           ORDER BY indexed + removed DESC""",
+        (f"-{CHURN_WINDOW_HOURS} hours",
+         CHURN_ALTERNATION, CHURN_ALTERNATION, CHURN_THRESHOLD),
     ).fetchall()
     if not rows:
         return None
-    corpus, filepath, n = rows[0]
+    corpus, filepath, indexed, removed = rows[0]
+    how = (f"{indexed} indexings and {removed} removals" if removed
+           else f"{indexed} indexings")
     return (len(rows),
-            f"{len(rows)} file(s) re-indexed {CHURN_THRESHOLD}+ times in "
-            f"{CHURN_WINDOW_HOURS}h — worst: {n}× [{corpus}] {filepath}")
+            f"{len(rows)} file(s) churning in {CHURN_WINDOW_HOURS}h — "
+            f"worst: [{corpus}] {filepath} ({how})")
 
 
 def check_silent_drops(conn) -> tuple[int, str] | None:

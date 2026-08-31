@@ -7,6 +7,20 @@ description: >-
 
 # Changelog
 
+## [0.34.1] — 2026-08-31
+
+### Fixed — the churn check tells a busy file from a loop
+
+Flagging any file re-indexed a dozen times a day meant flagging every journal
+an agent appends to — real activity, reported as a defect. A check nobody
+reads for long is how a watchdog stops working.
+
+Two signals separate the cases. A file being edited is only ever *indexed*; a
+file caught between two scans is indexed **and removed**, over and over, and
+nothing else produces that. Sheer volume still counts on its own — the
+cross-corpus theft produced no removals at all, only 82 000 passes over one
+README — but the bar is now a hundred a day rather than a dozen.
+
 ## [0.34.0] — 2026-08-31
 
 ### Fixed — scanning no longer starves the work it finds
