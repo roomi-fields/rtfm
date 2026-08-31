@@ -968,3 +968,96 @@ class TestTheSupervisorChecksItsOwnIndexes:
             if t.name == "rtfm-audit":
                 t.join(timeout=10)
         assert logged == []
+
+
+class TestScanningDoesNotStarveTheWorkItFinds:
+    """A scan holds the project's slot alone. On a project with two dozen
+    source directories a full round takes minutes, and the round was
+    re-enqueued every minute — so nothing else ever ran. One project sat at
+    81 000 pending embeddings for a day, scanning without pause and finding
+    nothing each time.
+
+    Looking for more work while that much is already waiting is pointless.
+    """
+
+    def _slot_with_backlog(self, tmp_path, pending):
+        import rtfm.core.supervisor as sup
+        from rtfm.core.library import Library
+        from rtfm.core.queue import Queue
+
+        rtfm_dir = tmp_path / "proj" / ".rtfm"
+        rtfm_dir.mkdir(parents=True)
+        db = rtfm_dir / "library.db"
+        Library(str(db)).close()
+        q = Queue(str(db))
+        for i in range(pending):
+            q.enqueue("embed", {"chunk_id": f"c{i}"})
+
+        slot = sup._Slot(rtfm_dir)
+        slot.queue = q
+        slot.logs = []
+        slot.log = slot.logs.append
+        return slot
+
+    def _supervisor(self, slot):
+        import rtfm.core.supervisor as sup
+
+        s = sup.Supervisor.__new__(sup.Supervisor)
+        s._slots = {"p": slot}
+        s._scan_interval = 60.0
+        s._reconcile_interval = 3600.0
+        s.enqueued = []
+        s._enqueue_scans = lambda sl: s.enqueued.append(sl)
+        return s
+
+    def test_a_large_backlog_pauses_the_periodic_scan(self, tmp_path):
+        import rtfm.core.supervisor as sup
+
+        slot = self._slot_with_backlog(tmp_path, sup.SCAN_BACKLOG_PAUSE + 5)
+        supervisor = self._supervisor(slot)
+        supervisor._enqueue_periodic()
+
+        assert supervisor.enqueued == []
+        assert any("paused" in line for line in slot.logs), slot.logs
+        slot.queue.close()
+
+    def test_a_quiet_project_still_gets_scanned(self, tmp_path):
+        slot = self._slot_with_backlog(tmp_path, 3)
+        supervisor = self._supervisor(slot)
+        supervisor._enqueue_periodic()
+
+        assert supervisor.enqueued == [slot]
+        slot.queue.close()
+
+    def test_pending_scans_do_not_count_as_a_backlog(self, tmp_path):
+        """A queue full of scans is the state this stops, not a reason to
+        keep going."""
+        import rtfm.core.supervisor as sup
+
+        slot = self._slot_with_backlog(tmp_path, 0)
+        for i in range(sup.SCAN_BACKLOG_PAUSE + 5):
+            slot.queue.enqueue("scan", {"root": f"/r{i}", "corpus": "c"})
+        supervisor = self._supervisor(slot)
+        supervisor._enqueue_periodic()
+
+        assert supervisor.enqueued == [slot]
+        slot.queue.close()
+
+    def test_it_says_when_it_starts_again(self, tmp_path):
+        import rtfm.core.supervisor as sup
+
+        slot = self._slot_with_backlog(tmp_path, sup.SCAN_BACKLOG_PAUSE + 5)
+        supervisor = self._supervisor(slot)
+        supervisor._enqueue_periodic()
+        assert supervisor.enqueued == []
+
+        # Backlog drains; the next round goes ahead and says so.
+        conn = slot.queue._get_conn()
+        conn.execute("DELETE FROM work_queue WHERE type = 'embed'")
+        conn.commit()
+        slot.next_scan_at = 0.0
+        supervisor._enqueue_periodic()
+
+        assert supervisor.enqueued == [slot]
+        assert any("resumed" in line for line in slot.logs), slot.logs
+        slot.queue.close()

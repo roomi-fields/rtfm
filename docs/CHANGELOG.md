@@ -7,6 +7,22 @@ description: >-
 
 # Changelog
 
+## [0.34.0] — 2026-08-31
+
+### Fixed — scanning no longer starves the work it finds
+
+A scan holds its project's slot alone. On a project with 26 source
+directories a full round takes minutes — and the round was re-enqueued every
+60 seconds, at a priority above indexing and embedding. Nothing else ever ran:
+one project sat at 81 000 pending embeddings, 1 743 pending files and 174
+pending removals for a whole day, scanning without pause and finding nothing
+each time. The queue looked busy and was doing no work at all.
+
+Periodic scanning exists to *discover* work. Past 500 jobs already discovered
+and waiting, it pauses and says so, and resumes when the backlog clears. A
+scan you asked for — `rtfm sync`, the edit hook — is a different path and is
+never paused.
+
 ## [0.33.0] — 2026-08-31
 
 Both of these were found by looking at a project that had stopped moving —

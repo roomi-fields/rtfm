@@ -251,6 +251,19 @@ CLAIM_SWEEP_SECONDS = 60.0
 # before anyone noticed. The first pass runs a few minutes after boot, once
 # the slots are open and the initial scans have settled.
 AUDIT_INTERVAL_SECONDS = 3600.0
+
+# Periodic scanning exists to *discover* work. Past this much already
+# discovered and waiting, looking for more is pointless — and on a project
+# with two dozen source directories it is worse than pointless: a scan holds
+# the project's slot alone, a full round over 26 directories takes minutes,
+# and the round is re-enqueued every minute. Nothing else ever runs. One
+# project sat at 81 000 pending embeddings for a day that way, scanning
+# without pause and finding nothing each time.
+#
+# A user-triggered scan (`rtfm sync`, the edit hook) is a different path and
+# is never paused: this is only the background sweep looking for changes
+# nobody announced.
+SCAN_BACKLOG_PAUSE = 500
 AUDIT_FIRST_DELAY_SECONDS = 300.0
 STALL_POLL_SECONDS = 5.0
 
@@ -282,6 +295,7 @@ class _Slot:
         self.inflight = 0
         self.exclusive = False
         self.next_scan_at = 0.0        # monotonic
+        self.scan_paused = False       # backlog too large to look for more
         self.next_reconcile_at = 0.0   # monotonic; 0 until seeded
         self.reconcile_seeded = False
         self.jobs_done = 0
@@ -817,6 +831,21 @@ class Supervisor:
 
     # ── periodic scan / reconcile (staggered) ────────────────────────────
 
+    def _backlog(self, slot: "_Slot") -> int:
+        """How much real work this project already has waiting.
+
+        Scans themselves are excluded: a queue full of scans is exactly the
+        state this is meant to stop, not a reason to keep going.
+        """
+        try:
+            conn = slot.queue._get_conn()
+            return conn.execute(
+                "SELECT COUNT(*) FROM work_queue WHERE status = 'pending' "
+                "AND type NOT IN ('scan', 'reconcile', 'vacuum')"
+            ).fetchone()[0]
+        except Exception:
+            return 0
+
     def _enqueue_periodic(self) -> None:
         now = time.monotonic()
         for slot in self._slots.values():
@@ -824,6 +853,18 @@ class Supervisor:
                 continue
             if now >= slot.next_scan_at:
                 slot.next_scan_at = now + self._scan_interval
+                backlog = self._backlog(slot)
+                if backlog > SCAN_BACKLOG_PAUSE:
+                    if not slot.scan_paused:
+                        slot.scan_paused = True
+                        slot.log(
+                            f"periodic scan paused: {backlog} job(s) already "
+                            f"waiting — looking for more would only keep the "
+                            f"slot busy. Resumes under {SCAN_BACKLOG_PAUSE}.")
+                    continue
+                if slot.scan_paused:
+                    slot.scan_paused = False
+                    slot.log(f"periodic scan resumed ({backlog} job(s) left)")
                 self._enqueue_scans(slot)
             if not slot.reconcile_seeded:
                 slot.next_reconcile_at = now + self._reconcile_interval
