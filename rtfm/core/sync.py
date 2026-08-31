@@ -513,7 +513,8 @@ def quick_diff(
     files_on_disk = scan_directory(root, extensions, exclude_dirs,
                                    honor_gitignore=honor_gitignore,
                                    include=include, exclude=exclude)
-    indexed = library.list_indexed_files(corpus=corpus)
+    # Read-only health check: same scoping as the real scan, no claiming.
+    indexed = library.list_indexed_files(corpus=corpus, root=str(root))
 
     seen_paths: set[str] = set()
     for fpath in files_on_disk:
@@ -924,8 +925,16 @@ def sync(
                                        honor_gitignore=honor_gitignore,
                                        include=include, exclude=exclude)
 
-    # 2. Get DB state (scoped to corpus to support multi-directory sync)
-    indexed = library.list_indexed_files(corpus=corpus)
+    # 2. Get DB state, scoped to this directory: a corpus may gather several,
+    # and the others' files must not read as deleted here.
+    rels = []
+    for f in files_on_disk:
+        try:
+            rels.append(str(f.relative_to(root)))
+        except ValueError:
+            pass
+    library.claim_files_for_root(corpus, str(root), rels)
+    indexed = library.list_indexed_files(corpus=corpus, root=str(root))
     # Full DB state (all corpora) — fuel for cross-corpus move detection.
     # Cheap query, just a SELECT without parsing files.
     indexed_global = library.list_indexed_files()
@@ -1070,6 +1079,7 @@ def sync(
                 corpus=corpus,
                 book_slug=book_slug,
                 file_size=fpath.stat().st_size,
+                root_path=str(root),
             )
             # Health signal: a file that produces 0 chunks is suspicious.
             # PDFs are almost always scans needing OCR; other formats may

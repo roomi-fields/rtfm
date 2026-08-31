@@ -7,6 +7,37 @@ description: >-
 
 # Changelog
 
+## [0.33.0] — 2026-08-31
+
+Both of these were found by looking at a project that had stopped moving —
+81 000 embeddings pending and none completing for hours — and both were
+introduced the night before, by the fixes in 0.30.0 and 0.32.0.
+
+### Fixed — a scan compares itself to its own directory
+
+Which directory a stored path is relative to was never recorded, so a scan of
+one directory of a multi-directory corpus saw every *other* directory's files
+as missing, and had to stat each one against every sibling to learn otherwise.
+On a corpus of 478 such files spread over five directories on a network mount,
+that ran on every scan. The scans stopped fitting in their interval, took the
+project's exclusive slot permanently, and everything queued behind them —
+indexing, removals, 81 000 embeddings — never ran at all.
+
+`indexed_files` now records the source directory each path came from. A scan
+claims what it found in one write and compares itself only to that, so a
+sibling directory's files are not candidates for removal in the first place.
+Existing rows are claimed by the first scan that finds them; the per-file
+check that stood between a glitch and a deletion stays as a last resort, with
+almost nothing left to check.
+
+### Fixed — the watchdog no longer stops the work it watches
+
+The hourly self-audit added in 0.32.0 ran on the dispatcher thread. Read-only
+and cheap on a healthy index is not instant on a queue holding three million
+rows: it blocked scheduling for a full half-minute every hour, with no project
+served meanwhile — `STALL: scheduling blocked in 'audit' for 34s`, once an
+hour, all night. It runs on its own thread now.
+
 ## [0.32.0] — 2026-08-30
 
 ### Added — RTFM checks itself

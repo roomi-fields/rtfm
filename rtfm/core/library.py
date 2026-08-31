@@ -144,6 +144,12 @@ CREATE TABLE IF NOT EXISTS indexed_files (
     book_slug TEXT,
     indexed_at TEXT,
     file_size INTEGER,
+    -- Which source directory this path is relative to. Without it, scanning
+    -- one directory of a multi-directory corpus sees every other directory's
+    -- files as missing, and has to stat each one against every sibling to
+    -- find out otherwise — thousands of network round-trips per scan, on
+    -- every scan. NULL means "not yet established"; a scan claims its own.
+    root_path TEXT,
     UNIQUE (filepath, corpus)
 );
 CREATE INDEX IF NOT EXISTS idx_indexed_filepath ON indexed_files(filepath);
@@ -329,6 +335,10 @@ class Library:
                 ALTER TABLE sync_roots_new RENAME TO sync_roots;
             """)
 
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(indexed_files)")}
+        if cols and "root_path" not in cols:
+            conn.execute("ALTER TABLE indexed_files ADD COLUMN root_path TEXT")
+
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' "
             "AND name='indexed_files'"
@@ -343,6 +353,7 @@ class Library:
                     book_slug TEXT,
                     indexed_at TEXT,
                     file_size INTEGER,
+                    root_path TEXT,
                     UNIQUE (filepath, corpus)
                 );
                 INSERT OR IGNORE INTO indexed_files_new
@@ -2249,23 +2260,29 @@ class Library:
     # File tracking (for incremental sync)
     # =========================================================================
 
-    def list_indexed_files(self, corpus: str | None = None) -> dict[str, dict]:
+    def list_indexed_files(self, corpus: str | None = None,
+                           root: str | None = None) -> dict[str, dict]:
         """Return {filepath: {file_hash, corpus, book_slug, indexed_at, file_size}}.
 
-        If *corpus* is given, only return files belonging to that corpus.
+        If *corpus* is given, only return files belonging to that corpus. If
+        *root* is also given, only those that came from that directory — what
+        a scan must compare itself against, so the other directories of the
+        same corpus are not mistaken for deleted files. Rows whose directory
+        was never established are included: they are claimed on the first
+        scan that finds them (see :meth:`claim_files_for_root`).
         """
         conn = self._get_conn()
-        if corpus:
+        cols = ("SELECT filepath, file_hash, corpus, book_slug, indexed_at, "
+                "file_size FROM indexed_files")
+        if corpus and root:
             cursor = conn.execute(
-                "SELECT filepath, file_hash, corpus, book_slug, indexed_at, file_size "
-                "FROM indexed_files WHERE corpus = ?",
-                (corpus,),
+                f"{cols} WHERE corpus = ? AND (root_path = ? OR root_path IS NULL)",
+                (corpus, root),
             )
+        elif corpus:
+            cursor = conn.execute(f"{cols} WHERE corpus = ?", (corpus,))
         else:
-            cursor = conn.execute(
-                "SELECT filepath, file_hash, corpus, book_slug, indexed_at, file_size "
-                "FROM indexed_files"
-            )
+            cursor = conn.execute(cols)
         return {
             row["filepath"]: {
                 "file_hash": row["file_hash"],
@@ -2350,23 +2367,45 @@ class Library:
 
     def update_indexed_file(
         self, filepath: str, file_hash: str, corpus: str,
-        book_slug: str, file_size: int = 0,
+        book_slug: str, file_size: int = 0, root_path: str | None = None,
     ):
         """Insert or update the tracking entry for an indexed file."""
         conn = self._get_conn()
         conn.execute(
-            """INSERT INTO indexed_files (filepath, file_hash, corpus, book_slug, indexed_at, file_size)
-               VALUES (?, ?, ?, ?, ?, ?)
+            """INSERT INTO indexed_files (filepath, file_hash, corpus, book_slug, indexed_at, file_size, root_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(filepath, corpus) DO UPDATE SET
                    file_hash = excluded.file_hash,
                    corpus = excluded.corpus,
                    book_slug = excluded.book_slug,
                    indexed_at = excluded.indexed_at,
-                   file_size = excluded.file_size""",
+                   file_size = excluded.file_size,
+                   root_path = COALESCE(excluded.root_path, indexed_files.root_path)""",
             (filepath, file_hash, corpus, book_slug,
-             datetime.now().isoformat(), file_size),
+             datetime.now().isoformat(), file_size, root_path),
         )
         conn.commit()
+
+    def claim_files_for_root(self, corpus: str, root: str,
+                             filepaths) -> int:
+        """Record that these paths belong to this source directory.
+
+        Called by a scan with what it actually found on disk. One cheap write
+        per scan replaces what used to be thousands of filesystem probes: the
+        next scan can tell its own files from a sibling directory's by asking
+        the index instead of asking the disk — which mattered most where it
+        hurt most, on corpora that live on a network mount.
+        """
+        conn = self._get_conn()
+        cur = conn.executemany(
+            "UPDATE indexed_files SET root_path = ? "
+            "WHERE corpus = ? AND filepath = ? "
+            "AND (root_path IS NULL OR root_path <> ?)",
+            [(root, corpus, rel, root) for rel in filepaths],
+        )
+        n = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        conn.commit()
+        return n
 
     def remove_file(self, filepath: str, corpus: str) -> bool:
         """Remove a file from the index: chunks + book + tracking.

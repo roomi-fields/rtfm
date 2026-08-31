@@ -740,22 +740,35 @@ class Supervisor:
         index has had was plain in the data for weeks while the logs and the
         test suite said everything was fine — a line in the log the day it
         starts is the whole point.
+
+        Runs on its own thread. The checks are read-only and cheap on a
+        healthy index, but "cheap" is not "instant" on a queue holding three
+        million rows, and the first version ran inline: it blocked scheduling
+        for a full half-minute every hour, with no project served meanwhile.
+        A watchdog that stops the work it watches is worse than none.
         """
         now = time.monotonic()
         if now < self._next_audit:
             return
         self._next_audit = now + AUDIT_INTERVAL_SECONDS
 
-        from rtfm.core.audit import audit_project
+        slots = list(self._slots.values())
+        if not slots:
+            return
 
-        for slot in list(self._slots.values()):
-            try:
-                findings = audit_project(slot.db_path, slot.rtfm_dir.parent)
-            except Exception as exc:
-                slot.log(f"audit error: {exc}")
-                continue
-            for finding in findings:
-                slot.log(f"audit: {finding.check}: {finding.detail}")
+        def run() -> None:
+            from rtfm.core.audit import audit_project
+
+            for slot in slots:
+                try:
+                    findings = audit_project(slot.db_path, slot.rtfm_dir.parent)
+                except Exception as exc:
+                    slot.log(f"audit error: {exc}")
+                    continue
+                for finding in findings:
+                    slot.log(f"audit: {finding.check}: {finding.detail}")
+
+        threading.Thread(target=run, name="rtfm-audit", daemon=True).start()
 
     def _sweep_stale_claims(self) -> None:
         """Return ``running`` rows this supervisor is not actually running.

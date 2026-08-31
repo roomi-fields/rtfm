@@ -935,6 +935,11 @@ class TestTheSupervisorChecksItsOwnIndexes:
         supervisor._next_audit = 0.0
 
         supervisor._audit_indexes()
+        # It runs off the dispatcher thread — a watchdog must never be able
+        # to block the work it watches.
+        for t in threading.enumerate():
+            if t.name == "rtfm-audit":
+                t.join(timeout=10)
 
         assert any("audit: silent-drops" in line for line in logged), logged
 
@@ -959,4 +964,7 @@ class TestTheSupervisorChecksItsOwnIndexes:
         supervisor._next_audit = time.monotonic() + 3600
 
         supervisor._audit_indexes()
+        for t in threading.enumerate():
+            if t.name == "rtfm-audit":
+                t.join(timeout=10)
         assert logged == []

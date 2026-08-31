@@ -194,7 +194,18 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
         files_on_disk = scan_directory(root, ext_set,
                                        honor_gitignore=honor_gitignore,
                                        include=include, exclude=exclude)
-        indexed = lib.list_indexed_files(corpus=corpus)
+        # Claim what is here, then compare only against what belongs here.
+        # Otherwise a corpus gathering several directories makes every scan
+        # see the others' files as missing — 478 of them on one corpus here,
+        # each re-probed on the network on every pass.
+        rels = []
+        for f in files_on_disk:
+            try:
+                rels.append(str(f.relative_to(root)))
+            except ValueError:
+                pass
+        lib.claim_files_for_root(corpus, str(root), rels)
+        indexed = lib.list_indexed_files(corpus=corpus, root=str(root))
         indexed_global = lib.list_indexed_files()
         diff = compute_diff(
             files_on_disk, indexed, root,
@@ -382,6 +393,7 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
             corpus=corpus,
             book_slug=book_slug,
             file_size=abs_path.stat().st_size,
+            root_path=str(root),
         )
         # It parsed — any past failure for this path is history.
         try:

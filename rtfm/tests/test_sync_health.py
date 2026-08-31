@@ -113,7 +113,7 @@ def test_quick_diff_detects_modified_when_size_changes(library, tmp_path, monkey
     stored file_size as modified."""
     (tmp_path / "doc.md").write_text("hello")
 
-    def fake_indexed(self, corpus=None):
+    def fake_indexed(self, corpus=None, root=None):
         return {
             "doc.md": {
                 "file_hash": "stale",
@@ -132,7 +132,7 @@ def test_quick_diff_detects_modified_when_size_changes(library, tmp_path, monkey
 
 def test_quick_diff_detects_removed(library, tmp_path, monkeypatch):
     """A file present in the index but missing on disk shows as removed."""
-    def fake_indexed(self, corpus=None):
+    def fake_indexed(self, corpus=None, root=None):
         return {
             "ghost.md": {
                 "file_hash": "h", "corpus": "test", "book_slug": "ghost",

@@ -193,3 +193,92 @@ class TestTheSameFileInTwoCorpora:
 def _hash(path: Path) -> str:
     from rtfm.core.sync import compute_file_hash
     return compute_file_hash(path)
+
+
+class TestAScanComparesItselfToItsOwnDirectory:
+    """Which directory a path is relative to has to be recorded, not probed.
+
+    Without it, scanning one directory of a multi-directory corpus sees every
+    other directory's files as missing and has to stat each one against every
+    sibling to learn otherwise. On a corpus of 478 such files spread over five
+    directories on a network mount, that ran on every scan — the scans stopped
+    fitting in their interval, took the project's exclusive slot permanently,
+    and 81 000 embeddings behind them never moved.
+    """
+
+    def test_the_scan_claims_what_it_found(self, tmp_path):
+        lib = Library(str(tmp_path / "library.db"))
+        try:
+            lib.update_indexed_file(filepath="a.md", file_hash="h",
+                                    corpus="c", book_slug="a")
+            assert lib.claim_files_for_root("c", "/roots/one", ["a.md"]) == 1
+            # Idempotent: claiming again changes nothing.
+            assert lib.claim_files_for_root("c", "/roots/one", ["a.md"]) == 0
+        finally:
+            lib.close()
+
+    def test_a_sibling_directory_s_files_are_not_even_candidates(self, tmp_path):
+        lib = Library(str(tmp_path / "library.db"))
+        try:
+            lib.update_indexed_file(filepath="mine.md", file_hash="h",
+                                    corpus="c", book_slug="m",
+                                    root_path="/roots/one")
+            lib.update_indexed_file(filepath="theirs.md", file_hash="h",
+                                    corpus="c", book_slug="t",
+                                    root_path="/roots/two")
+
+            here = lib.list_indexed_files(corpus="c", root="/roots/one")
+            assert set(here) == {"mine.md"}
+        finally:
+            lib.close()
+
+    def test_a_file_whose_directory_is_unknown_is_still_considered(self, tmp_path):
+        """Rows written before the directory was recorded must not fall out
+        of every scan — they would never be refreshed or removed again."""
+        lib = Library(str(tmp_path / "library.db"))
+        try:
+            lib.update_indexed_file(filepath="old.md", file_hash="h",
+                                    corpus="c", book_slug="o")
+            here = lib.list_indexed_files(corpus="c", root="/roots/one")
+            assert set(here) == {"old.md"}
+        finally:
+            lib.close()
+
+    def test_an_existing_database_gains_the_column(self, tmp_path):
+        import sqlite3 as _sqlite3
+
+        db = tmp_path / "library.db"
+        lib = Library(str(db))
+        lib.close()
+        conn = _sqlite3.connect(str(db))
+        conn.execute("ALTER TABLE indexed_files DROP COLUMN root_path")
+        conn.commit()
+        conn.close()
+
+        lib = Library(str(db))
+        try:
+            cols = {r[1] for r in
+                    lib._get_conn().execute("PRAGMA table_info(indexed_files)")}
+            assert "root_path" in cols
+        finally:
+            lib.close()
+
+    def test_two_directories_stop_proposing_each_other_for_removal(self, tmp_path):
+        """The end result: a scan of one directory reports nothing to remove."""
+        one, two = tmp_path / "one", tmp_path / "two"
+        _write(one / "a.md", "alpha " * 40)
+        _write(two / "b.md", "beta " * 40)
+
+        lib = Library(str(tmp_path / "library.db"))
+        try:
+            sync(library=lib, root=one, corpus="c",
+                 extensions={".md"}, generate_embeddings=False)
+            sync(library=lib, root=two, corpus="c",
+                 extensions={".md"}, generate_embeddings=False)
+
+            result = sync(library=lib, root=one, corpus="c",
+                          extensions={".md"}, generate_embeddings=False)
+            assert result.removed == 0
+            assert set(lib.list_indexed_files(corpus="c")) == {"a.md", "b.md"}
+        finally:
+            lib.close()
