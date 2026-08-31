@@ -42,6 +42,7 @@ chunk is gone for good" — its embedding can't be reattached.
 """
 from __future__ import annotations
 
+import errno
 import sqlite3
 from pathlib import Path
 from typing import Callable, Optional
@@ -67,6 +68,27 @@ def purge_empty_chunks(conn: sqlite3.Connection) -> int:
            (SELECT COUNT(*) FROM chunks WHERE chunks.book_id = books.id)""")
     conn.commit()
     return n
+
+
+# Errors that say "no such file could exist here", as opposed to "this
+# location cannot be read right now". The first is evidence of absence; the
+# second never is, and mistaking one for the other is how an index gets
+# deleted because a network share blinked.
+_ABSENCE_ERRNOS = {errno.ENAMETOOLONG, errno.EINVAL, errno.ENOTDIR,
+                   errno.ELOOP, errno.ENOENT}
+
+
+def _find_under(roots, filename: str):
+    """Return ``(root_holding_the_file, any_location_unreadable)``."""
+    unreadable = False
+    for root in roots:
+        try:
+            if (root / filename).exists():
+                return root, unreadable
+        except OSError as exc:
+            if exc.errno not in _ABSENCE_ERRNOS:
+                unreadable = True
+    return None, unreadable
 
 
 def untracked_books(conn: sqlite3.Connection) -> list:
@@ -111,28 +133,30 @@ def repair_untracked_books(lib, queue, log) -> dict:
         return {"reattached": 0, "dropped": 0, "undecidable": 0}
 
     roots: dict[str, list] = {}
+    every_root: list[Path] = []
     for corpus, root_path in conn.execute(
             "SELECT corpus, root_path FROM sync_roots"):
         roots.setdefault(corpus, []).append(Path(root_path))
+        every_root.append(Path(root_path))
 
     reattached = dropped = undecidable = 0
     to_index: list[dict] = []
     for row in rows:
         slug, filename, corpus = row[0], row[1] or "", row[2] or ""
-        corpus_roots = roots.get(corpus) or []
-        if not corpus_roots or not filename:
+        if not filename:
             undecidable += 1
             continue
 
-        home = None
-        unreadable = False
-        for root in corpus_roots:
-            try:
-                if (root / filename).exists():
-                    home = root
-                    break
-            except OSError:
-                unreadable = True
+        # A corpus renamed in the config leaves its old name behind with no
+        # source directory. Those entries are not undecidable — they are
+        # simply somewhere, or nowhere: look under every directory the
+        # project knows before concluding anything.
+        corpus_roots = roots.get(corpus) or every_root
+        if not corpus_roots:
+            undecidable += 1
+            continue
+
+        home, unreadable = _find_under(corpus_roots, filename)
         if unreadable and home is None:
             # A mount that went dark is not evidence that a file is gone.
             undecidable += 1

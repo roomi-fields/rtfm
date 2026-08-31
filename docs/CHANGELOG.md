@@ -7,6 +7,25 @@ description: >-
 
 # Changelog
 
+## [0.35.1] — 2026-08-31
+
+### Fixed — a corpus that no longer exists still gets settled
+
+Renaming a corpus in the config leaves its old name behind with no source
+directory, and 0.35.0 filed those entries under "cannot decide" — 871 of them
+on one project, left exactly as they were. They are not undecidable: the file
+is somewhere the project knows, or nowhere. Every recorded directory is
+searched before concluding.
+
+### Fixed — an impossible path is not an unreadable one
+
+One index held two entries whose "filename" was a queue payload — 591
+characters of JSON, written by something that put a queue row into the
+catalogue. Asking the disk about a name that long raises, and reading that as
+"this location cannot be read" would have protected the corruption for ever.
+Errors that mean *no such file could exist here* now count as absence; only a
+genuine read failure holds an entry back.
+
 ## [0.35.0] — 2026-08-31
 
 ### Fixed — the catalogue and the disk are made to agree

@@ -88,10 +88,10 @@ class TestSettlingThemAgainstTheDisk:
         assert result["dropped"] == 1
         assert lib.list_books(corpus="c") == []
 
-    def test_an_unknown_source_directory_is_left_alone(self, project, tmp_path):
-        """Absence cannot be established there, so nothing is guessed."""
+    def test_a_book_with_no_filename_is_left_alone(self, project, tmp_path):
+        """Nothing to look for means nothing can be concluded."""
         lib, root = project
-        _book(lib, "elsewhere", "x.md", "corpus-with-no-root")
+        _book(lib, "nameless", "", "c")
 
         queue = Queue(str(tmp_path / "library.db"))
         try:
@@ -99,7 +99,7 @@ class TestSettlingThemAgainstTheDisk:
         finally:
             queue.close()
         assert result == {"reattached": 0, "dropped": 0, "undecidable": 1}
-        assert lib.list_books(corpus="corpus-with-no-root")
+        assert lib.list_books(corpus="c")
 
     def test_a_dark_mount_is_not_evidence_of_deletion(self, project, tmp_path):
         """The rule that stands between a network hiccup and a mass delete."""
@@ -194,3 +194,68 @@ class TestEmptyPassages:
         assert [r[0] for r in conn.execute("SELECT chunk_id FROM chunks")] == ["b-1"]
         assert conn.execute(
             "SELECT chunk_count FROM books WHERE slug='b'").fetchone()[0] == 1
+
+
+class TestACorpusThatNoLongerExists:
+    """Renaming a corpus in the config leaves its old name behind with no
+    source directory. Those entries are not undecidable — they are somewhere
+    on disk, or nowhere. 871 of them sat on one project."""
+
+    def test_a_file_found_under_another_directory_is_re_indexed(
+            self, project, tmp_path):
+        lib, root = project
+        (root / "kept.md").write_text("still here\n")
+        _book(lib, "old-name", "kept.md", "a-corpus-that-was-renamed")
+
+        queue = Queue(str(tmp_path / "library.db"))
+        try:
+            result = repair_untracked_books(lib, queue, lambda m: None)
+        finally:
+            queue.close()
+        assert result["reattached"] == 1
+        assert result["undecidable"] == 0
+
+    def test_a_file_found_nowhere_is_dropped(self, project, tmp_path):
+        lib, root = project
+        _book(lib, "old-name", "nowhere.md", "a-corpus-that-was-renamed")
+
+        queue = Queue(str(tmp_path / "library.db"))
+        try:
+            result = repair_untracked_books(lib, queue, lambda m: None)
+        finally:
+            queue.close()
+        assert result["dropped"] == 1
+        assert lib.list_books() == []
+
+
+class TestAnImpossiblePathIsNotAnUnreadableOne:
+    """One index held two entries whose "filename" was a queue payload —
+    591 characters of JSON. Asking the disk about it raises, and reading that
+    as "this location cannot be read" would protect the corruption for ever.
+    """
+
+    def test_a_name_too_long_to_exist_counts_as_absent(self, project, tmp_path):
+        lib, root = project
+        _book(lib, "junk", "{" + "x" * 600 + "}", "c")
+
+        queue = Queue(str(tmp_path / "library.db"))
+        try:
+            result = repair_untracked_books(lib, queue, lambda m: None)
+        finally:
+            queue.close()
+        assert result["dropped"] == 1
+        assert result["undecidable"] == 0
+
+    def test_a_location_that_cannot_be_read_still_holds_the_book(self, project):
+        from rtfm.core.reconcile import _find_under
+
+        class Unreadable:
+            def __truediv__(self, other):
+                return self
+
+            def exists(self):
+                raise OSError(5, "Input/output error")
+
+        home, unreadable = _find_under([Unreadable()], "a.md")
+        assert home is None
+        assert unreadable is True
