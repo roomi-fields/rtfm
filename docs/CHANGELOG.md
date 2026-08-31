@@ -7,6 +7,20 @@ description: >-
 
 # Changelog
 
+## [0.35.2] — 2026-08-31
+
+### Fixed — a real one-page paper is not a pagination fault
+
+"One page, several passages" swept up every genuine one-page document: they
+split into two or three passages and are perfectly indexed. `backfill-pages`
+re-ingested them on every run and the audit reported them for ever.
+
+The signature is physical instead. One page holds about 3 000 characters —
+the median across 1 388 correctly-paginated PDFs here — so a single page
+credited with more than 20 000 is a whole book flattened onto page 1, which is
+exactly what extraction did before 0.30.0. Real one-page papers, at 2 000 to
+7 000 characters, are left alone.
+
 ## [0.35.1] — 2026-08-31
 
 ### Fixed — a corpus that no longer exists still gets settled

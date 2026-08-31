@@ -1118,9 +1118,11 @@ def cmd_backfill_pages(args):
     "Missing" was not enough. Extraction used to return every document as a
     single page, so the count was *present and wrong* — 118 of 119 PDFs on
     one project recorded as one page, every passage labelled "Page 1", and
-    this command reporting "0 missing". A book split into several passages
-    that all claim to be on page one is the signature of that, so it is
-    picked up too.
+    this command reporting "0 missing". The signature is physical: one page
+    holds about 3 000 characters, so a single page credited with more than
+    20 000 is a whole book flattened onto page 1. Counting passages instead
+    would sweep up real one-page papers, which split into two or three and
+    are perfectly well indexed.
     """
     from rtfm.config import find_rtfm_root
     from rtfm.core.queue import Queue, P_USER
@@ -1144,7 +1146,7 @@ def cmd_backfill_pages(args):
            FROM books
            WHERE (filename LIKE '%.pdf' OR filename LIKE '%.PDF')
              AND (page_count IS NULL OR page_count = 0
-                  OR (page_count = 1 AND chunk_count > 1))"""
+                  OR (page_count = 1 AND total_chars > 20000))"""
     ).fetchall()
     conn.close()
     print(f"PDFs with missing or impossible pagination: {len(pdfs)}")

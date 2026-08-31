@@ -178,13 +178,21 @@ class TestUnreadable:
 
 
 class TestPagination:
-    def test_a_multi_passage_document_cannot_be_one_page(self, index):
+    """One page holds about 3 000 characters. Past 20 000 the document is a
+    whole book flattened onto page 1 — what extraction did to 1 585 files
+    before 0.30.0."""
+
+    def _book(self, index, name, pages, chunks, chars):
         conn = sqlite3.connect(str(index))
         conn.execute(
             "INSERT INTO books (slug, title, filename, corpus, page_count, "
-            "chunk_count) VALUES ('b', 'B', 'paper.pdf', 'c', 1, 45)")
+            "chunk_count, total_chars) VALUES (?,?,?,'c',?,?,?)",
+            (name, name, name, pages, chunks, chars))
         conn.commit()
         conn.close()
+
+    def test_a_book_flattened_onto_one_page_is_reported(self, index):
+        self._book(index, "thesis.pdf", pages=1, chunks=45, chars=140000)
 
         conn = _ro(index)
         try:
@@ -193,13 +201,19 @@ class TestPagination:
             conn.close()
         assert result is not None and result[0] == 1
 
-    def test_a_genuinely_short_document_is_fine(self, index):
-        conn = sqlite3.connect(str(index))
-        conn.execute(
-            "INSERT INTO books (slug, title, filename, corpus, page_count, "
-            "chunk_count) VALUES ('b', 'B', 'note.pdf', 'c', 1, 1)")
-        conn.commit()
-        conn.close()
+    def test_a_real_one_page_paper_is_left_alone(self, index):
+        """It splits into two or three passages and is perfectly indexed.
+        Flagging it means crying wolf for ever."""
+        self._book(index, "note.pdf", pages=1, chunks=3, chars=7154)
+
+        conn = _ro(index)
+        try:
+            assert check_pagination(conn) is None
+        finally:
+            conn.close()
+
+    def test_a_properly_paginated_book_is_fine(self, index):
+        self._book(index, "book.pdf", pages=400, chunks=900, chars=1200000)
 
         conn = _ro(index)
         try:

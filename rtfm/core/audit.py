@@ -149,15 +149,27 @@ def check_unreadable(conn) -> tuple[int, str] | None:
     return (n, f"{n} passage(s) can be found but not read")
 
 
+# One page holds about 3 000 characters — that is the median across 1 388
+# correctly-paginated PDFs here, and the physics of a sheet of paper. Past
+# 20 000, seven times that, the document is certainly not one page: it is a
+# whole book flattened onto page 1 by the extraction bug fixed in 0.30.0.
+#
+# Counting passages instead would be wrong: a real one-page paper splits into
+# two or three, and flagging those means crying wolf for ever on documents
+# that are perfectly indexed.
+PAGE_CHARS_IMPOSSIBLE = 20000
+
+
 def check_pagination(conn) -> tuple[int, str] | None:
-    """A document split into many passages cannot be one page long."""
+    """One page cannot hold a book."""
     n = conn.execute(
-        "SELECT COUNT(*) FROM books WHERE page_count = 1 AND chunk_count > 1 "
-        "AND (filename LIKE '%.pdf' OR filename LIKE '%.PDF')").fetchone()[0]
+        "SELECT COUNT(*) FROM books WHERE page_count = 1 AND total_chars > ? "
+        "AND (filename LIKE '%.pdf' OR filename LIKE '%.PDF')",
+        (PAGE_CHARS_IMPOSSIBLE,)).fetchone()[0]
     if not n:
         return None
-    return (n, f"{n} PDF(s) recorded as one page but split into several "
-               f"passages — run `rtfm backfill-pages`")
+    return (n, f"{n} PDF(s) recorded as one page holding more text than a "
+               f"page can — run `rtfm backfill-pages`")
 
 
 def check_stranded(conn) -> tuple[int, str] | None:
