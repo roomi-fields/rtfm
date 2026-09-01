@@ -64,7 +64,8 @@ class TestSettlingThemAgainstTheDisk:
         logs: list[str] = []
         try:
             result = repair_untracked_books(lib, queue, logs.append)
-            assert result == {"reattached": 1, "dropped": 0, "undecidable": 0}
+            assert result == {"reattached": 1, "dropped": 0,
+                              "undecidable": 0, "duplicates": 0}
             pending = [j for j in queue.list_pending(limit=10)
                        if j.type == "ingest"]
             assert len(pending) == 1
@@ -98,7 +99,8 @@ class TestSettlingThemAgainstTheDisk:
             result = repair_untracked_books(lib, queue, lambda m: None)
         finally:
             queue.close()
-        assert result == {"reattached": 0, "dropped": 0, "undecidable": 1}
+        assert result == {"reattached": 0, "dropped": 0,
+                          "undecidable": 1, "duplicates": 0}
         assert lib.list_books(corpus="c")
 
     def test_a_dark_mount_is_not_evidence_of_deletion(self, project, tmp_path):
@@ -313,4 +315,71 @@ class TestReAttachingActuallyAttaches:
         finally:
             queue.close()
         assert first["reattached"] == 1
-        assert second == {"reattached": 0, "dropped": 0, "undecidable": 0}
+        assert second == {"reattached": 0, "dropped": 0,
+                          "undecidable": 0, "duplicates": 0}
+
+
+class TestADuplicateIsNotALostDocument:
+    """Two entries for one file.
+
+    The repair in 0.35.0 indexed an untracked file without attaching it, so
+    the file was given a second identity and the first stayed orphaned — 748
+    of them. An untracked entry whose path is *already tracked under another
+    identity* is not a document that lost its tracking; it is a leftover that
+    only duplicates the live one's answers.
+    """
+
+    def test_the_duplicate_goes_and_the_tracked_one_stays(self, project, tmp_path):
+        lib, root = project
+        (root / "doc.md").write_text("content\n")
+        _book(lib, "doc-md", "doc.md", "c")          # the leftover
+        _book(lib, "doc", "doc.md", "c")             # the live one
+        lib.update_indexed_file(filepath="doc.md", file_hash="h",
+                                corpus="c", book_slug="doc")
+
+        queue = Queue(str(tmp_path / "library.db"))
+        try:
+            result = repair_untracked_books(lib, queue, lambda m: None)
+        finally:
+            queue.close()
+
+        assert result["duplicates"] == 1
+        assert result["reattached"] == 0
+        assert {b["slug"] for b in lib.list_books(corpus="c")} == {"doc"}
+
+    def test_a_genuinely_untracked_document_is_still_re_attached(
+            self, project, tmp_path):
+        """The distinction must not swallow the case it was built for."""
+        lib, root = project
+        (root / "alone.md").write_text("content\n")
+        _book(lib, "alone", "alone.md", "c")
+
+        queue = Queue(str(tmp_path / "library.db"))
+        try:
+            result = repair_untracked_books(lib, queue, lambda m: None)
+        finally:
+            queue.close()
+
+        assert result["reattached"] == 1
+        assert result["duplicates"] == 0
+        assert lib.list_indexed_files(corpus="c")["alone.md"]["book_slug"] == "alone"
+
+    def test_one_pass_settles_everything(self, project, tmp_path):
+        """After a repair the audit must come back clean — 748 came back
+        twice before this."""
+        lib, root = project
+        (root / "doc.md").write_text("content\n")
+        _book(lib, "doc-md", "doc.md", "c")
+        _book(lib, "doc", "doc.md", "c")
+        lib.update_indexed_file(filepath="doc.md", file_hash="h",
+                                corpus="c", book_slug="doc")
+        _book(lib, "orphan", "orphan.md", "c")
+        (root / "orphan.md").write_text("also here\n")
+
+        queue = Queue(str(tmp_path / "library.db"))
+        try:
+            repair_untracked_books(lib, queue, lambda m: None)
+        finally:
+            queue.close()
+
+        assert untracked_books(lib._get_conn()) == []

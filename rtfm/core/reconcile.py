@@ -130,7 +130,8 @@ def repair_untracked_books(lib, queue, log) -> dict:
     conn = lib._get_conn()
     rows = untracked_books(conn)
     if not rows:
-        return {"reattached": 0, "dropped": 0, "undecidable": 0}
+        return {"reattached": 0, "dropped": 0, "undecidable": 0,
+                "duplicates": 0}
 
     roots: dict[str, list] = {}
     every_root: list[Path] = []
@@ -139,12 +140,25 @@ def repair_untracked_books(lib, queue, log) -> dict:
         roots.setdefault(corpus, []).append(Path(root_path))
         every_root.append(Path(root_path))
 
-    reattached = dropped = undecidable = 0
+    reattached = dropped = undecidable = duplicates = 0
     to_index: list[dict] = []
     for row in rows:
         slug, filename, corpus = row[0], row[1] or "", row[2] or ""
         if not filename:
             undecidable += 1
+            continue
+
+        # Is this file already indexed under a *different* identity? Then
+        # this entry is a leftover duplicate, not a document that lost its
+        # tracking: something indexed the same file twice — the repair in
+        # 0.35.0 did exactly that, 748 times. The tracked one is the live
+        # one; this one only duplicates its answers.
+        tracked = conn.execute(
+            "SELECT book_slug FROM indexed_files WHERE filepath = ? "
+            "AND corpus = ?", (filename, corpus)).fetchone()
+        if tracked and tracked[0] and tracked[0] != slug:
+            lib.delete_book(slug)
+            duplicates += 1
             continue
 
         # A corpus renamed in the config leaves its old name behind with no
@@ -182,12 +196,13 @@ def repair_untracked_books(lib, queue, log) -> dict:
     if to_index:
         queue.enqueue_many("ingest", to_index)
 
-    if reattached or dropped or undecidable:
+    if reattached or dropped or undecidable or duplicates:
         log(f"reconcile: {len(rows)} book(s) no scan was following — "
-            f"{reattached} re-indexed, {dropped} dropped (file gone), "
-            f"{undecidable} left alone (source directory unknown)")
+            f"{reattached} re-attached, {duplicates} dropped (duplicate of a "
+            f"tracked one), {dropped} dropped (file gone), "
+            f"{undecidable} left alone (nothing to look for)")
     return {"reattached": reattached, "dropped": dropped,
-            "undecidable": undecidable}
+            "undecidable": undecidable, "duplicates": duplicates}
 
 
 def count_orphan_embeddings(conn: sqlite3.Connection) -> int:
@@ -330,6 +345,7 @@ def reconcile(db_path: str | Path,
                 "books_reattached": book_repair["reattached"],
                 "books_dropped": book_repair["dropped"],
                 "books_undecidable": book_repair["undecidable"],
+                "books_duplicates": book_repair["duplicates"],
                 "empty_chunks_purged": empties}
     finally:
         queue.close()

@@ -706,8 +706,9 @@ def handle_reconcile(job: Job, worker: "JobContext") -> None:
     worker._log(
         f"reconcile: purged {stats['orphans_purged']} orphan(s), "
         f"{stats.get('fossils_purged', 0)} fossil(s), "
-        f"re-attached {stats.get('books_reattached', 0)} and dropped "
-        f"{stats.get('books_dropped', 0)} untracked book(s), "
+        f"re-attached {stats.get('books_reattached', 0)}, dropped "
+        f"{stats.get('books_dropped', 0)} untracked and "
+        f"{stats.get('books_duplicates', 0)} duplicate book(s), "
         f"re-queued {stats['chunks_requeued']} chunk(s) "
         f"as {stats['embed_jobs']} P5 batch(es)"
     )

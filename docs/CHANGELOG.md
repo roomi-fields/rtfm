@@ -7,6 +7,19 @@ description: >-
 
 # Changelog
 
+## [0.35.4] — 2026-09-01
+
+### Fixed — a duplicate is not a document that lost its tracking
+
+The repair in 0.35.0 indexed an untracked file without attaching it, so the
+file was given a *second* identity and the first stayed orphaned. 748 entries
+on one project were two entries for one file, and each repair pass simply made
+another one.
+
+An untracked entry whose path is already tracked under another identity is now
+recognised for what it is — a leftover that only duplicates the live one's
+answers — and dropped. Reconciliation settles the whole set in a single pass.
+
 ## [0.35.3] — 2026-09-01
 
 ### Fixed — re-attaching a document actually attaches it
