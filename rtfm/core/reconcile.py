@@ -163,6 +163,15 @@ def repair_untracked_books(lib, queue, log) -> dict:
             continue
 
         if home is not None:
+            # Re-attach *now*, in place: write the tracking row the crash
+            # never wrote, pointing at the identity this document already
+            # has. Queueing an indexing job alone was not enough — an
+            # untracked file is given a fresh identity, so the job created a
+            # second document and left this one orphaned exactly as before.
+            # The empty hash guarantees the content is re-read.
+            lib.update_indexed_file(
+                filepath=filename, file_hash="", corpus=corpus,
+                book_slug=slug, root_path=str(home))
             to_index.append({"root": str(home), "corpus": corpus,
                              "filepath": filename})
             reattached += 1

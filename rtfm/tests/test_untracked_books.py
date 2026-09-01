@@ -259,3 +259,58 @@ class TestAnImpossiblePathIsNotAnUnreadableOne:
         home, unreadable = _find_under([Unreadable()], "a.md")
         assert home is None
         assert unreadable is True
+
+
+class TestReAttachingActuallyAttaches:
+    """Queueing an indexing job was not enough.
+
+    An untracked file is given a *fresh* identity when it is indexed, so the
+    job created a second document and left the first orphaned exactly as
+    before — 748 of them came back on the next audit, having been "repaired".
+    The tracking row has to be written here, pointing at the identity the
+    document already has.
+    """
+
+    def test_the_document_is_tracked_immediately(self, project, tmp_path):
+        lib, root = project
+        (root / "here.md").write_text("still on disk\n")
+        _book(lib, "its-identity", "here.md", "c")
+
+        queue = Queue(str(tmp_path / "library.db"))
+        try:
+            repair_untracked_books(lib, queue, lambda m: None)
+        finally:
+            queue.close()
+
+        tracked = lib.list_indexed_files(corpus="c")
+        assert tracked["here.md"]["book_slug"] == "its-identity"
+        assert untracked_books(lib._get_conn()) == []
+
+    def test_the_content_is_re_read_rather_than_trusted(self, project, tmp_path):
+        """An empty hash never matches the file, so the next scan re-indexes
+        it even if the queued job is lost."""
+        lib, root = project
+        (root / "here.md").write_text("still on disk\n")
+        _book(lib, "its-identity", "here.md", "c")
+
+        queue = Queue(str(tmp_path / "library.db"))
+        try:
+            repair_untracked_books(lib, queue, lambda m: None)
+        finally:
+            queue.close()
+
+        assert lib.list_indexed_files(corpus="c")["here.md"]["file_hash"] == ""
+
+    def test_running_it_twice_changes_nothing(self, project, tmp_path):
+        lib, root = project
+        (root / "here.md").write_text("still on disk\n")
+        _book(lib, "its-identity", "here.md", "c")
+
+        queue = Queue(str(tmp_path / "library.db"))
+        try:
+            first = repair_untracked_books(lib, queue, lambda m: None)
+            second = repair_untracked_books(lib, queue, lambda m: None)
+        finally:
+            queue.close()
+        assert first["reattached"] == 1
+        assert second == {"reattached": 0, "dropped": 0, "undecidable": 0}

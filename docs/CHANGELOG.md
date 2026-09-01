@@ -7,6 +7,19 @@ description: >-
 
 # Changelog
 
+## [0.35.3] — 2026-09-01
+
+### Fixed — re-attaching a document actually attaches it
+
+0.35.0 repaired a document nothing followed by queueing an indexing job for
+it. That was not enough: an untracked file is given a *fresh* identity when it
+is indexed, so the job created a second document and left the first orphaned
+exactly as before. 748 came back on the next audit having been "repaired".
+
+The tracking row is written on the spot now, pointing at the identity the
+document already has, with an empty hash so its content is re-read even if the
+queued job is lost.
+
 ## [0.35.2] — 2026-08-31
 
 ### Fixed — a real one-page paper is not a pagination fault
