@@ -199,10 +199,16 @@ def check_orphan_books(conn) -> tuple[int, str] | None:
     """
     if not _table_exists(conn, "indexed_files"):
         return None
+    # The tracked identities are gathered once, then each catalogue entry is
+    # looked up among them. Written as a correlated NOT EXISTS, the same
+    # question re-read the whole tracking table once per book: 195 seconds on
+    # a 26 000-book index, every hour, for a check meant to cost milliseconds.
+    # The NULL guard is not optional — one NULL in a NOT IN list makes every
+    # comparison unknown, and the check would report nothing for ever.
     n = conn.execute(
-        """SELECT COUNT(*) FROM books b
-           WHERE NOT EXISTS (SELECT 1 FROM indexed_files i
-                             WHERE i.book_slug = b.slug)"""
+        """SELECT COUNT(*) FROM books
+           WHERE slug NOT IN (SELECT book_slug FROM indexed_files
+                              WHERE book_slug IS NOT NULL)"""
     ).fetchone()[0]
     if not n:
         return None

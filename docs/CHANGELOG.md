@@ -7,6 +7,20 @@ description: >-
 
 # Changelog
 
+## [0.35.5] — 2026-09-02
+
+### Fixed — the orphan check no longer takes minutes
+
+The check that every catalogue entry is tracked by a scan was written as a
+correlated subquery, which re-reads the whole tracking table once per entry:
+195 seconds on a 26 000-document index, and the supervisor ran it every hour
+on a thread sharing the machine with the indexing. `rtfm audit` took three
+minutes on a fleet whose every other check finishes in under four seconds.
+
+The tracked identities are now gathered once and each entry looked up among
+them — 0.13 seconds on the same index. The reconciliation pass had used that
+form since 0.35.0; the audit simply never caught up.
+
 ## [0.35.4] — 2026-09-01
 
 ### Fixed — a duplicate is not a document that lost its tracking

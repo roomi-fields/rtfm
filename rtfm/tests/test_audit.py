@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -292,6 +293,61 @@ class TestOrphanBooks:
             assert check_orphan_books(conn) is None
         finally:
             conn.close()
+
+    def test_the_check_stays_cheap_on_a_large_index(self, index):
+        """Written as a correlated subquery, this check re-read the whole
+        tracking table once per book: 195 seconds on a 26 000-book index,
+        every hour, on a thread that shares the machine with the indexing.
+        On these 20 000 rows that form needs about twenty seconds; the
+        question must be answered in a fraction of one."""
+        conn = sqlite3.connect(str(index))
+        conn.executemany(
+            "INSERT INTO books (slug, title, filename, corpus) "
+            "VALUES (?, ?, ?, 'c')",
+            ((f"b{i}", f"B{i}", f"doc{i}.md") for i in range(20000)))
+        conn.executemany(
+            "INSERT INTO indexed_files (filepath, file_hash, corpus, "
+            "book_slug) VALUES (?, 'h', 'c', ?)",
+            ((f"doc{i}.md", f"b{i}") for i in range(20000)))
+        conn.commit()
+        conn.close()
+
+        conn = _ro(index)
+        try:
+            started = time.monotonic()
+            assert check_orphan_books(conn) is None
+            elapsed = time.monotonic() - started
+        finally:
+            conn.close()
+        assert elapsed < 5, f"orphan check took {elapsed:.1f}s on 20 000 books"
+
+    def test_it_counts_exactly_what_the_repair_would_touch(self, index):
+        """The audit and the repair must mean the same thing by "untracked",
+        or the audit keeps reporting entries the repair never sees. A
+        tracking row with no identity — older databases have them — must
+        not blank the whole answer either."""
+        from rtfm.core.reconcile import untracked_books
+
+        conn = sqlite3.connect(str(index))
+        conn.executemany(
+            "INSERT INTO books (slug, title, filename, corpus) "
+            "VALUES (?, ?, ?, 'c')",
+            [("kept", "K", "kept.md"), ("lost", "L", "lost.md")])
+        conn.executemany(
+            "INSERT INTO indexed_files (filepath, file_hash, corpus, "
+            "book_slug) VALUES (?, 'h', 'c', ?)",
+            [("kept.md", "kept"), ("legacy.md", None)])
+        conn.commit()
+        conn.close()
+
+        conn = _ro(index)
+        try:
+            result = check_orphan_books(conn)
+            repair = untracked_books(conn)
+        finally:
+            conn.close()
+        assert result is not None and result[0] == 1
+        assert [r[0] for r in repair] == ["lost"]
 
 
 class TestTheWholeFleet:
