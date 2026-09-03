@@ -48,6 +48,7 @@ from typing import Callable, Optional
 
 from rtfm.core.dbcare import ensure_healthy_db, make_rotating_logger
 from rtfm.core.portable import (
+    background_python,
     detached_popen_kwargs,
     open_lock_file,
     pid_alive,
@@ -1110,7 +1111,7 @@ def _spawn_delayed_supervisor(log: Callable[[str], None]) -> None:
     import subprocess
     try:
         cmd = [
-            sys.executable, "-c",
+            background_python(), "-c",
             "import time, sys; time.sleep(6);"
             f"sys.path.insert(0, {str(Path(__file__).resolve().parent.parent.parent)!r});"
             "from rtfm.cli_worker import ensure_supervisor_running;"

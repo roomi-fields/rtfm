@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from rtfm.core.models import Chunk
+from rtfm.core.portable import no_window_popen_kwargs
 from rtfm.parsers.base import BaseParser, ParserRegistry
 from rtfm.parsers._chunking import (
     content_hash,
@@ -44,6 +45,7 @@ def _extract_pages(path: Path) -> list[str]:
             text=True,
             check=False,
             timeout=120,
+            **no_window_popen_kwargs(),
         )
     except subprocess.TimeoutExpired:
         raise DJVUExtractionError("djvutxt timed out (>120s)")

@@ -461,6 +461,18 @@ Adding a parser is the easiest way to contribute — and the most impactful. See
 
 Found a bug? Have an idea? [Open an issue](https://github.com/roomi-fields/rtfm/issues).
 
+## Thanks
+
+**[@AVeryTastyRaspberry](https://github.com/AVeryTastyRaspberry)** made RTFM
+run on native Windows. RTFM is developed on Linux, and every command was
+broken there — the CLI died at import time before it could parse an argument.
+The report ([#8](https://github.com/roomi-fields/rtfm/issues/8)) named the
+line; the testing that followed, on a real Windows 11 machine and checked
+against `tasklist` rather than against RTFM's own claims, found five more
+defects behind it and confirmed each fix. [#9](https://github.com/roomi-fields/rtfm/issues/9)
+then traced the console windows that kept popping up. That is a platform this
+project could not otherwise support.
+
 ## License
 
 MIT — use it, fork it, extend it, ship it.

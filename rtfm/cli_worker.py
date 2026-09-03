@@ -32,6 +32,7 @@ from rtfm.core.supervisor import (
     run_supervisor, supervisor_running,
 )
 from rtfm.core.portable import (
+    background_python,
     detached_popen_kwargs,
     hard_kill_signal,
     pid_alive,
@@ -123,7 +124,7 @@ def _maybe_lazy_restart_stale_workers() -> None:
     # Supervisor is either down or stale — (re)start it once, detached.
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "rtfm.cli", "worker", "restart-all"],
+            [background_python(), "-m", "rtfm.cli", "worker", "restart-all"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -160,7 +161,7 @@ def ensure_supervisor_running() -> int | None:
     # Stale state from a crashed supervisor — drop it before respawning.
     clear_supervisor_state()
 
-    cmd = [sys.executable, "-m", "rtfm.cli", "worker-daemon"]
+    cmd = [background_python(), "-m", "rtfm.cli", "worker-daemon"]
     wrappers: list[str] = []
     for binname, flags in (("ionice", ["-c", "3"]), ("nice", ["-n", "19"])):
         if _which(binname):

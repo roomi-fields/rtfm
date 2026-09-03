@@ -260,13 +260,63 @@ def hard_kill_signal() -> int:
     return getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
+#: Windows process-creation flags, with their documented values as the
+#: fallback so the Windows branches below can be read — and tested — from
+#: any platform. ``subprocess`` only defines them on Windows.
+_DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+_CREATE_NEW_PROCESS_GROUP = getattr(
+    subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+
 def detached_popen_kwargs() -> dict:
-    """Popen keywords that outlive the parent shell, hook or console.
+    """Popen keywords for a process that outlives the shell, hook or console
+    that started it.
 
     ``start_new_session`` is a POSIX ``setsid`` and is accepted-then-ignored
     on Windows, where detaching is a creation flag instead.
+
+    ``CREATE_NO_WINDOW`` is deliberately *not* added here, however much it
+    looks like it belongs: ``CreateProcess`` documents it as ignored when it
+    accompanies ``DETACHED_PROCESS``. Detached already means no console at
+    all, which is stronger. Where the flag does its work is
+    :func:`no_window_popen_kwargs`.
     """
-    if sys.platform == "win32":  # pragma: no cover - Windows only
-        return {"creationflags": (subprocess.DETACHED_PROCESS
-                                  | subprocess.CREATE_NEW_PROCESS_GROUP)}
+    if sys.platform == "win32":
+        return {"creationflags": (_DETACHED_PROCESS
+                                  | _CREATE_NEW_PROCESS_GROUP)}
     return {"start_new_session": True}
+
+
+def no_window_popen_kwargs() -> dict:
+    """Popen keywords for a short-lived helper whose output we capture.
+
+    A console program started by a parent that has no console of its own is
+    given a **new** one by Windows, window and ``conhost.exe`` and all. The
+    supervisor is detached, so it has no console — and every PDF it reads
+    spawns a child interpreter to keep pdfium's crashes out of the pool.
+    That is one console window flashing per document, and one orphaned
+    ``conhost.exe`` left behind (issue #9).
+
+    Here the flag is not ignored: nothing detaches these children, they are
+    waited on, and their streams are pipes.
+    """
+    if sys.platform == "win32":
+        return {"creationflags": _CREATE_NO_WINDOW}
+    return {}
+
+
+def background_python() -> str:
+    """The interpreter to run a detached background process with.
+
+    On Windows ``python.exe`` is a console program: a console is allocated
+    for it whenever its parent has none — which is every spawn from a hook,
+    an agent's tool call, or another detached process. ``pythonw.exe`` is the
+    same interpreter built as a windowed program and never gets one. Both
+    ship side by side, and the supervisor writes to its log file rather than
+    to a terminal, so nothing is lost by preferring it.
+    """
+    if sys.platform != "win32":
+        return sys.executable
+    candidate = Path(sys.executable).with_name("pythonw.exe")
+    return str(candidate) if candidate.exists() else sys.executable

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from rtfm.core.models import Chunk
+from rtfm.core.portable import no_window_popen_kwargs
 from rtfm.parsers.base import BaseParser, ParserRegistry
 
 
@@ -298,7 +299,7 @@ def _call_pdfium_child(request: dict, timeout: int, what: str):
         proc = subprocess.run(
             [sys.executable, "-c", _PDFIUM_CHILD_CODE, json.dumps(request)],
             capture_output=True, text=True, errors="replace",
-            timeout=timeout, env=env,
+            timeout=timeout, env=env, **no_window_popen_kwargs(),
         )
     except subprocess.TimeoutExpired:
         raise PDFExtractionError(
@@ -543,6 +544,7 @@ def extract_with_marker(path: Path) -> list[dict]:
             text=True,
             timeout=_MARKER_TIMEOUT_S,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            **no_window_popen_kwargs(),
         )
     except subprocess.TimeoutExpired:
         raise PDFExtractionError(

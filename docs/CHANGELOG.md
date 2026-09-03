@@ -7,6 +7,34 @@ description: >-
 
 # Changelog
 
+## [0.37.2] — 2026-09-03
+
+### Fixed — nothing RTFM starts opens a window any more
+
+On Windows every spawn flashed a console, and 32 orphaned `conhost.exe`
+processes were left behind over one session (issue #9, @AVeryTastyRaspberry).
+
+The report blamed the supervisor's own creation flags and proposed adding
+`CREATE_NO_WINDOW` to them. `CreateProcess` documents that flag as *ignored*
+when it accompanies `DETACHED_PROCESS`, so that change would have done
+nothing — but the symptom was real, and the cause was one level down and
+worse than the report assumed.
+
+Detached means the supervisor has **no console at all**. A console program
+started by a parent that has none is given a brand new console by Windows,
+window and `conhost.exe` and all. The supervisor spawns a child interpreter
+for every PDF it reads, to keep pdfium's crashes out of its thread pool. So
+the flashes were not one per `worker start` — they were one per document, and
+on a PDF corpus that is thousands.
+
+Two rules now, and a test that fails if any future spawn forgets both:
+
+* a detached background process runs under `pythonw.exe`, the windowed build
+  of the same interpreter, which never gets a console in the first place;
+* a short-lived helper — the pdfium child, marker, `djvutxt` — carries
+  `CREATE_NO_WINDOW`, where the flag is not ignored because nothing detaches
+  it.
+
 ## [0.37.1] — 2026-09-03
 
 ### Fixed — three things a real Windows machine found
