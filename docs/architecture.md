@@ -126,10 +126,13 @@ while not stop:
     queue.mark_done(...)
 ```
 
-Holds an exclusive `flock` on `.rtfm/worker.lock` (one worker per
+Holds an exclusive lock on `.rtfm/worker.lock` (one worker per
 project). Writes its live state atomically to `.rtfm/worker_state.json`
 so `rtfm status` / `/rtfm.status` can show the running job without
-touching the DB. SIGTERM/SIGINT → finish current job → exit.
+touching the DB. A stop is asked for through `~/.rtfm/supervisor.stop`
+rather than signalled — a signal cannot mean "when you are ready" on
+Windows — and either that or an incoming SIGTERM/SIGINT means: finish
+the current job, then exit.
 
 Preemption is at job boundary, not in the middle of a job: a fresh P0
 `scan` queued mid-OCR waits for that OCR tranche (a few minutes at

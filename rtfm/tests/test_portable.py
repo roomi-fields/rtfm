@@ -72,6 +72,17 @@ class TestNothingElseReachesForAPlatform:
         ]
         assert not offenders, f"{call} in {offenders} — {cost}"
 
+    def test_no_signal_is_ever_sent_to_ask_for_something(self):
+        """Sending a named signal is not a portable way to ask: on Windows
+        every one but the two console events is a ``TerminateProcess``. The
+        only kill left goes through ``hard_kill_signal()``, and asking goes
+        through :func:`rtfm.core.supervisor.request_stop`."""
+        import re
+        pattern = re.compile(r"os\.kill\([^)]*signal\.")
+        offenders = [p.name for p in _source_files()
+                     if pattern.search(p.read_text(encoding="utf-8"))]
+        assert not offenders
+
     def test_the_liveness_probe_is_never_written_by_hand(self):
         """``os.kill(pid, 0)`` probes on Unix and terminates on Windows."""
         import re

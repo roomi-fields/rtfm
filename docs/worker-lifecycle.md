@@ -47,7 +47,9 @@ You can opt out per-project (e.g. for marker-pdf, whose ML models legitimately n
 
 ### 3. You asked it to stop
 
-`rtfm worker stop` sends `SIGTERM`. The worker finishes its current job and exits. **No respawn** in this case — you said stop, it stays stopped.
+`rtfm worker stop` leaves a stop request in `~/.rtfm/supervisor.stop`, naming the supervisor it is for. The supervisor picks it up within half a second, finishes the jobs it holds and exits. **No respawn** in this case — you said stop, it stays stopped.
+
+It is a file rather than a signal because a signal cannot mean "when you are ready" everywhere: on Windows every signal but the two console events is a `TerminateProcess`, so the old `SIGTERM` stopped the supervisor mid-write there instead of letting it drain. `rtfm worker restart-all` sends the same request, and still falls back to a hard kill after eight seconds for a supervisor wedged in a syscall, which reads nothing.
 
 To start it again: `rtfm worker start`, or any session prompt with the RTFM hooks installed will revive it via `ensure_worker_running`.
 

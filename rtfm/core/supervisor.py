@@ -24,6 +24,8 @@ Robustness carried over from the per-project worker:
 - Exactly one supervisor, enforced by an exclusive lock on
   ``~/.rtfm/supervisor.lock`` (:mod:`rtfm.core.portable`).
 - Clean self-exit + respawn on package-version drift or an RSS ceiling.
+- A stop is *asked for*, never signalled: the supervisor finishes the jobs it
+  holds and exits, identically on every platform.
 - Zombie reaping at boot (``running`` rows from a previous crash → requeued).
 - Integrity guard (:mod:`rtfm.core.dbcare`) on every project DB before it is
   serviced: a corrupt DB is quarantined and rebuilt once, never looped on.
@@ -48,6 +50,7 @@ from rtfm.core.dbcare import ensure_healthy_db, make_rotating_logger
 from rtfm.core.portable import (
     detached_popen_kwargs,
     open_lock_file,
+    pid_alive,
     read_stamped_pid,
     stamp_pid,
     try_lock_exclusive,
@@ -96,6 +99,7 @@ def _is_db_corruption(exc: BaseException) -> bool:
 _RTFM_HOME = Path.home() / ".rtfm"
 SUPERVISOR_LOCK = _RTFM_HOME / "supervisor.lock"
 SUPERVISOR_STATE = _RTFM_HOME / "supervisor_state.json"
+SUPERVISOR_STOP = _RTFM_HOME / "supervisor.stop"
 SUPERVISOR_LOG = _RTFM_HOME / "supervisor.log"
 REGISTRY_PATH = _RTFM_HOME / "workers.json"
 
@@ -181,6 +185,68 @@ def clear_supervisor_state() -> None:
     SUPERVISOR_STATE.unlink(missing_ok=True)
 
 
+# ── Cooperative stop ────────────────────────────────────────────────────
+#
+# "Stop" means *finish the jobs you are holding, then exit*. Each in-flight
+# job is the only writer for its project's database, so a supervisor killed
+# outright is killed mid-write — the one thing this whole design exists to
+# prevent.
+#
+# A signal cannot carry that everywhere. On Unix ``SIGTERM`` is a request the
+# process decides what to do with; on Windows every signal but the two
+# console events goes straight to ``TerminateProcess``, so asking politely
+# and killing outright are the same call. A request the supervisor reads for
+# itself behaves identically on both, so there is one mechanism, not two.
+#
+# The request names its target. A supervisor acts only on one aimed at itself
+# — which is what keeps a request left behind by a crash from stopping its
+# successor, even after the machine has recycled that PID.
+
+#: How often the supervisor looks for a stop request. The bound on how long
+#: ``rtfm worker stop`` waits before the drain even begins.
+STOP_POLL_SECONDS = 0.5
+
+
+def request_stop(pid: int) -> None:
+    """Ask the supervisor running as *pid* to stop when it is safe to."""
+    _RTFM_HOME.mkdir(parents=True, exist_ok=True)
+    tmp = SUPERVISOR_STOP.with_suffix(f".tmp.{os.getpid()}")
+    try:
+        tmp.write_text(f"{pid}\n", encoding="utf-8")
+        os.replace(tmp, SUPERVISOR_STOP)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def clear_stop_request() -> None:
+    SUPERVISOR_STOP.unlink(missing_ok=True)
+
+
+def stop_requested(pid: int) -> bool:
+    """Is *pid* being asked to stop?
+
+    Also the collector for its own garbage: a request naming a process that
+    is gone, or holding anything we did not write, is deleted here. Nothing
+    else would ever remove it, and a request that outlives every supervisor
+    after it would stop each one the moment a PID came round again.
+    """
+    try:
+        raw = SUPERVISOR_STOP.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    try:
+        target = int(raw)
+    except ValueError:
+        clear_stop_request()
+        return False
+    if target == pid:
+        return True
+    if not pid_alive(target):
+        clear_stop_request()
+    return False
+
+
 # ── Global single-instance lock ──────────────────────────────────────────
 
 class SupervisorLockHeld(RuntimeError):
@@ -188,7 +254,11 @@ class SupervisorLockHeld(RuntimeError):
 
 
 class SupervisorLock:
-    """Exclusive lock on ``~/.rtfm/supervisor.lock``. One supervisor only."""
+    """Exclusive lock on ``~/.rtfm/supervisor.lock``. One supervisor only.
+
+    Holding it is what makes a process *the* supervisor, so it is also where
+    the previous holder's leftovers are cleared.
+    """
 
     def __init__(self) -> None:
         self._fd: Optional[int] = None
@@ -200,6 +270,13 @@ class SupervisorLock:
             os.close(self._fd)
             self._fd = None
             raise SupervisorLockHeld(f"another supervisor holds {SUPERVISOR_LOCK}")
+        # Any stop request on disk was aimed at whoever held this lock
+        # before us, and that supervisor is gone. Dropping it here, before
+        # the stamp below makes us addressable, is what keeps PID reuse from
+        # stopping a supervisor that has only just started — and it has to
+        # be here rather than a few lines into the loop, or a `worker stop`
+        # issued in that window would be swallowed instead of obeyed.
+        clear_stop_request()
         stamp_pid(self._fd)
         return self
 
@@ -366,6 +443,7 @@ class Supervisor:
         self._next_audit = time.monotonic() + AUDIT_FIRST_DELAY_SECONDS
 
         self._stop = False
+        self._stop_checked = 0.0
         self._auto_respawn = False
         self._started_at = _now_iso()
         self._our_version = _read_installed_version()
@@ -963,9 +1041,30 @@ class Supervisor:
         except OSError:
             pass
 
+    def _check_stop_request(self, force: bool = False) -> bool:
+        """Notice a stop request, at most once every
+        :data:`STOP_POLL_SECONDS`. Returns whether we are stopping.
+
+        The request is consumed as soon as it is seen: the drain that follows
+        can take as long as the longest job in flight, and a request still on
+        disk when the next supervisor starts would stop that one too.
+        """
+        now = time.monotonic()
+        if not force and now - self._stop_checked < STOP_POLL_SECONDS:
+            return self._stop
+        self._stop_checked = now
+        if stop_requested(os.getpid()):
+            clear_stop_request()
+            self._log(f"stop requested — finishing {len(self._inflight)} "
+                      f"job(s) in flight")
+            self._stop = True
+        return self._stop
+
     def _sleep(self, seconds: float) -> None:
         end = time.monotonic() + seconds
         while not self._stop and time.monotonic() < end:
+            if self._check_stop_request():
+                return
             time.sleep(min(0.2, max(0.0, end - time.monotonic())))
 
     def _shutdown(self) -> None:

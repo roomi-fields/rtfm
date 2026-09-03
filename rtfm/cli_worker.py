@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -29,7 +28,8 @@ from pathlib import Path
 from rtfm.config import find_rtfm_root
 from rtfm.core.queue import Queue
 from rtfm.core.supervisor import (
-    supervisor_running, clear_supervisor_state, run_supervisor,
+    clear_stop_request, clear_supervisor_state, request_stop,
+    run_supervisor, supervisor_running,
 )
 from rtfm.core.portable import (
     detached_popen_kwargs,
@@ -287,20 +287,17 @@ def cmd_worker(args):
         if not state:
             print("worker: supervisor not running.")
             return
-        try:
-            os.kill(state.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            print("worker: supervisor process already gone.")
-            clear_supervisor_state()
-            return
+        request_stop(state.pid)
         for _ in range(60):  # up to 6s — let in-flight jobs finish cleanly
             time.sleep(0.1)
             if not pid_alive(state.pid):
                 break
         if pid_alive(state.pid):
-            print(f"worker: SIGTERM sent to PID {state.pid} — finishing in-flight jobs.")
+            print(f"worker: stop requested of PID {state.pid} — finishing "
+                  f"in-flight jobs.")
         else:
             print(f"worker: supervisor stopped (PID {state.pid}).")
+            clear_stop_request()
             clear_supervisor_state()
         return
 
@@ -314,24 +311,19 @@ def _cmd_worker_restart_all() -> None:
     """Restart the one supervisor. Named ``restart-all`` for continuity with
     the pre-0.25 fleet command and the hook/lazy-check callers.
 
-    SIGTERM (graceful: in-flight jobs finish so no DB write is interrupted
-    → no corruption), wait, a hard kill only as a last resort, then respawn.
+    Ask it to stop (in-flight jobs finish, so no DB write is interrupted →
+    no corruption), wait, hard-kill only as a last resort, then respawn.
 
-    On Windows there is no graceful step: every signal but the two console
-    events is a ``TerminateProcess``, so the first one already stops the
-    supervisor where it stands. Nothing is lost that matters — the journal
-    makes an interrupted write recoverable and :mod:`rtfm.core.dbcare`
-    catches the rest — but a cooperative stop there would have to *ask* the
-    supervisor rather than signal it.
+    The request is a file the supervisor reads, not a signal, because a
+    signal cannot mean "when you are ready" on Windows — see
+    :func:`rtfm.core.supervisor.request_stop`. The last resort still is one:
+    a supervisor wedged in a syscall never reads anything.
     """
     state = supervisor_running()
     old_pid = None
     if state is not None:
         old_pid = state.pid
-        try:
-            os.kill(old_pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        request_stop(old_pid)
         for _ in range(80):  # up to 8s of graceful drain
             time.sleep(0.1)
             if not pid_alive(old_pid):
@@ -342,6 +334,7 @@ def _cmd_worker_restart_all() -> None:
             except ProcessLookupError:
                 pass
             time.sleep(0.5)
+    clear_stop_request()
     clear_supervisor_state()
 
     new_pid = ensure_supervisor_running()

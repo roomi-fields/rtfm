@@ -7,6 +7,34 @@ description: >-
 
 # Changelog
 
+## [0.37.0] — 2026-09-03
+
+### Changed — a stop is asked for, not signalled
+
+Each in-flight job holds the only write connection to its project's
+database, so "stop" has to mean *finish what you are holding, then exit*.
+`SIGTERM` carried that on Unix and could not carry it anywhere else: on
+Windows every signal but the two console events goes straight to
+`TerminateProcess`, so `rtfm worker stop` halted the supervisor where it
+stood — mid-write, the one thing the single-writer design exists to prevent
+(the limitation 0.36.0 shipped with and documented).
+
+`rtfm worker stop` and `restart-all` now leave a request in
+`~/.rtfm/supervisor.stop` naming the supervisor it is for. The supervisor
+looks for it twice a second, including part-way through an idle sleep, and
+on seeing it consumes it, finishes its in-flight jobs and exits without
+respawning. One mechanism on every platform instead of one that worked and
+one that lied; nothing sends a named signal any more, and a test enforces
+that. The hard kill stays as the last resort after eight seconds, for a
+supervisor wedged in a syscall that reads nothing.
+
+The request naming its target is what makes it safe: a supervisor acts only
+on a request aimed at itself, and any request left on disk is cleared as the
+next supervisor takes the lock — before it stamps the PID that makes it
+addressable. Anywhere later in startup and a `worker stop` issued in that
+window would have been swallowed instead of obeyed; that window was real and
+a test now holds it shut.
+
 ## [0.36.0] — 2026-09-03
 
 ### Fixed — every command was broken on native Windows
