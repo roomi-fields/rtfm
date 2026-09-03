@@ -7,6 +7,14 @@ description: >-
 
 # Changelog
 
+## [0.35.7] — 2026-09-03
+
+### Fixed — 0.35.6 never reached PyPI
+
+Its test suite imported numpy at module level, and the release runner
+installs no embeddings extra. The embedding-race tests now skip without
+numpy. No change to the engine.
+
 ## [0.35.6] — 2026-09-03
 
 ### Fixed — the disk and the index may change under a running job

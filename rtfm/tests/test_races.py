@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
+import pytest
 
 from rtfm.core.library import Library
 from rtfm.core.sync import compute_diff, sync
@@ -46,8 +46,13 @@ class TestAFileVanishingMidScan:
 
 
 class TestPassagesReplacedWhileTheModelRuns:
+    """Vectors are stored through numpy, which only the embeddings extra
+    installs. Without it there is no embedding job to race — the scan tests
+    above run all the same."""
+
     def test_the_job_succeeds_and_writes_nothing_for_them(
             self, tmp_path, monkeypatch):
+        np = pytest.importorskip("numpy")
         _write(tmp_path / "src" / "note.md", "A passage. " * 40)
         lib = Library(str(tmp_path / "library.db"))
         try:
@@ -77,6 +82,7 @@ class TestPassagesReplacedWhileTheModelRuns:
 
     def test_passages_still_there_are_embedded_as_before(
             self, tmp_path, monkeypatch):
+        np = pytest.importorskip("numpy")
         _write(tmp_path / "src" / "note.md", "A passage. " * 40)
         lib = Library(str(tmp_path / "library.db"))
         try:
