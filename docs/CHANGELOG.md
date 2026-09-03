@@ -7,6 +7,23 @@ description: >-
 
 # Changelog
 
+## [0.35.6] — 2026-09-03
+
+### Fixed — the disk and the index may change under a running job
+
+Two races, both harmless in substance, both failing whole jobs:
+
+* A scan lists a directory, then reads each file. A file that disappears
+  in between — an editor's atomic save, a build's temporary — took the
+  entire scan down with a "no such file" error. It is now treated as what it
+  is: absent, with the removal path checking the disk once more before
+  acting.
+* An embedding job reads its passages, spends seconds in the model, then
+  writes. When the same file was re-indexed in those seconds, every passage
+  had been replaced and the write failed on a foreign key — 28 failed jobs
+  in one night, for embeddings nobody needed since the new passages carry
+  their own job. The existence test now rides inside the write itself.
+
 ## [0.35.5] — 2026-09-02
 
 ### Fixed — the orphan check no longer takes minutes

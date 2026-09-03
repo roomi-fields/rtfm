@@ -609,7 +609,15 @@ def compute_diff(
             except OSError:
                 pass
 
-        current_hash = compute_file_hash(fpath)
+        try:
+            current_hash = compute_file_hash(fpath)
+        except OSError:
+            # Listed a moment ago, gone now: an editor's atomic save, a
+            # build's temporary, a file deleted mid-scan. It is not on disk,
+            # so it was not seen — and if it was tracked, the removal path
+            # looks at the disk once more before acting on that.
+            seen_paths.discard(rel)
+            continue
 
         failed = known_failures.get(rel)
         if failed is not None and failed.get("file_hash") == current_hash:

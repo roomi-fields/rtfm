@@ -2010,17 +2010,27 @@ class Library:
         texts = [c for _, c in to_embed]
         ids = [i for i, _ in to_embed]
         embeddings = embed_texts(texts, model_name, batch_size=len(texts))
+        # The passages were there when they were read; they may not be now.
+        # A re-index of the same file while the model was running replaces
+        # every one of them, and their replacements carry their own job. An
+        # embedding for a passage that no longer exists is worth nothing —
+        # certainly not a failed job. The existence test rides inside the
+        # write itself, so nothing can slip between the two.
+        embedded = 0
         for chunk_id, emb in zip(ids, embeddings):
-            conn.execute(
+            cur = conn.execute(
                 """INSERT INTO chunk_embeddings (chunk_id, model, embedding)
-                   VALUES (?, ?, ?)
+                   SELECT ?, ?, ?
+                   WHERE EXISTS (SELECT 1 FROM chunks WHERE id = ?)
                    ON CONFLICT(chunk_id) DO UPDATE SET
                        model = excluded.model,
                        embedding = excluded.embedding""",
-                (chunk_id, model_name, embedding_to_bytes(emb)),
+                (chunk_id, model_name, embedding_to_bytes(emb), chunk_id),
             )
+            embedded += cur.rowcount
         conn.commit()
-        return {"embedded": len(ids), "skipped": skipped}
+        return {"embedded": embedded,
+                "skipped": skipped + (len(ids) - embedded)}
 
     def chunk_ids_for_book(self, book_slug: str) -> list[int]:
         """Return the chunk ids of a book, in stable order. Used by the
