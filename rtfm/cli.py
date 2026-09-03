@@ -2000,6 +2000,7 @@ def cmd_sync(args):
     # Default: one P0 scan job per configured source.
     sources = _resolve_sources(rtfm_root, args)
     scan_payloads: list[dict] = []
+    missing: list[tuple[str, str]] = []
     for src in sources:
         # Per-source honor_gitignore takes precedence over the CLI flag;
         # `--no-gitignore` only applies to sources that state no preference.
@@ -2008,14 +2009,29 @@ def cmd_sync(args):
             honor_gitignore=False if no_gitignore else None,
         )
         if not Path(payload["root"]).is_dir():
-            print(f"  ! [{payload['corpus']}] {payload['root']} "
-                  f"(path missing — skipped)")
+            missing.append((payload["corpus"], payload["root"]))
             continue
         scan_payloads.append(payload)
 
+    # A configured directory that is not there is a broken configuration,
+    # and saying "nothing to do" about it reads as success. One reporter
+    # had indexed through a container, so every source path was the
+    # container's; on the host, `sync` skipped them all and exited 0.
+    for corpus, root in missing:
+        print(f"  ! [{corpus}] {root} — configured source is not on disk")
+    if missing and not scan_payloads:
+        sys.exit(
+            f"rtfm sync: none of the {len(missing)} configured source(s) "
+            f"exists — nothing was indexed. Fix the paths in "
+            f"{rtfm_dir / 'config.json'} (or `rtfm add <path>`), then run "
+            f"`rtfm sync` again."
+        )
     if not scan_payloads:
-        print("rtfm sync: nothing to do (no valid source).")
+        print("rtfm sync: nothing to do (no source configured).")
         return
+    if missing:
+        print(f"  ({len(missing)} source(s) skipped, "
+              f"{len(scan_payloads)} to scan)")
 
     if dry_run:
         print(f"[dry-run] would enqueue {len(scan_payloads)} P0 scan job(s):")
@@ -2128,8 +2144,12 @@ def cmd_sources(args):
         return
 
     print("Sources:")
+    absent = 0
     for src in sources:
-        print(f"  [{src.get('corpus', 'default')}] {src['path']}")
+        here = Path(src["path"]).is_dir()
+        absent += 0 if here else 1
+        note = "" if here else "   ← NOT ON DISK, nothing from it is indexed"
+        print(f"  [{src.get('corpus', 'default')}] {src['path']}{note}")
         if src.get("extensions"):
             print(f"      extensions: {src['extensions']}")
         else:
@@ -2138,6 +2158,9 @@ def cmd_sources(args):
             print(f"      include: {', '.join(src['include'])}")
         if src.get("exclude"):
             print(f"      exclude: {', '.join(src['exclude'])}")
+    if absent:
+        print(f"\n{absent} source(s) above are not on disk. Until the paths "
+              f"are fixed, `rtfm sync` skips them.")
 
 
 def cmd_serve(args):
@@ -2490,7 +2513,47 @@ def cmd_semantic_search(args):
     lib.close()
 
 
+#: Characters every command prints: box rules, dashes, arrows, status marks.
+#: Not decoration in the last case — the pair below is the whole answer in
+#: the "optional extras" table.
+_OUTPUT_GLYPHS = "\u2500\u2014\u2192\u2026\u26a0\u2713\u2717"
+
+
+def _make_output_printable() -> None:
+    """Stop the console encoding from ending a command.
+
+    On Windows a redirected stream falls back to the legacy code page, which
+    holds none of those characters, and printing one raises
+    ``UnicodeEncodeError``. That is not a cosmetic failure: it killed
+    ``rtfm status`` outright, half-way through its own output, on the very
+    line reporting which optional readers are installed (issue #8).
+
+    UTF-8 is asked for rather than a replacement character, because a
+    replacement would collapse the installed and missing marks into the same
+    glyph and turn that table into a lie. ``errors="replace"`` sits under it
+    all the same: whatever a stream cannot carry, no output may end a run.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            _OUTPUT_GLYPHS.encode(stream.encoding or "ascii")
+            continue                      # it already carries everything
+        except (LookupError, UnicodeEncodeError, TypeError):
+            pass
+        for attempt in ({"encoding": "utf-8", "errors": "replace"},
+                        {"errors": "replace"}):
+            try:
+                reconfigure(**attempt)
+                break
+            except Exception:
+                continue
+
+
 def main():
+    _make_output_printable()
+
     # Shared --db argument inherited by every subcommand
     db_parent = argparse.ArgumentParser(add_help=False)
     db_parent.add_argument(

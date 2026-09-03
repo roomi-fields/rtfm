@@ -7,6 +7,39 @@ description: >-
 
 # Changelog
 
+## [0.37.1] — 2026-09-03
+
+### Fixed — three things a real Windows machine found
+
+0.37.0 was confirmed working on Windows 11 by the reporter of issue #8 — the
+lock, a stale lock file, and the graceful drain, each checked against
+`tasklist` rather than against RTFM's own claims. Three defects came back
+with the confirmation, and none of them was about locking.
+
+**`rtfm status` died half-way through its own output.** A redirected stream
+on Windows falls back to the legacy code page, which cannot encode the marks
+in the "optional extras" table, so the command meant to demonstrate the fix
+raised `UnicodeEncodeError` mid-table. The CLI now asks for UTF-8 when the
+stream it was given cannot carry what every command prints, with
+`errors="replace"` underneath so no output can ever end a run. UTF-8 rather
+than a replacement character because a replacement would collapse the
+installed and missing marks into one glyph and turn that table into a lie.
+
+**`worker status` reported a supervisor running after the process was gone.**
+Liveness comes from the lock, and on Unix the kernel drops a `flock` the
+instant its holder dies. Windows releases a byte-range lock at process exit
+too, but not synchronously — how long it takes "depends upon available system
+resources" — so for a few seconds a supervisor that had genuinely exited
+still looked like the lock holder. A held lock whose stamped PID is not alive
+now reads as free.
+
+**`rtfm sync` indexed nothing and called it "nothing to do".** The reporter
+had worked around the original bug by indexing inside a Linux container, so
+every configured source path was the container's. On the host they all
+skipped, and the command exited 0. A configured directory that is not on disk
+is now named on its own line; if none of them exists, `sync` says so and
+exits non-zero instead of reporting success. `rtfm sources` marks them too.
+
 ## [0.37.0] — 2026-09-03
 
 ### Changed — a stop is asked for, not signalled

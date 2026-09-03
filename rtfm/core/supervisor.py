@@ -153,8 +153,18 @@ def _lock_holder_pid() -> Optional[int]:
             # any PID still in the file is stale (a dead holder).
             unlock(fd)
             return None
-        # Held by a live supervisor — read the PID it stamped in.
-        return read_stamped_pid(fd)
+        # Held — by whom? On Unix the kernel drops a ``flock`` the instant
+        # its holder dies, so "held" and "alive" are the same fact. Windows
+        # releases a byte-range lock on process exit too, but not
+        # synchronously: the documented wording is that how long it takes
+        # "depends upon available system resources". For those seconds a
+        # supervisor that has genuinely exited still looks like it holds the
+        # lock, and ``worker status`` reported it running with nobody there
+        # (observed on Windows 11, issue #8). The stamped PID settles it.
+        pid = read_stamped_pid(fd)
+        if pid is None or not pid_alive(pid):
+            return None
+        return pid
     finally:
         os.close(fd)
 
