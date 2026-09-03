@@ -9,7 +9,9 @@ need:
     each handler.
   - The interval / memory-ceiling constants and the RSS / package-version
     probes the supervisor uses to decide when to recycle.
-  - :func:`pid_alive`, the liveness probe the spawn path uses.
+  - The liveness probe the spawn path uses lives in
+    :mod:`rtfm.core.portable`: ``kill(pid, 0)`` probes on Unix and
+    terminates on Windows, so it is not the same call everywhere.
 
 The per-project ``worker_state.json`` model that used to live here is gone.
 It described one worker owning one job at a time; the supervisor runs a dozen
@@ -189,21 +191,5 @@ def _read_rss_mb() -> float:
     except OSError:
         pass
     return 0.0
-
-
-def pid_alive(pid: int) -> bool:
-    """Cheap liveness check via ``kill(pid, 0)``."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Process exists but belongs to someone else — counts as alive.
-        return True
-    except OSError:
-        return False
 
 

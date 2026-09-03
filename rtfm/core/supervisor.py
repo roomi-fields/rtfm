@@ -21,8 +21,8 @@ Why this is the right shape:
 
 Robustness carried over from the per-project worker:
 
-- Exactly one supervisor, enforced by an exclusive flock on
-  ``~/.rtfm/supervisor.lock``.
+- Exactly one supervisor, enforced by an exclusive lock on
+  ``~/.rtfm/supervisor.lock`` (:mod:`rtfm.core.portable`).
 - Clean self-exit + respawn on package-version drift or an RSS ceiling.
 - Zombie reaping at boot (``running`` rows from a previous crash → requeued).
 - Integrity guard (:mod:`rtfm.core.dbcare`) on every project DB before it is
@@ -30,7 +30,6 @@ Robustness carried over from the per-project worker:
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import signal
@@ -46,6 +45,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from rtfm.core.dbcare import ensure_healthy_db, make_rotating_logger
+from rtfm.core.portable import (
+    detached_popen_kwargs,
+    open_lock_file,
+    read_stamped_pid,
+    stamp_pid,
+    try_lock_exclusive,
+    unlock,
+)
 from rtfm.core.queue import Queue, Job, P_USER
 from rtfm.core.throttle import _max_concurrent
 from rtfm.core.worker import (
@@ -123,9 +130,9 @@ def read_supervisor_state() -> Optional[SupervisorState]:
 def _lock_holder_pid() -> Optional[int]:
     """PID of the process holding the supervisor lock, or ``None`` if free.
 
-    This is the **authoritative** liveness signal — it probes the ``flock``
+    This is the **authoritative** liveness signal — it probes the lock
     itself rather than trusting the lazily-written state file. The kernel
-    releases a ``flock`` automatically when its holder dies, so "the lock is
+    releases the lock automatically when its holder dies, so "the lock is
     held" is exactly equivalent to "a live supervisor exists", with no window
     where a running-but-not-yet-snapshotted supervisor looks dead (the bug
     that made ``status`` lie, ``stop`` a no-op, and ``start`` spawn a double).
@@ -133,24 +140,17 @@ def _lock_holder_pid() -> Optional[int]:
     if not SUPERVISOR_LOCK.exists():
         return None
     try:
-        fd = os.open(SUPERVISOR_LOCK, os.O_RDWR)
+        fd = open_lock_file(SUPERVISOR_LOCK, create=False)
     except OSError:
         return None
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            # Held by a live supervisor — read the PID it stamped in.
-            try:
-                raw = os.pread(fd, 32, 0).decode().strip()
-                return int(raw) if raw else None
-            except (OSError, ValueError):
-                return None
-        else:
+        if try_lock_exclusive(fd):
             # We acquired it → nobody was holding it. Release immediately;
             # any PID still in the file is stale (a dead holder).
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock(fd)
             return None
+        # Held by a live supervisor — read the PID it stamped in.
+        return read_stamped_pid(fd)
     finally:
         os.close(fd)
 
@@ -188,28 +188,25 @@ class SupervisorLockHeld(RuntimeError):
 
 
 class SupervisorLock:
-    """Exclusive flock on ``~/.rtfm/supervisor.lock``. One supervisor only."""
+    """Exclusive lock on ``~/.rtfm/supervisor.lock``. One supervisor only."""
 
     def __init__(self) -> None:
         self._fd: Optional[int] = None
 
     def __enter__(self) -> "SupervisorLock":
         SUPERVISOR_LOCK.parent.mkdir(parents=True, exist_ok=True)
-        self._fd = os.open(SUPERVISOR_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
-        try:
-            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        self._fd = open_lock_file(SUPERVISOR_LOCK)
+        if not try_lock_exclusive(self._fd):
             os.close(self._fd)
             self._fd = None
             raise SupervisorLockHeld(f"another supervisor holds {SUPERVISOR_LOCK}")
-        os.ftruncate(self._fd, 0)
-        os.write(self._fd, f"{os.getpid()}\n".encode())
+        stamp_pid(self._fd)
         return self
 
     def __exit__(self, *args) -> None:
         if self._fd is not None:
             try:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                unlock(self._fd)
             finally:
                 os.close(self._fd)
                 self._fd = None
@@ -1015,8 +1012,8 @@ def _spawn_delayed_supervisor(log: Callable[[str], None]) -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
             close_fds=True,
+            **detached_popen_kwargs(),
         )
         log("scheduled supervisor respawn in ~6s")
     except Exception as exc:

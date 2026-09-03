@@ -7,6 +7,47 @@ description: >-
 
 # Changelog
 
+## [0.36.0] — 2026-09-03
+
+### Fixed — every command was broken on native Windows
+
+`rtfm/core/supervisor.py` imported `fcntl` at the top level, and the CLI
+imports the worker module for every invocation. So on native Windows every
+command — `rtfm --help` included — died inside the import machinery before a
+single argument was parsed, and there was no way to index anything at all.
+Reported in detail by @AVeryTastyRaspberry (issue #8), who also established
+that the MCP server itself was unaffected.
+
+The import was the visible half. Four more calls behind it were Unix-only or
+meant something else entirely on Windows:
+
+* `os.pread`, used to read the supervisor's PID, does not exist there.
+* `os.kill(pid, 0)` — the liveness probe — does not probe on Windows: it
+  calls `TerminateProcess`. Asking "is the supervisor alive?" would have
+  killed it, and killed whatever process had recycled that PID.
+* `signal.SIGKILL` is not defined, so the last-resort kill in `restart-all`
+  raised `AttributeError` instead of killing anything.
+* `start_new_session` is accepted and silently ignored, so the supervisor
+  would have died with the console that spawned it.
+
+All of them now live in one module, `rtfm.core.portable`, with a test that
+fails if any of them is reached for anywhere else — that is how one guarded
+import turns into five unguarded ones. The two copies of the liveness probe
+are down to one. The single-supervisor lock keeps its Unix behaviour and file
+format exactly, and gains a Windows implementation on a reserved byte, since
+a byte-range lock there would refuse a reader the bytes it holds.
+
+Not fixed, and not pretended otherwise: on Windows there is no graceful stop.
+Every signal but the two console events is a `TerminateProcess`, so `worker
+stop` halts the supervisor where it stands. Nothing important is lost — the
+journal makes an interrupted write recoverable — but a cooperative stop would
+have to ask the supervisor rather than signal it.
+
+The Windows code paths are written against the platform's documented
+behaviour and covered by tests for everything a Linux machine can observe,
+including a reproduction of the reported crash. The Windows kernel calls
+themselves are still unverified on Windows.
+
 ## [0.35.7] — 2026-09-03
 
 ### Fixed — 0.35.6 never reached PyPI

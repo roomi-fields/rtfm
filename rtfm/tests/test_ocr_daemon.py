@@ -21,10 +21,10 @@ from rtfm.core.ocr_daemon import (
     clear_state,
     daemon_running,
     format_progress,
-    pid_alive,
     read_state,
     write_state,
 )
+from rtfm.core.portable import pid_alive
 
 
 def test_pid_alive_returns_true_for_self():

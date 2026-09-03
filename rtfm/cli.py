@@ -1598,9 +1598,8 @@ def cmd_status(args):
     # flight or that a previous one died.
     try:
         from rtfm.config import find_rtfm_root
-        from rtfm.core.ocr_daemon import (
-            read_state, pid_alive, format_progress,
-        )
+        from rtfm.core.ocr_daemon import read_state, format_progress
+        from rtfm.core.portable import pid_alive
         _root_for_ocr = find_rtfm_root()
         if _root_for_ocr is not None:
             _ocr_state = read_state(_root_for_ocr / ".rtfm")

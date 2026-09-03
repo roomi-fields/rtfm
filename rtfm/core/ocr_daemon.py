@@ -11,7 +11,7 @@ The daemon model:
    in ``.rtfm/seen_scans.json`` (so the next incremental sync treats
    them as modified and re-ingests them with marker), then forks a
    detached subprocess running ``rtfm ocr-worker`` and exits. The
-   subprocess is created with ``start_new_session=True`` so it has its
+   subprocess is detached from its parent's session so it has its
    own session and is immune to SIGHUP from the parent terminal /
    Claude Code hook.
 2. The worker writes its live progress to ``.rtfm/ocr_state.json``
@@ -41,33 +41,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from rtfm.core.portable import pid_alive
+
 
 STATE_FILENAME = "ocr_state.json"
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def pid_alive(pid: int) -> bool:
-    """Return True if a process with the given PID is currently alive.
-
-    Uses ``os.kill(pid, 0)`` which sends no signal but raises ProcessLookupError
-    if the PID is no longer valid. Cheap, ~µs.
-    """
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # PID exists but belongs to another user — from our point of view it
-        # is still alive enough that we don't want to overwrite its state.
-        return True
-    except OSError:
-        return False
-    return True
 
 
 @dataclass

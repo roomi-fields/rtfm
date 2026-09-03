@@ -31,7 +31,11 @@ from rtfm.core.queue import Queue
 from rtfm.core.supervisor import (
     supervisor_running, clear_supervisor_state, run_supervisor,
 )
-from rtfm.core.worker import pid_alive
+from rtfm.core.portable import (
+    detached_popen_kwargs,
+    hard_kill_signal,
+    pid_alive,
+)
 
 
 # ── Cross-project worker registry ───────────────────────────────────────
@@ -123,7 +127,7 @@ def _maybe_lazy_restart_stale_workers() -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **detached_popen_kwargs(),
         )
     except Exception:
         pass
@@ -167,7 +171,8 @@ def ensure_supervisor_running() -> int | None:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,  # immune to parent SIGHUP / hook timeout
+        # immune to parent SIGHUP / hook timeout / closing console
+        **detached_popen_kwargs(),
         env=_spawn_env(),
     )
     return proc.pid
@@ -310,7 +315,14 @@ def _cmd_worker_restart_all() -> None:
     the pre-0.25 fleet command and the hook/lazy-check callers.
 
     SIGTERM (graceful: in-flight jobs finish so no DB write is interrupted
-    → no corruption), wait, SIGKILL only as a last resort, then respawn.
+    → no corruption), wait, a hard kill only as a last resort, then respawn.
+
+    On Windows there is no graceful step: every signal but the two console
+    events is a ``TerminateProcess``, so the first one already stops the
+    supervisor where it stands. Nothing is lost that matters — the journal
+    makes an interrupted write recoverable and :mod:`rtfm.core.dbcare`
+    catches the rest — but a cooperative stop there would have to *ask* the
+    supervisor rather than signal it.
     """
     state = supervisor_running()
     old_pid = None
@@ -326,7 +338,7 @@ def _cmd_worker_restart_all() -> None:
                 break
         if pid_alive(old_pid):
             try:
-                os.kill(old_pid, signal.SIGKILL)
+                os.kill(old_pid, hard_kill_signal())
             except ProcessLookupError:
                 pass
             time.sleep(0.5)

@@ -21,12 +21,18 @@ Both are opt-out (set the env var to ``0`` to disable that layer).
 """
 from __future__ import annotations
 
-import fcntl
 import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
+
+from rtfm.core.portable import (
+    open_lock_file,
+    stamp_pid,
+    try_lock_exclusive,
+    unlock,
+)
 
 
 # ── Thread cap ──────────────────────────────────────────────────────────
@@ -130,23 +136,17 @@ def _max_concurrent() -> int:
 
 def _try_acquire_one(n: int) -> Optional[int]:
     """Try each of the ``n`` slot files in order; return an open fd on the
-    first one we could ``flock`` non-blockingly, else ``None``."""
+    first one we could lock without blocking, else ``None``."""
     _SLOT_DIR.mkdir(parents=True, exist_ok=True)
     for i in range(n):
         path = _SLOT_DIR / f"slot-{i}.lock"
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        fd = open_lock_file(path)
+        if not try_lock_exclusive(fd):
             os.close(fd)
             continue
         # Stamp the slot with our PID so external readers can tell who
         # holds what. Not load-bearing — just observability.
-        try:
-            os.ftruncate(fd, 0)
-            os.write(fd, f"{os.getpid()}\n".encode())
-        except OSError:
-            pass
+        stamp_pid(fd)
         return fd
     return None
 
@@ -183,7 +183,7 @@ def acquire_slot(
     finally:
         if fd is not None:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                unlock(fd)
             finally:
                 os.close(fd)
 
