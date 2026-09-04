@@ -355,6 +355,30 @@ STALL_POLL_SECONDS = 5.0
 #: How many project databases are integrity-checked at once when they join.
 SLOT_OPEN_CONCURRENCY = 2
 
+#: How often each project's database file is checked for having been
+#: replaced on disk. One ``stat`` per project, so this is cheap; the cost of
+#: not doing it is a supervisor working on a file nobody can read.
+DB_IDENTITY_POLL_SECONDS = 5.0
+
+
+def _file_identity(path: Path) -> Optional[tuple[int, int]]:
+    """The device and inode of *path*, or ``None`` if it is not there.
+
+    This is what tells "the same database" from "a new file with the same
+    name". A path comparison cannot: the name is identical in both cases.
+
+    An inode number can be reused once its file is freed, which would in
+    principle let a replacement pass unnoticed. Not here: in the case this
+    exists to catch, the supervisor is still holding the old file open, so
+    the kernel cannot free that inode, and the replacement is guaranteed a
+    different number.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
 
 # ── Per-project bookkeeping ──────────────────────────────────────────────
 
@@ -385,6 +409,9 @@ class _Slot:
         self.reconcile_seeded = False
         self.jobs_done = 0
         self.jobs_failed = 0
+        #: Device+inode of the database ``queue`` is actually connected to.
+        #: Compared against the file on disk to catch a replacement.
+        self.identity: Optional[tuple[int, int]] = None
 
     @property
     def active(self) -> bool:
@@ -396,6 +423,7 @@ class _Slot:
         a rebuild was triggered (caller should force an immediate scan)."""
         rebuilt = ensure_healthy_db(self.db_path, log=self.log)
         self.queue = Queue(self.db_path)
+        self.identity = _file_identity(self.db_path)
         # Reap zombies left by a previous supervisor/worker that died
         # mid-job. Nothing can legitimately be in flight at boot, so every
         # ``running`` row is a stale claim — keep_ids stays empty.
@@ -452,6 +480,7 @@ class Supervisor:
         # stranded by the previous incarnation should not outlive boot.
         self._next_claim_sweep = 0.0
         self._next_audit = time.monotonic() + AUDIT_FIRST_DELAY_SECONDS
+        self._next_identity_check = 0.0
 
         self._stop = False
         self._stop_checked = 0.0
@@ -486,6 +515,8 @@ class Supervisor:
                     self._sync_registry()
                 with self._step("collect-opened"):
                     self._collect_opened()
+                with self._step("check-replaced-dbs"):
+                    self._reopen_replaced_databases()
                 with self._step("reap"):
                     self._reap_finished()
                 with self._step("sweep-claims"):
@@ -610,6 +641,61 @@ class Supervisor:
             self._log(f"+ project {Path(path).parent.name}"
                       + (" (rebuilding: corrupt DB)" if rebuilt else ""))
             self._refresh_hooks(slot)
+
+    def _reopen_replaced_databases(self) -> None:
+        """Reconnect any project whose database file was replaced on disk.
+
+        A slot connects to its database once, at open, and holds that
+        connection for the supervisor's whole life. On Unix a connection
+        survives the file being unlinked: the inode lives on, nameless,
+        until the last descriptor closes. So when something re-creates a
+        project's ``library.db`` — ``rtfm init`` run again, a published
+        directory wiped and rebuilt, a restore from backup — the supervisor
+        carries on dequeuing, running and completing jobs *into a file
+        nobody can open any more*, while the handlers, which open their own
+        connections by path, write into the new one.
+
+        The two halves then disagree for ever, and the disagreement is
+        silent and self-sustaining: the scan handler writes its new work
+        into the live file, the dispatcher looks for work in the dead one
+        and finds only its own periodic scans, and the live queue grows
+        without a single job ever being taken from it. Measured on a fleet
+        of fifteen published mirrors: fourteen frozen at two indexed
+        documents each, 7 110 jobs queued and untouched, 193 unlinked
+        descriptors held open, and not one error in any log — the scan line
+        printed every minute all along.
+
+        Only idle slots are swapped. A job in flight was claimed in the old
+        queue and owes it a closing write; completing it against the new one
+        would update a row id that means something else there.
+        """
+        now = time.monotonic()
+        if now < self._next_identity_check:
+            return
+        self._next_identity_check = now + DB_IDENTITY_POLL_SECONDS
+
+        for slot in list(self._slots.values()):
+            if slot.queue is None or slot.identity is None or slot.active:
+                continue
+            current = _file_identity(slot.db_path)
+            if current is None or current == slot.identity:
+                continue
+            name = slot.rtfm_dir.parent.name
+            slot.log("database file was replaced on disk — the connection "
+                     "held until now pointed at the previous, unlinked file. "
+                     "Reopening; anything queued into it is gone and is "
+                     "re-derived by the scan that follows.")
+            self._log(f"{name}: database replaced on disk — reopening")
+            try:
+                slot.close()
+                slot.open(self._log)
+            except Exception as exc:
+                self._log(f"{name}: reopen after replacement failed: {exc}")
+                slot.queue = None
+                continue
+            slot.next_scan_at = now
+            slot.scan_paused = False
+            slot.reconcile_seeded = False
 
     def _refresh_hooks(self, slot: "_Slot") -> None:
         """Bring a project's Claude Code hook stubs up to the installed code.

@@ -433,6 +433,7 @@ def _format_source_line(entry: dict, rank: int = 0) -> str:
 # ── Library singleton ─────────────────────────────────────────────────────
 
 _library = None
+_library_identity = None
 _embed_lock = threading.Lock()
 
 
@@ -454,16 +455,35 @@ def _get_library():
     three days and three cores indexing them.
 
     Refusing to create it costs a clear message; creating it costs the disk.
+
+    The handle is also re-validated on every call. A session outlives the
+    index it reads: re-running ``rtfm init``, or republishing a directory
+    that other projects read, replaces ``library.db`` with a new file — and
+    on Unix the old connection keeps working against the unlinked inode,
+    answering for ever from a snapshot nobody else can see. A ``stat`` per
+    call is nothing next to a neighbour served plausible, permanently stale
+    answers with no error and no zero to warn them.
     """
-    global _library
+    global _library, _library_identity
+    from rtfm.core.library import Library
+
+    db_path = os.environ.get("RTFM_DB")
+    if not db_path:
+        from rtfm.config import resolve_db
+        db_path = resolve_db()
+
+    identity = _db_identity(db_path)
+    if _library is not None and identity != _library_identity:
+        try:
+            _library.close()
+        except Exception:
+            pass
+        _library = None
+
     if _library is None:
-        from rtfm.core.library import Library
-        db_path = os.environ.get("RTFM_DB")
-        if not db_path:
-            from rtfm.config import resolve_db
-            db_path = resolve_db()
         try:
             _library = Library(db_path, create=False)
+            _library_identity = identity
         except FileNotFoundError:
             raise NoIndexHere(
                 f"No RTFM index for this directory (looked for {db_path}). "
@@ -472,6 +492,18 @@ def _get_library():
                 f"Use your own file tools in the meantime."
             ) from None
     return _library
+
+
+def _db_identity(db_path):
+    """Device+inode of the index file, or ``None`` if it is not there.
+
+    The path is unchanged when a database is replaced; the inode is not.
+    """
+    try:
+        st = os.stat(db_path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
 
 
 def _embed_in_background(corpus: str | None = None):

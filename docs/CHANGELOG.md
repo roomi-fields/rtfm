@@ -7,6 +7,53 @@ description: >-
 
 # Changelog
 
+## [0.38.0] — 2026-09-04
+
+### Fixed — a re-created index left the worker writing to a file with no name
+
+Reported from a fleet of sixteen agents, each confined to its own repository
+and reading its neighbours through RTFM alone. Every repository republishes a
+copy of itself into a shared directory, and each publication re-creates the
+copy's index. Fourteen of the fifteen published indexes sat frozen at exactly
+**two** indexed documents — the two prose files at the repository root —
+while 7 110 jobs waited in their queues and 193 unlinked file descriptors
+stayed open in the supervisor. No log carried an error. The scan line printed
+every minute throughout.
+
+Unlinking a file does not close it. A connection opened before the
+replacement keeps reading and writing the old inode, which no longer has a
+name; a connection opened afterwards, by path, gets the new file. The
+supervisor holds its queue connection for its whole life and the handlers
+open theirs per job — so the two halves ended up on different files and
+stayed there: the scan handler wrote its findings into the live file, the
+dispatcher looked for work in the dead one, found only the periodic scans it
+had queued there itself, and never took a single ingest job.
+
+Self-sustaining, and silent in both directions. Worse than a stall: the index
+still answered, from the two documents it had, with a relevance score and no
+indication that the code had never been read.
+
+* The supervisor now compares each project's database against the file on
+  disk by device and inode, and reconnects when they differ — logging it in
+  both the project log and the fleet log. Only idle projects are swapped: a
+  claimed job owes its closing write to the queue it was claimed from.
+* The MCP server re-validates its handle on every call, for the same reason.
+  A session outlives the index it reads, and serving a neighbour from a
+  snapshot nobody else can see is the worst of these failures — it looks like
+  an answer.
+
+### Added — an index on a read-only mount can be searched
+
+`PRAGMA journal_mode = WAL` is a write: it rewrites the database header.
+Running it unconditionally meant that merely *searching* an index published
+read-only died with `unable to open database file` — so the natural way to
+share one index with several processes did not work, and callers were copying
+the database somewhere writable first.
+
+A library with no write access to its file or its directory now opens
+read-only and skips schema creation and migration. Writes still raise; nothing
+is accepted and discarded.
+
 ## [0.37.2] — 2026-09-03
 
 ### Fixed — nothing RTFM starts opens a window any more

@@ -1,6 +1,7 @@
 """Main Library class - the public API for rtfm."""
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional, Iterator
@@ -247,10 +248,31 @@ class Library:
         if not self.db_path.exists() and not create:
             raise FileNotFoundError(f"Library not found: {db_path}")
 
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._writable_dir():
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
+        #: True when the index can only be read — a library served from a
+        #: read-only mount, which is how a shared index is published to
+        #: other processes. Every write method still exists and still
+        #: raises; nothing here silently drops a write.
+        self.read_only = not self._writable()
         self._init_db()
         self._load_mappings()
+
+    def _writable_dir(self) -> bool:
+        parent = self.db_path.parent
+        return not parent.exists() or os.access(parent, os.W_OK)
+
+    def _writable(self) -> bool:
+        """Can this process write the database **and** its directory?
+
+        SQLite needs both: the WAL and its shared-memory index are created
+        next to the database file, so a writable file in a read-only
+        directory is still not a writable database.
+        """
+        if not self.db_path.exists():
+            return self._writable_dir()
+        return os.access(self.db_path, os.W_OK) and self._writable_dir()
 
     def _load_mappings(self):
         """Load project-local extensions from the ``.rtfm/`` directory:
@@ -267,18 +289,53 @@ class Library:
     def _get_conn(self) -> sqlite3.Connection:
         """Get database connection with proper settings."""
         if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path, timeout=60)
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA busy_timeout = 60000")
-            self._conn.execute("PRAGMA journal_mode = WAL")
+            conn = (self._connect_read_only() if self.read_only
+                    else self._connect_read_write())
+            conn.row_factory = sqlite3.Row
             # Enforce ON DELETE CASCADE. SQLite has FKs OFF by default,
             # so deleting a chunk used to leave its chunk_embeddings row
-            # behind (orphan). Must be set per-connection.
-            self._conn.execute("PRAGMA foreign_keys = ON")
+            # behind (orphan). Must be set per-connection. Costs nothing on
+            # a read-only connection and keeps the two paths identical.
+            conn.execute("PRAGMA foreign_keys = ON")
+            self._conn = conn
         return self._conn
+
+    def _connect_read_write(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=60)
+        conn.execute("PRAGMA busy_timeout = 60000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        return conn
+
+    def _connect_read_only(self) -> sqlite3.Connection:
+        """Open an index we may only read.
+
+        ``PRAGMA journal_mode = WAL`` is a *write*: it rewrites the database
+        header. Running it unconditionally meant that merely searching an
+        index on a read-only mount died with "unable to open database file"
+        — so a library shared read-only, which is the natural way to publish
+        one index to several processes, could not be searched at all.
+
+        ``mode=ro`` still lets SQLite recover a WAL, and recovery needs to
+        create the shared-memory file next to the database. Where the
+        directory refuses that, ``immutable=1`` reads the main file alone.
+        It is only correct because the file genuinely cannot change under
+        us: that is what the read-only mount guarantees.
+        """
+        uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=60)
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            return conn
+        except sqlite3.OperationalError:
+            return sqlite3.connect(f"{uri}&immutable=1", uri=True, timeout=60)
 
     def _init_db(self):
         """Initialize database schema."""
+        if self.read_only:
+            # Nothing to create or migrate: the schema is whatever the
+            # writer left. Attempting it would fail on the first statement
+            # and take the whole search down with it.
+            return
         conn = self._get_conn()
 
         # Check if this is an existing database
