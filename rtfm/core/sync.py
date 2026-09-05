@@ -240,6 +240,21 @@ def _absence_is_proven(root: Path, rel: str) -> bool | None:
         anc = parent
 
 
+def is_excluded_by_rule(rel: str,
+                        exclude_dirs: "set[str] | None" = None) -> bool:
+    """True when this path can never be indexed, whatever is on disk.
+
+    The built-in rules only — an excluded directory, a transient database
+    sidecar. Not ``.gitignore``/``.rtfmignore``, which the user edits and
+    which a dark mount can make unreadable; absence of evidence there must
+    stay non-evidence.
+    """
+    parts = Path(rel).parts
+    if any(part in (exclude_dirs or DEFAULT_EXCLUDE_DIRS) for part in parts):
+        return True
+    return Path(rel).name.endswith(TRANSIENT_SUFFIXES)
+
+
 def confirm_removals(
     root: Path, removed: list[str], force: bool = False,
     sibling_roots: "Sequence[Path] | None" = None,
@@ -264,6 +279,15 @@ def confirm_removals(
     confirmed: list[str] = []
     kept: list[str] = []
     for rel in removed:
+        # A path the rules exclude is a decision, not an absence, so the
+        # disk has no say: it comes out whether or not it is still there.
+        # Without this an entry indexed before a rule existed would never
+        # leave — the scan stops offering it, and the removal is then held
+        # back precisely because the file is present. Three projects were
+        # carrying a database's shared-memory sidecar that way.
+        if is_excluded_by_rule(rel):
+            confirmed.append(rel)
+            continue
         verdicts = [_absence_is_proven(r, rel) for r in roots]
         # Gone only when every directory gave a definite answer and none of
         # them still holds the file. One unreadable directory (a mount that

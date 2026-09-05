@@ -7,6 +7,23 @@ description: >-
 
 # Changelog
 
+## [0.39.1] — 2026-09-05
+
+### Fixed — a newly excluded path never left the index
+
+The other half of 0.39.0's exclusions, and it applies to every rule RTFM has
+ever added. The scan stops offering an excluded file, so it lands in the
+removal list — and there the disk check holds it back, because the file is
+still perfectly present. The entry then stays indexed for ever: excluding
+something only ever stopped it being re-read, never got it out.
+
+An exclusion is a decision, not an absence, so the disk has no say. A path
+the built-in rules exclude is now removed whether or not it is still there.
+Only the built-in rules — an excluded directory, a transient sidecar. Not
+`.gitignore`/`.rtfmignore`, which the user edits and which an unreachable
+mount can make unreadable: the guard that stands between a dark mount and
+deleting real content is untouched.
+
 ## [0.39.0] — 2026-09-05
 
 Both findings come from `rtfm audit` on a 55-index fleet — the two checks

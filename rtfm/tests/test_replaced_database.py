@@ -603,3 +603,54 @@ class TestTransientDatabaseSidecars:
         (tmp_path / "keep.md").write_text("x", encoding="utf-8")
 
         assert self._scan(tmp_path) == {"keep.md"}
+
+
+class TestAnExcludedPathLeavesTheIndex:
+    """Adding an exclusion rule must also undo what it used to allow.
+
+    The scan simply stops offering the file, so it lands in ``removed`` —
+    and there the disk check holds it back, because the file is still
+    perfectly present. Three projects were carrying a database's
+    shared-memory sidecar for exactly that reason.
+    """
+
+    def test_a_rule_excluded_file_is_removed_even_though_it_is_there(
+            self, tmp_path):
+        from rtfm.core.sync import confirm_removals
+        (tmp_path / ".codegraph").mkdir()
+        present = tmp_path / ".codegraph" / "codegraph.db"
+        present.write_bytes(b"x")
+
+        confirmed, kept = confirm_removals(
+            tmp_path, [".codegraph/codegraph.db"])
+        assert confirmed == [".codegraph/codegraph.db"]
+        assert kept == []
+        assert present.exists(), "the file itself must not be touched"
+
+    def test_a_sidecar_is_removed_the_same_way(self, tmp_path):
+        from rtfm.core.sync import confirm_removals
+        (tmp_path / "notes.db-shm").write_bytes(b"x")
+        confirmed, _ = confirm_removals(tmp_path, ["notes.db-shm"])
+        assert confirmed == ["notes.db-shm"]
+
+    def test_an_ordinary_file_still_gets_the_disk_check(self, tmp_path):
+        """The guard that stands between a dark mount and deleting real
+        content is untouched: a file that is still there stays indexed."""
+        from rtfm.core.sync import confirm_removals
+        (tmp_path / "kept.md").write_text("x", encoding="utf-8")
+        confirmed, kept = confirm_removals(tmp_path, ["kept.md"])
+        assert confirmed == []
+        assert kept == ["kept.md"]
+
+    def test_a_genuinely_deleted_file_is_still_removed(self, tmp_path):
+        from rtfm.core.sync import confirm_removals
+        confirmed, kept = confirm_removals(tmp_path, ["gone.md"])
+        assert confirmed == ["gone.md"]
+
+    def test_the_user_s_own_ignore_files_are_not_treated_this_way(self,
+                                                                 tmp_path):
+        """``.gitignore`` is editable and can be unreadable on a dark mount.
+        Only the built-in rules are certain enough to delete on."""
+        from rtfm.core.sync import is_excluded_by_rule
+        assert is_excluded_by_rule("docs/notes.md") is False
+        assert is_excluded_by_rule("node_modules/x/index.js") is True
