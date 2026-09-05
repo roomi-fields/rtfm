@@ -17,6 +17,7 @@ P3 OCR    : OCR a page range of a scanned PDF and append its chunks.
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -354,10 +355,35 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
 
         file_hash = _compute_hash(abs_path)
         try:
-            stats = lib.ingest(
-                abs_path, corpus=corpus,
-                metadata={"book_slug": book_slug, "source_file": rel},
-            )
+            try:
+                stats = lib.ingest(
+                    abs_path, corpus=corpus,
+                    metadata={"book_slug": book_slug, "source_file": rel},
+                )
+            except sqlite3.IntegrityError as exc:
+                # Losing a race for an identity is not a defect in the file.
+                #
+                # ``allocate_book_slug`` reads, then writes, and several of a
+                # project's documents are ingested at once — so two files
+                # whose paths normalise to the same slug can both be told it
+                # is free, and the second insert violates the unique index.
+                # That was recorded as a permanent content failure, and
+                # ``record_ingest_failure`` remembers the *hash*: the file was
+                # then never offered again, and stayed out of the index for
+                # good. Two documents on this fleet, both real.
+                #
+                # By the time we are here the winner has committed, so asking
+                # again gives an identity nobody holds. One retry, and only
+                # for this exact violation.
+                if "books.slug" not in str(exc):
+                    raise
+                book_slug = lib.allocate_book_slug(book_slug, rel, corpus)
+                worker._log(f"ingest [{corpus}] {rel}: identity taken by "
+                            f"another file — indexed as {book_slug}")
+                stats = lib.ingest(
+                    abs_path, corpus=corpus,
+                    metadata={"book_slug": book_slug, "source_file": rel},
+                )
         except Exception as exc:
             # A parse failure on a file that's still being written (a
             # download/rsync finishing mid-scan) is not a real failure —

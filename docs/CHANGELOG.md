@@ -7,6 +7,44 @@ description: >-
 
 # Changelog
 
+## [0.39.0] — 2026-09-05
+
+Both findings come from `rtfm audit` on a 55-index fleet — the two checks
+that survived after 0.38.2 left it at six findings.
+
+### Fixed — losing a race for an identity dropped the file for good
+
+Two paths can always normalise to the same slug; `allocate_book_slug` exists
+for exactly that and appends a counter. But it reads, then writes, and a
+project's documents are ingested several at a time — so two files can both be
+told the slug is free, and the second insert violates the unique index.
+
+That was recorded as a *content* failure, and the failure record keys on the
+file's **hash**: the file was never offered to the indexer again. Two
+documents on the reporting fleet had been out of the index for good, findable
+only in an audit line. Both were real content, sitting next to a sibling whose
+name differed only by punctuation the slug rule collapses (`-wg.dhin.txt` and
+`-wg.dhin--.txt`).
+
+By the time the violation is raised the winner has committed, so asking again
+yields an identity nobody holds. The ingest now retries once, for this exact
+violation and no other, and logs the identity it settled on. Any other
+`IntegrityError` still propagates untouched — a retry loop around all of them
+would hide real corruption.
+
+### Fixed — transient database sidecars were indexed as documents
+
+A SQLite write-ahead log and its shared-memory index exist only while a
+database is open, hold no text, and appear and vanish under the scan. The
+audit's churn check found one indexed nine times and removed three times in a
+single day, on three separate projects. Files ending `-wal`, `-shm` and
+`-journal` are now never scanned; the database file itself still is.
+
+`.codegraph/` joins `.rtfm/` in the always-excluded directories, for the same
+reason `.rtfm/` is there: it is another tool's index of the very repository
+being scanned, so indexing it re-ingests the project's own content in a binary
+form nothing reads back.
+
 ## [0.38.2] — 2026-09-05
 
 ### Added — `.mjs`, `.cjs`, `.mts`, `.cts`

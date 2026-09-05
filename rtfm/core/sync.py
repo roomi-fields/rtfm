@@ -76,7 +76,17 @@ DEFAULT_EXCLUDE_DIRS: set[str] = {
     # Generic cache dirs are noise: import caches, browser caches, build
     # caches. Always many files, never load-bearing content.
     ".cache",
+    # Another tool's index of the same repository, for the same reason
+    # ``.rtfm`` is here: its content is this project's content again, in a
+    # binary form nothing can read back.
+    ".codegraph",
 }
+
+#: File-name endings that are never content. A SQLite write-ahead log and
+#: its shared-memory index exist only while a database is open, carry no
+#: text, and appear and vanish under the scan — one of them was indexed
+#: nine times and removed three times in a single day on three projects.
+TRANSIENT_SUFFIXES: tuple[str, ...] = ("-wal", "-shm", "-journal")
 
 
 def _load_pathspec(path: Path):
@@ -461,6 +471,8 @@ def scan_directory(
         if any(part in exclude_dirs for part in item.parts):
             continue
         if not item.is_file():
+            continue
+        if item.name.endswith(TRANSIENT_SUFFIXES):
             continue
         try:
             rel = str(item.relative_to(root))

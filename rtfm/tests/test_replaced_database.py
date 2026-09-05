@@ -443,3 +443,163 @@ class TestModuleFlavouredJavaScript:
             p.write_text("const x = 1\n", encoding="utf-8")
         assert (ParserRegistry.get_parser(js).name
                 == ParserRegistry.get_parser(mjs).name)
+
+
+class TestTwoFilesWantingOneIdentity:
+    """Losing a race for a slug is not a defect in the file.
+
+    Found by the fleet audit. ``allocate_book_slug`` reads then writes, and
+    a project's documents are ingested several at a time, so two paths that
+    normalise to the same slug can both be told it is free. The second
+    insert violated the unique index and was recorded as a *content*
+    failure — and that record keys on the file's hash, so the file was never
+    offered again. Two documents on this fleet were out of the index for
+    good, with nothing but an audit line to say so.
+    """
+
+    def test_the_normalised_names_really_do_collide(self):
+        """The premise. Three distinct files, one identity — separators
+        collapse, so no naming rule can promise uniqueness."""
+        from rtfm.core.sync import _path_to_slug
+        slugs = {_path_to_slug(f"d/{name}", "c") for name in
+                 ("-wg.dhin.txt", "-wg.dhin--.txt", "-wg.dhin-.txt")}
+        assert len(slugs) == 1
+
+    def test_the_second_file_gets_its_own_identity(self, tmp_path):
+        from rtfm.core.sync import _path_to_slug
+        db = tmp_path / "library.db"
+        lib = Library(str(db))
+        try:
+            first = _path_to_slug("d/-wg.dhin.txt", "c")
+            assert lib.allocate_book_slug(first, "d/-wg.dhin.txt", "c") == first
+            # Nothing is written until a book exists, so put one there.
+            lib._get_conn().execute(
+                "INSERT INTO books (slug, title, filename, corpus) "
+                "VALUES (?, ?, ?, ?)", (first, "t", "d/-wg.dhin.txt", "c"))
+            lib._get_conn().commit()
+
+            second = lib.allocate_book_slug(first, "d/-wg.dhin--.txt", "c")
+            assert second != first
+        finally:
+            lib.close()
+
+    def test_a_collision_is_retried_not_recorded_as_broken(self, tmp_path,
+                                                           monkeypatch):
+        """The handler's own path: the first insert loses the race, the
+        second attempt asks again and succeeds. Nothing reaches the failure
+        record, which is what made the loss permanent."""
+        import sqlite3 as sq
+        from rtfm.core import handlers
+
+        rtfm_dir = tmp_path / ".rtfm"
+        rtfm_dir.mkdir()
+        doc = tmp_path / "note.md"
+        doc.write_text("# Title\n\nbody\n", encoding="utf-8")
+
+        attempts: list[str] = []
+        real = Library.ingest
+
+        def flaky(self, path, corpus=None, metadata=None, **kw):
+            """The race, in the order it actually happens: the slug was free
+            when this job asked for it, and the other file commits it before
+            this insert lands."""
+            slug = (metadata or {}).get("book_slug")
+            attempts.append(slug)
+            if len(attempts) == 1:
+                self._get_conn().execute(
+                    "INSERT INTO books (slug, title, filename, corpus) "
+                    "VALUES (?, ?, ?, ?)", (slug, "t", "other.md", "c"))
+                self._get_conn().commit()
+                raise sq.IntegrityError(
+                    "UNIQUE constraint failed: books.slug")
+            return real(self, path, corpus=corpus, metadata=metadata, **kw)
+
+        monkeypatch.setattr(Library, "ingest", flaky)
+
+        recorded: list[tuple] = []
+        monkeypatch.setattr(Library, "record_ingest_failure",
+                            lambda self, *a, **k: recorded.append(a))
+
+        from rtfm.core.queue import Job
+        from rtfm.core.worker import JobContext
+        job = Job(id=1, type="ingest", priority=10, payload={
+            "root": str(tmp_path), "corpus": "c", "filepath": "note.md"},
+            status="running", created_at="", started_at=None,
+            finished_at=None, error=None, attempts=1)
+        ctx = JobContext(str(rtfm_dir / "library.db"),
+                                  lambda m: None)
+        handlers.handle_ingest(job, ctx)
+
+        assert len(attempts) == 2, "the collision was not retried"
+        assert attempts[0] != attempts[1], "retried with the same identity"
+        assert recorded == [], "a race was remembered as a broken file"
+
+    def test_any_other_integrity_error_is_not_retried(self, tmp_path,
+                                                      monkeypatch):
+        """Only this one violation. A retry loop around every integrity
+        error would hide real corruption."""
+        import sqlite3 as sq
+        from rtfm.core import handlers
+
+        rtfm_dir = tmp_path / ".rtfm"
+        rtfm_dir.mkdir()
+        Library(str(rtfm_dir / "library.db")).close()
+        (tmp_path / "note.md").write_text("# T\n\nb\n", encoding="utf-8")
+
+        attempts: list[int] = []
+
+        def always_fails(self, path, corpus=None, metadata=None, **kw):
+            attempts.append(1)
+            raise sq.IntegrityError("FOREIGN KEY constraint failed")
+
+        monkeypatch.setattr(Library, "ingest", always_fails)
+        monkeypatch.setattr(Library, "record_ingest_failure",
+                            lambda self, *a, **k: None)
+
+        from rtfm.core.queue import Job
+        from rtfm.core.worker import JobContext
+        job = Job(id=1, type="ingest", priority=10, payload={
+            "root": str(tmp_path), "corpus": "c", "filepath": "note.md"},
+            status="running", created_at="", started_at=None,
+            finished_at=None, error=None, attempts=1)
+        ctx = JobContext(str(rtfm_dir / "library.db"),
+                                  lambda m: None)
+        with pytest.raises(sq.IntegrityError):
+            handlers.handle_ingest(job, ctx)
+        assert len(attempts) == 1
+
+
+class TestTransientDatabaseSidecars:
+    """A write-ahead log and its shared-memory index are not documents.
+
+    The audit found one indexed nine times and removed three times in a
+    single day, on three separate projects: it exists only while a database
+    is open, so every scan sees it appear or vanish.
+    """
+
+    def _scan(self, root):
+        from rtfm.core.sync import scan_directory
+        return {p.name for p in scan_directory(root, honor_gitignore=False)}
+
+    def test_the_sidecars_are_never_scanned(self, tmp_path):
+        (tmp_path / "notes.md").write_text("x", encoding="utf-8")
+        for name in ("codegraph.db-shm", "codegraph.db-wal",
+                     "library.db-journal"):
+            (tmp_path / name).write_bytes(b"\x00\x01")
+
+        assert self._scan(tmp_path) == {"notes.md"}
+
+    def test_the_database_itself_is_still_offered(self, tmp_path):
+        """Only the sidecars. A SQLite file is a supported format and one
+        somebody put in their project is theirs to index."""
+        (tmp_path / "data.db").write_bytes(b"SQLite format 3\x00")
+        assert "data.db" in self._scan(tmp_path)
+
+    def test_another_tool_s_index_is_skipped_like_our_own(self, tmp_path):
+        """``.codegraph`` holds this repository's content again, in a binary
+        form nothing reads back — the same reason ``.rtfm`` is excluded."""
+        (tmp_path / ".codegraph").mkdir()
+        (tmp_path / ".codegraph" / "codegraph.db").write_bytes(b"x")
+        (tmp_path / "keep.md").write_text("x", encoding="utf-8")
+
+        assert self._scan(tmp_path) == {"keep.md"}
