@@ -783,3 +783,70 @@ class TestAnHtmlTitleIsNotAnIdentity:
             assert rows == [slug], f"catalogue holds {rows}, tracking holds {slug}"
         finally:
             lib.close()
+
+
+class TestReindexRepairsWhatTheCatalogueLost:
+    """``reindex`` read the catalogue, so it could not repair the catalogue.
+
+    A book deleted by the reconcile pass leaves its tracking row behind, and
+    that is exactly the state a re-ingest exists to fix. Reading ``books``
+    answered "no matching indexed files" for all 5 738 HTML documents this
+    fleet had lost that way.
+    """
+
+    def _project(self, tmp_path):
+        rtfm_dir = tmp_path / ".rtfm"
+        rtfm_dir.mkdir()
+        lib = Library(str(rtfm_dir / "library.db"))
+        lib.set_sync_root("c", str(tmp_path))
+        return lib, rtfm_dir
+
+    def test_a_tracked_file_with_no_book_is_re_queued(self, tmp_path,
+                                                      monkeypatch):
+        page = tmp_path / "page.html"
+        page.write_text("<html><body>x</body></html>", encoding="utf-8")
+        lib, rtfm_dir = self._project(tmp_path)
+        lib.update_indexed_file(filepath="page.html", file_hash="h",
+                                corpus="c", book_slug="c--page-html",
+                                file_size=27, root_path=str(tmp_path))
+        lib.close()
+
+        monkeypatch.chdir(tmp_path)
+        import rtfm.cli as cli
+        monkeypatch.setattr(cli, "ensure_worker_running", lambda *a, **k: None,
+                            raising=False)
+
+        class Args:
+            ext, parser, corpus, background = "html", None, None, True
+        with pytest.raises(SystemExit) as exit_info:
+            cli.cmd_reindex(Args())
+        assert exit_info.value.code == 0
+
+        q = Queue(rtfm_dir / "library.db")
+        try:
+            head = q.peek()
+            assert head is not None and head[2] == "ingest", (
+                "the file the catalogue lost was not re-queued")
+        finally:
+            q.close()
+
+    def test_an_unrelated_extension_is_left_alone(self, tmp_path, monkeypatch):
+        (tmp_path / "notes.md").write_text("x", encoding="utf-8")
+        lib, rtfm_dir = self._project(tmp_path)
+        lib.update_indexed_file(filepath="notes.md", file_hash="h", corpus="c",
+                                book_slug="c--notes-md", file_size=1,
+                                root_path=str(tmp_path))
+        lib.close()
+
+        monkeypatch.chdir(tmp_path)
+        import rtfm.cli as cli
+
+        class Args:
+            ext, parser, corpus, background = "html", None, None, True
+        cli.cmd_reindex(Args())
+
+        q = Queue(rtfm_dir / "library.db")
+        try:
+            assert q.peek() is None
+        finally:
+            q.close()

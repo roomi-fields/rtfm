@@ -7,6 +7,21 @@ description: >-
 
 # Changelog
 
+## [0.39.4] — 2026-09-05
+
+### Fixed — `reindex` read the catalogue, so it could not repair the catalogue
+
+The repair path for 0.39.3 did not work. `rtfm reindex` selects the files to
+re-ingest from `books` — but a book deleted by the reconcile pass leaves only
+its tracking row behind, and that is precisely the state a re-ingest exists to
+fix. It answered "no matching indexed files" for all 5 738 HTML documents the
+fleet had lost that way.
+
+It now reads `indexed_files`, which is the authority on what is indexed at a
+path, and whose `filepath` is a relative path by definition —
+`books.filename` is not reliably one, holding a bare basename in some
+projects, which the root lookup then failed to resolve.
+
 ## [0.39.3] — 2026-09-05
 
 ### Fixed — an HTML document's `<title>` was used as its identity
@@ -28,9 +43,15 @@ title is still read from the document and is still the book's title; the
 fallback for a direct `Library.ingest(path)` is now path-derived, like
 everywhere else.
 
-Existing HTML books keep whatever identity they were indexed under until
-they are re-ingested — `rtfm reindex --ext .html` on a project settles it,
-and the hourly reconcile then drops the untracked leftovers.
+**Correction to this entry, written after measuring the fleet:** the
+consequence above understates it. The reconcile pass drops books no scan
+tracks, and a title-derived book is by definition untracked — so every HTML
+document was indexed, then deleted on the next reconcile, while its file
+stayed marked as indexed and was therefore never read again. HTML content was
+not merely mis-identified; it was **absent from the index**, silently, in
+every project. Measured before the repair: 5 738 documents across 21 indexes,
+including one corpus tracking 5 463 HTML files with zero of them in the
+catalogue. See 0.39.4 for the repair.
 
 ## [0.39.2] — 2026-09-05
 

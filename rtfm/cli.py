@@ -1298,18 +1298,27 @@ def cmd_reindex(args):
     conn.execute("PRAGMA busy_timeout=60000")
     roots = _roots_by_corpus(conn)
 
-    # Build the query: books whose filename ends with a target extension,
-    # optionally scoped to a corpus.
+    # Build the query over the *file tracking* table, not the catalogue.
+    #
+    # The catalogue is the wrong source twice over. It holds only what
+    # survived: a book deleted by the reconcile pass leaves its tracking row
+    # behind, and that is exactly the state a re-ingest has to repair — 5 738
+    # HTML documents across 21 indexes here, each marked indexed with nothing
+    # in the catalogue to show for it, and ``reindex`` answered "no matching
+    # indexed files" for every one. And ``books.filename`` is not reliably a
+    # relative path (some projects hold a bare basename), while
+    # ``indexed_files.filepath`` is one by definition — which is what the
+    # root lookup below needs.
     where = []
     params: list = []
     if exts:
-        ors = " OR ".join("LOWER(filename) LIKE ?" for _ in exts)
+        ors = " OR ".join("LOWER(filepath) LIKE ?" for _ in exts)
         where.append(f"({ors})")
         params.extend(f"%{e}" for e in exts)
     if getattr(args, "corpus", None):
         where.append("corpus = ?")
         params.append(args.corpus)
-    sql = "SELECT corpus, filename FROM books"
+    sql = "SELECT corpus, filepath AS filename FROM indexed_files"
     if where:
         sql += " WHERE " + " AND ".join(where)
     books = conn.execute(sql, params).fetchall()
