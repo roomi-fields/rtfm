@@ -7,6 +7,21 @@ description: >-
 
 # Changelog
 
+## [0.39.2] — 2026-09-05
+
+### Fixed — the removal was queued, then refused
+
+0.39.1 got an excluded path onto the removal list. It got no further: the
+remove handler takes its own last look at the disk before destroying chunks
+and their embeddings, and refused every one of them — `still on disk, kept`,
+on every pass, exactly as before. Two guards, and fixing one moved nothing.
+
+That last look is right for an ordinary file: a queue can be days behind, and
+one stat is the difference between a stale index and a destroyed one. It is
+wrong for a path the rules exclude, where presence proves nothing. The handler
+now applies the same distinction the scan does, and says which rule it acted
+on.
+
 ## [0.39.1] — 2026-09-05
 
 ### Fixed — a newly excluded path never left the index

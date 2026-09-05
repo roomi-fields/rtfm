@@ -693,20 +693,31 @@ def handle_remove(job: Job, worker: "JobContext") -> None:
         # date from before a bug in the detection was fixed. Re-checking here
         # costs one stat and is the difference between an out-of-date index
         # and a destroyed one.
-        for root in lib.list_sync_roots(corpus):
-            try:
-                if (Path(root) / rel).exists():
+        #
+        # Except when the path is one the rules exclude. That is a decision,
+        # not an absence, so presence proves nothing and this guard would
+        # keep the entry for ever — the scan stops offering the file, queues
+        # the removal, and the removal is refused because the file is there.
+        # Three projects carried a database's shared-memory sidecar through
+        # every pass that way.
+        from rtfm.core.sync import is_excluded_by_rule
+        by_rule = is_excluded_by_rule(rel)
+        if not by_rule:
+            for root in lib.list_sync_roots(corpus):
+                try:
+                    if (Path(root) / rel).exists():
+                        worker._log(
+                            f"remove [{corpus}] {rel}: still on disk, kept")
+                        return
+                except OSError:
                     worker._log(
-                        f"remove [{corpus}] {rel}: still on disk, kept")
+                        f"remove [{corpus}] {rel}: location unreadable, kept")
                     return
-            except OSError:
-                worker._log(
-                    f"remove [{corpus}] {rel}: location unreadable, kept")
-                return
 
         removed = lib.remove_file(rel, corpus)
+        why = " (excluded by rule)" if by_rule else ""
         if removed:
-            worker._log(f"remove [{corpus}] {rel}")
+            worker._log(f"remove [{corpus}] {rel}{why}")
         else:
             worker._log(f"remove [{corpus}] {rel}: not in index")
     finally:

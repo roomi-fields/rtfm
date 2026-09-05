@@ -654,3 +654,42 @@ class TestAnExcludedPathLeavesTheIndex:
         from rtfm.core.sync import is_excluded_by_rule
         assert is_excluded_by_rule("docs/notes.md") is False
         assert is_excluded_by_rule("node_modules/x/index.js") is True
+
+
+class TestTheRemoveHandlerHonoursTheSameRule:
+    """The removal is queued, then refused. Two guards, and fixing only the
+    first left the entry exactly where it was: the handler takes its own
+    last look at the disk before destroying chunks, and the file is there.
+    """
+
+    def _run_remove(self, tmp_path, rel):
+        from rtfm.core import handlers
+        from rtfm.core.queue import Job
+        from rtfm.core.worker import JobContext
+        rtfm_dir = tmp_path / ".rtfm"
+        rtfm_dir.mkdir(exist_ok=True)
+        db = rtfm_dir / "library.db"
+        lib = Library(str(db))
+        lib.set_sync_root("c", str(tmp_path))
+        lib.close()
+        job = Job(id=1, type="remove", priority=10,
+                  payload={"filepath": rel, "corpus": "c"},
+                  status="running", created_at="", started_at=None,
+                  finished_at=None, error=None, attempts=1)
+        lines: list[str] = []
+        handlers.handle_remove(job, JobContext(str(db), lines.append))
+        return "\n".join(lines)
+
+    def test_an_excluded_file_is_removed_though_it_is_on_disk(self, tmp_path):
+        (tmp_path / ".codegraph").mkdir()
+        (tmp_path / ".codegraph" / "codegraph.db-shm").write_bytes(b"x")
+        out = self._run_remove(tmp_path, ".codegraph/codegraph.db-shm")
+        assert "still on disk, kept" not in out
+        assert "excluded by rule" in out or "not in index" in out
+
+    def test_an_ordinary_file_on_disk_is_still_kept(self, tmp_path):
+        """The guard that stands between a stale job and a destroyed index
+        must survive this."""
+        (tmp_path / "real.md").write_text("x", encoding="utf-8")
+        out = self._run_remove(tmp_path, "real.md")
+        assert "still on disk, kept" in out
