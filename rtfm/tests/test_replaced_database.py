@@ -417,3 +417,29 @@ class TestUnreadableIsNotCorrupt:
         before = db.stat().st_mtime_ns
         assert check_integrity(db) is True
         assert db.stat().st_mtime_ns == before
+
+
+class TestModuleFlavouredJavaScript:
+    """`.js` was indexed and `.mjs` was refused. Nothing chose that — the
+    list simply predates the suffix. Reported by a repository whose tooling
+    is written as ESM: eleven files rejected with "No parser available"."""
+
+    @pytest.mark.parametrize("suffix", [".mjs", ".cjs", ".mts", ".cts"])
+    def test_the_module_suffixes_are_indexed(self, tmp_path, suffix):
+        from rtfm.parsers.base import ParserRegistry
+        path = tmp_path / f"garde{suffix}"
+        path.write_text("export function guard() { return 1 }\n",
+                        encoding="utf-8")
+        parser = ParserRegistry.get_parser(path)
+        assert parser is not None, f"{suffix} has no parser"
+        assert list(parser.parse(path)), f"{suffix} produced nothing"
+
+    def test_it_is_the_same_parser_that_reads_plain_js(self, tmp_path):
+        """Not a new format — the same one, spelled differently."""
+        from rtfm.parsers.base import ParserRegistry
+        js = tmp_path / "a.js"
+        mjs = tmp_path / "a.mjs"
+        for p in (js, mjs):
+            p.write_text("const x = 1\n", encoding="utf-8")
+        assert (ParserRegistry.get_parser(js).name
+                == ParserRegistry.get_parser(mjs).name)

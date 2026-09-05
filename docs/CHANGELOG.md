@@ -7,6 +7,16 @@ description: >-
 
 # Changelog
 
+## [0.38.2] — 2026-09-05
+
+### Added — `.mjs`, `.cjs`, `.mts`, `.cts`
+
+`.js` was indexed and `.mjs` was refused with "No parser available". Nothing
+chose that: the extension list simply predates the module suffixes. Reported
+by a repository whose tooling is written as ESM — eleven files rejected while
+their `.js` neighbours went in fine. Same language, same parser; the
+CommonJS and TypeScript spellings are added alongside for the same reason.
+
 ## [0.38.1] — 2026-09-05
 
 ### Fixed — "I could not read it" is not "it is corrupt"

@@ -89,6 +89,12 @@ class PlainTextParser(BaseParser):
     extensions = [
         # Code (no dedicated parser yet)
         ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".java",
+        # The module-flavoured suffixes of the two above. Same language,
+        # same parser, and their absence was not a decision: a repository
+        # writing its tooling as ESM had eleven files refused outright
+        # ("No parser available for: .mjs") while its .js neighbours went
+        # in fine.
+        ".mjs", ".cjs", ".mts", ".cts",
         ".css", ".c", ".cpp", ".h", ".hpp", ".rb", ".php",
         ".swift", ".kt", ".r", ".sql", ".lua", ".pl", ".scala",
         # Plain text and config
