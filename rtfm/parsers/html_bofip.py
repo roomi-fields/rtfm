@@ -207,9 +207,19 @@ class HTMLBOFiPParser(BaseParser):
         doc_meta = self._load_document_xml(path)
         doc_meta.update(metadata)
 
-        # Extract document info
+        # Extract document info.
+        #
+        # The identity comes from the caller, like every other parser here.
+        # This one used to recompute it from the document's <title>, which
+        # is not an identity: the catalogue entry then carried a
+        # title-derived slug while the file tracking carried a path-derived
+        # one, so the two never matched and every HTML document showed up as
+        # an untracked book for ever. Worse, two pages sharing a <title> —
+        # ordinary in a docs tree or a set of mockups — collapsed onto one
+        # identity and the second was refused. A parser proposes a *title*;
+        # what a document is called is not who it is.
         doc_title = doc_meta.get('titre', path.stem)
-        doc_slug = slugify(doc_title)
+        doc_slug = doc_meta.get('book_slug') or self._path_to_slug(path)
         boi_id = doc_meta.get('identifiant', '')
 
         # Parse BOI identifier
@@ -272,6 +282,10 @@ class HTMLBOFiPParser(BaseParser):
                     content_hash=content_hash(chunk_text),
                     metadata=chunk_metadata,
                 )
+
+    @staticmethod
+    def _path_to_slug(path: Path) -> str:
+        return str(path).replace("/", "-").replace("\\", "-").lstrip("-")
 
     def _load_document_xml(self, html_path: Path) -> dict:
         """Load metadata from associated document.xml file."""
@@ -379,7 +393,10 @@ class HTMLBOFiPParser(BaseParser):
 
         return {
             "source_file": path.name,
-            "book_slug": slugify(doc_meta.get('titre', path.stem)),
+            # Path-derived, like the rest of the parsers: a fallback for a
+            # direct ``Library.ingest(path)`` with no identity supplied.
+            # Never the title — see :meth:`parse`.
+            "book_slug": self._path_to_slug(path),
             "title": doc_meta.get('titre', path.stem),
             **doc_meta
         }

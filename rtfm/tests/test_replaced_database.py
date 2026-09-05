@@ -693,3 +693,93 @@ class TestTheRemoveHandlerHonoursTheSameRule:
         (tmp_path / "real.md").write_text("x", encoding="utf-8")
         out = self._run_remove(tmp_path, "real.md")
         assert "still on disk, kept" in out
+
+
+class TestAnHtmlTitleIsNotAnIdentity:
+    """The HTML parser recomputed the slug from the document's ``<title>``.
+
+    Found by the fleet audit: six books in one catalogue that no scan
+    tracked. The catalogue entry carried a title-derived slug while the file
+    tracking carried the path-derived one, so the two never matched and
+    every HTML document read as an untracked book for ever.
+
+    The sharper consequence is collision. Two pages sharing a ``<title>`` —
+    ordinary in a docs tree, a set of mockups, a generated site — collapsed
+    onto one identity, and the second was refused.
+    """
+
+    def _parser(self):
+        from rtfm.parsers.html_bofip import HTMLBOFiPParser
+        return HTMLBOFiPParser()
+
+    def _page(self, path: Path, title: str, body: str = "Some content here "
+                                                        "with enough text.") -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"<html><head><title>{title}</title></head>"
+            f"<body><p>{body * 12}</p></body></html>", encoding="utf-8")
+        return path
+
+    def test_the_identity_it_is_given_is_the_identity_it_uses(self, tmp_path):
+        page = self._page(tmp_path / "mockup.html", "Kanopi MySet")
+        chunks = list(self._parser().parse(
+            page, {"book_slug": "corpus--docs--mockup-html"}))
+
+        assert chunks, "nothing parsed"
+        assert {c.book_slug for c in chunks} == {"corpus--docs--mockup-html"}
+
+    def test_two_pages_with_one_title_keep_two_identities(self, tmp_path):
+        """The collision, in the shape a docs tree actually produces it."""
+        a = self._page(tmp_path / "a" / "index.html", "Kanopi")
+        b = self._page(tmp_path / "b" / "index.html", "Kanopi")
+        p = self._parser()
+
+        slugs = {next(iter(p.parse(page, {}))).book_slug for page in (a, b)}
+        assert len(slugs) == 2, f"both pages claimed one identity: {slugs}"
+
+    def test_with_no_caller_it_falls_back_to_the_path(self, tmp_path):
+        page = self._page(tmp_path / "sub" / "page.html", "A Shared Title")
+        chunk = next(iter(self._parser().parse(page, {})))
+
+        assert "a-shared-title" not in chunk.book_slug
+        assert chunk.book_slug.endswith("page.html")
+
+    def test_the_title_is_still_the_book_title(self, tmp_path):
+        """Only the identity moves. What the document is called is still
+        read from the document — through the same two steps the library
+        uses: metadata first, then parse."""
+        page = self._page(tmp_path / "p.html", "Kanopi MySet")
+        parser = self._parser()
+        meta = parser.extract_metadata(page)
+        chunk = next(iter(parser.parse(page, meta)))
+
+        assert chunk.book_title == "Kanopi MySet"
+        assert "kanopi-myset" not in chunk.book_slug
+
+    def test_the_metadata_it_offers_is_path_derived_too(self, tmp_path):
+        """``extract_metadata`` seeds the identity when a caller supplies
+        none, so a title there is the same defect one step earlier."""
+        page = self._page(tmp_path / "p.html", "Kanopi MySet")
+        meta = self._parser().extract_metadata(page)
+
+        assert meta["title"] == "Kanopi MySet"
+        assert "kanopi-myset" not in meta["book_slug"]
+
+    def test_the_catalogue_entry_matches_what_tracks_the_file(self, tmp_path):
+        """End to end, and the exact thing the audit measures: the book the
+        ingest creates is the one ``indexed_files`` points at."""
+        from rtfm.core.sync import _path_to_slug
+        page = self._page(tmp_path / "docs" / "index.html", "Kanopi")
+        db = tmp_path / ".rtfm" / "library.db"
+        db.parent.mkdir()
+        lib = Library(str(db))
+        try:
+            rel = "docs/index.html"
+            slug = _path_to_slug(rel, "c")
+            lib.ingest(page, corpus="c",
+                       metadata={"book_slug": slug, "source_file": rel})
+            rows = [r["slug"] for r in lib._get_conn().execute(
+                "SELECT slug FROM books")]
+            assert rows == [slug], f"catalogue holds {rows}, tracking holds {slug}"
+        finally:
+            lib.close()

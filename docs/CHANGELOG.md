@@ -7,6 +7,31 @@ description: >-
 
 # Changelog
 
+## [0.39.3] — 2026-09-05
+
+### Fixed — an HTML document's `<title>` was used as its identity
+
+Found by the fleet audit: six books in one catalogue that no scan tracked.
+The HTML parser recomputed the slug from the document's `<title>`, ignoring
+the one the ingest handler had already allocated — so the catalogue entry
+carried a title-derived identity while the file tracking carried the
+path-derived one. The two never matched, and every HTML document read as an
+untracked book for ever.
+
+The sharper consequence is collision. Two pages sharing a `<title>` —
+ordinary in a docs tree, a set of mockups, a generated site — collapsed onto
+one identity, and the second was refused. Every other parser already took the
+caller's identity and fell back to the path; this one alone recomputed.
+
+A parser proposes a *title*. What a document is called is not who it is. The
+title is still read from the document and is still the book's title; the
+fallback for a direct `Library.ingest(path)` is now path-derived, like
+everywhere else.
+
+Existing HTML books keep whatever identity they were indexed under until
+they are re-ingested — `rtfm reindex --ext .html` on a project settles it,
+and the hourly reconcile then drops the untracked leftovers.
+
 ## [0.39.2] — 2026-09-05
 
 ### Fixed — the removal was queued, then refused
