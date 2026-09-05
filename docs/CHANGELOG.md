@@ -7,6 +7,35 @@ description: >-
 
 # Changelog
 
+## [0.38.1] — 2026-09-05
+
+### Fixed — "I could not read it" is not "it is corrupt"
+
+Found in the supervisor log of the fleet from 0.38.0, while checking that
+release had taken. Two published mirrors were declared corrupt at boot and
+the guard tried to rename their indexes aside:
+
+```
+BPscript: open failed: [Errno 30] Read-only file system:
+  '.../library.db' -> '.../library.db.corrupt-20260904-214926'
+```
+
+Neither index was corrupt. Their directory was read-only for the duration of
+a publication, `check_integrity` opened the database **read-write**, and every
+failure to open was read as corruption. The rename failing — for the same
+read-only reason — is the only thing that saved them. On a writable directory
+the same misdiagnosis renames a healthy index away and re-indexes the project
+from nothing; a database merely held busy by another writer raises the same
+class of error and would earn the same verdict.
+
+The check now opens read-only, so it never needs write access to what it
+checks, and it separates the two cases SQLite already distinguishes:
+`OperationalError` (locked, read-only, unopenable) means *unknown* and
+quarantines nothing — the caller's own open then fails loudly and honestly if
+the condition persists. `DatabaseError` ("malformed", "file is not a
+database") still means corrupt, and still quarantines: the crash-loop that
+guard exists to stop is unaffected.
+
 ## [0.38.0] — 2026-09-04
 
 ### Fixed — a re-created index left the worker writing to a file with no name

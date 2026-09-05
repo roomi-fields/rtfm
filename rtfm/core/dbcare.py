@@ -29,25 +29,45 @@ from typing import Callable, Optional
 
 
 def check_integrity(db_path: str | Path) -> bool:
-    """Return ``True`` iff ``PRAGMA quick_check`` reports ``ok``.
+    """Return ``True`` unless ``PRAGMA quick_check`` proves the file corrupt.
 
     A missing file is considered healthy (a fresh DB will be created on
     first write). ``quick_check`` is used rather than the exhaustive
     ``integrity_check`` because it is far cheaper on a multi-GB file and
     still catches the structural corruption (out-of-order rowids, dangling
     page references) that breaks normal queries.
+
+    **"I could not read it" is not "it is corrupt."** A failed answer used
+    to be treated as a corrupt one, and the consequence of a corrupt answer
+    is that :func:`quarantine_db` renames the file away and the project is
+    re-indexed from scratch. Two ordinary conditions reach here and mean
+    nothing of the sort: a database on a read-only mount, and one held
+    busy by another writer. Both raise ``OperationalError``; genuine
+    corruption ("malformed", "file is not a database") raises a plain
+    ``DatabaseError``. Observed on a published mirror whose directory was
+    read-only for the duration of a publication: the guard called a healthy
+    index corrupt, and only the rename failing — for the same reason —
+    saved it.
+
+    The connection is also opened read-only, so the check itself never
+    needs write access to the thing it is checking.
     """
     p = Path(db_path)
     if not p.exists():
         return True
     try:
-        conn = sqlite3.connect(str(p))
+        conn = sqlite3.connect(f"{p.resolve().as_uri()}?mode=ro", uri=True)
         try:
             row = conn.execute("PRAGMA quick_check").fetchone()
         finally:
             conn.close()
+    except sqlite3.OperationalError:
+        # Unreadable right now — locked, read-only, gone mid-check. Say
+        # healthy: the caller's own open will fail loudly and honestly if
+        # the condition persists, and nothing gets renamed on a guess.
+        return True
     except sqlite3.DatabaseError:
-        # "file is not a database" / "malformed" both surface here.
+        # "file is not a database" / "malformed": actually corrupt.
         return False
     return bool(row) and row[0] == "ok"
 

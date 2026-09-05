@@ -337,3 +337,83 @@ class TestAnIndexOnAReadOnlyMount:
                 lib._get_conn().commit()
         finally:
             lib.close()
+
+
+class TestUnreadableIsNotCorrupt:
+    """The guard that renames a database out of the way must be sure.
+
+    Found in the same investigation, in the supervisor log of the fleet
+    above: two published mirrors were declared corrupt at boot and the
+    quarantine rename failed with ``Read-only file system``. The rename
+    failing is the only reason the indexes survived — the file was healthy,
+    the directory was merely read-only for the duration of a publication.
+    On a writable directory the same misdiagnosis renames a good index away
+    and re-indexes the project from nothing.
+    """
+
+    def _corrupt(self, path: Path) -> None:
+        """A file that is emphatically not a database."""
+        path.write_bytes(b"this is not a database, not even slightly")
+
+    def test_a_healthy_database_passes(self, tmp_path):
+        from rtfm.core.dbcare import check_integrity
+        db = tmp_path / "library.db"
+        Library(str(db)).close()
+        assert check_integrity(db) is True
+
+    def test_a_genuinely_corrupt_file_still_fails(self, tmp_path):
+        """The whole point of the guard: one project once looped for weeks
+        on a malformed file. Loosening the diagnosis must not lose that."""
+        from rtfm.core.dbcare import check_integrity
+        db = tmp_path / "library.db"
+        self._corrupt(db)
+        assert check_integrity(db) is False
+
+    def test_a_read_only_directory_is_not_a_corruption(self, tmp_path):
+        from rtfm.core.dbcare import check_integrity
+        rtfm_dir = tmp_path / ".rtfm"
+        rtfm_dir.mkdir()
+        db = rtfm_dir / "library.db"
+        Library(str(db)).close()
+        for suffix in ("-wal", "-shm"):
+            Path(str(db) + suffix).unlink(missing_ok=True)
+        os.chmod(db, 0o444)
+        os.chmod(rtfm_dir, 0o555)
+        try:
+            assert check_integrity(db) is True
+        finally:
+            os.chmod(rtfm_dir, 0o755)
+            os.chmod(db, 0o644)
+
+    def test_an_unopenable_database_is_not_quarantined(self, tmp_path,
+                                                       monkeypatch):
+        """"I could not read it" must never reach the rename. Simulated
+        with the error SQLite actually raises when a file is locked or its
+        mount refuses it."""
+        import sqlite3
+        from rtfm.core import dbcare
+        db = tmp_path / "library.db"
+        Library(str(db)).close()
+
+        def refuse(*a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(sqlite3, "connect", refuse)
+        assert dbcare.check_integrity(db) is True
+
+        quarantined = []
+        monkeypatch.setattr(dbcare, "quarantine_db",
+                            lambda p: quarantined.append(p))
+        assert dbcare.ensure_healthy_db(db) is False
+        assert quarantined == [], "renamed a database it could not even read"
+
+    def test_the_check_needs_no_write_access_to_what_it_checks(self,
+                                                              tmp_path):
+        """It used to open read-write, which is why a read-only mount read
+        as corruption in the first place."""
+        from rtfm.core.dbcare import check_integrity
+        db = tmp_path / "library.db"
+        Library(str(db)).close()
+        before = db.stat().st_mtime_ns
+        assert check_integrity(db) is True
+        assert db.stat().st_mtime_ns == before
