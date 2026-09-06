@@ -7,6 +7,33 @@ description: >-
 
 # Changelog
 
+## [0.39.6] — 2026-09-06
+
+### Added — the audit now looks in the other direction
+
+Every check asked the same question: is there an entry in the catalogue that
+nothing accounts for? That finds a catalogue with too much in it. It cannot
+find the opposite — a file the scan has seen, recorded and marked up to date,
+with nothing readable behind it — and the opposite is what the two worst
+defects this index has had both looked like. Nothing errors, the counts stay
+plausible, and the tracking says the work is done, so nothing ever retries; a
+search returns no result and the agent concludes the subject does not exist.
+
+`mute-files` reports tracked files with no catalogue entry, excluding those
+that carry no text by nature (images, fonts, audio, archives, binaries) and
+empty ones. It is the check that would have named the 5 738 HTML files fixed
+in 0.39.3 the day they went missing, instead of weeks later.
+
+`shared-identities` reports files that answer to the same identity, where
+only the last one indexed is readable. Identities used to stop at the first
+dot, so `-se.Alan` and `-se.Alarm` collapsed onto `-se`; that was fixed, but
+an identity is never recomputed for a path already tracked, so files indexed
+before the fix keep the colliding one. Measured on the fleet after the fix
+had shipped: 502 files in one project and 408 in another, in groups of up to
+126 files readable as a single document.
+
+Both run under `rtfm audit` and in the supervisor's hourly pass.
+
 ## [0.39.5] — 2026-09-06
 
 ### Fixed — a connection that went read-only never came back

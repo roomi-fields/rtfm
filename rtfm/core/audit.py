@@ -41,6 +41,20 @@ CHURN_WINDOW_HOURS = 24
 # A claim held this long by nobody is stranded work, not slow work.
 STRANDED_HOURS = 6
 
+#: Files that carry no text by nature. A scan tracks them — it has to, to
+#: tell them from files that were deleted — but nothing readable can come
+#: out of them, so they are not evidence of anything when the catalogue has
+#: no entry for them.
+NO_TEXT_SUFFIXES = (
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".mid", ".midi", ".wav", ".aiff", ".aif", ".mp3", ".flac", ".ogg",
+    ".mp4", ".mov", ".webm",
+    ".zip", ".gz", ".tar", ".bz2", ".xz", ".7z",
+    ".so", ".dylib", ".dll", ".exe", ".bin", ".wasm", ".o", ".a",
+    ".lock", ".map",
+)
+
 
 @dataclass
 class Finding:
@@ -215,6 +229,69 @@ def check_orphan_books(conn) -> tuple[int, str] | None:
     return (n, f"{n} book(s) in the catalogue that no scan tracks")
 
 
+
+def check_shared_identities(conn) -> tuple[int, str] | None:
+    """No two files may answer to the same identity.
+
+    A file's identity is derived from its path. When two paths derive the
+    same one, the second file to be indexed overwrites the first: both are
+    tracked, both look done, and only the last one is readable. Nothing
+    fails, and the counts stay plausible.
+
+    This is the surviving half of a defect fixed in 0.30 — identities used
+    to stop at the first dot, so ``-se.Alan`` and ``-se.Alarm`` collapsed
+    onto ``-se``. New files get distinct identities now, but an identity is
+    never recomputed for a path already tracked, so every file indexed
+    before the fix keeps the colliding one for ever. Measured after the fix
+    shipped: 502 files in one project and 408 in another, each group of up
+    to 126 files readable as a single document.
+    """
+    if not _table_exists(conn, "indexed_files"):
+        return None
+    row = conn.execute(
+        """SELECT COUNT(*), SUM(n - 1), MAX(n) FROM (
+               SELECT COUNT(*) AS n FROM indexed_files
+               WHERE book_slug IS NOT NULL
+               GROUP BY corpus, book_slug HAVING n > 1)"""
+    ).fetchone()
+    groups, hidden, worst = row[0], row[1] or 0, row[2] or 0
+    if not hidden:
+        return None
+    return (hidden,
+            f"{hidden} file(s) unreadable behind {groups} shared "
+            f"identit{'y' if groups == 1 else 'ies'} — worst case {worst} "
+            f"files answering to one")
+
+
+def check_mute_files(conn) -> tuple[int, str] | None:
+    """A tracked file should have something readable behind it.
+
+    The reverse of ``orphan-books``, and the direction that hid the worst
+    defect this index has had: 5 738 HTML files tracked, marked up to date,
+    and not one of them readable. A search over them returned nothing and
+    the agent concluded the subject did not exist; nothing would ever
+    retry, because the tracking said the work was done.
+
+    Files that legitimately carry no text — images, fonts, audio, anything
+    empty — are excluded, or the check would report every asset in the
+    tree as a defect.
+    """
+    if not _table_exists(conn, "indexed_files"):
+        return None
+    excluded = " ".join(
+        f"AND LOWER(i.filepath) NOT LIKE '%{ext}'" for ext in NO_TEXT_SUFFIXES)
+    n = conn.execute(
+        f"""SELECT COUNT(*) FROM indexed_files i
+            WHERE i.file_size > 0 {excluded}
+              AND NOT EXISTS (SELECT 1 FROM books b
+                              WHERE b.slug = i.book_slug
+                                AND b.corpus = i.corpus)"""
+    ).fetchone()[0]
+    if not n:
+        return None
+    return (n, f"{n} tracked file(s) with nothing readable behind them")
+
+
 def check_untracked_roots(conn, project_root: Path) -> tuple[int, str] | None:
     """Every configured source directory must be known to the index.
 
@@ -250,6 +327,8 @@ CHECKS = {
     "pagination": check_pagination,
     "stranded": check_stranded,
     "orphan-books": check_orphan_books,
+    "shared-identities": check_shared_identities,
+    "mute-files": check_mute_files,
 }
 
 
