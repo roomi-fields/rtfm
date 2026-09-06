@@ -7,6 +7,47 @@ description: >-
 
 # Changelog
 
+## [0.39.5] — 2026-09-06
+
+### Fixed — a connection that went read-only never came back
+
+SQLite decides whether a database is writable once, when it opens the file,
+and never revisits that decision. A publication that holds its directory
+read-only for a second while it swaps content is enough: whatever opened the
+database in that second keeps a read-only handle for the life of the process.
+
+The supervisor opens each project's database once and holds it. So a project
+published while the supervisor happened to be connecting became permanently
+unservable — every attempt to take a job from its queue failed with `attempt
+to write a readonly database`, and the dispatcher, which retries several times
+a second and logs every attempt, produced 33 707 identical lines in eighty
+minutes across six projects. The database itself was fine the whole time: a
+plain write to it from a shell succeeded.
+
+The connection is now reopened when the error says the *handle* is dead
+(read-only, cannot open, I/O error) rather than that the *file* is corrupt,
+and a project whose queue keeps failing is set aside for a doubling delay up
+to five minutes instead of being re-picked on every pass. The log says it once
+per run of failures, not once per attempt.
+
+### Fixed — enrolling two projects at once lost one of them
+
+A project joins the fleet by reading the enrolment list, appending itself and
+writing the whole list back. Nothing synchronised that, so two enrolments that
+overlapped ended with the second one's list — which does not contain the first
+one's project. That project keeps its database, its queue and its scan root,
+and is never looked at again; nothing anywhere says so.
+
+Measured on a fleet publishing sixteen repositories in parallel: eight
+projects enrolled and absent from the list, one of them a repository created
+that morning whose index stayed at its nine initial files. A reproduction
+without the fix loses 21 of 24 simultaneous enrolments.
+
+The read-modify-write now holds a lock, and the list is written to a sibling
+and renamed so a reader can never catch it half-written. A caller that cannot
+take the lock within a second gives up rather than block a save; the next
+command retries.
+
 ## [0.39.4] — 2026-09-05
 
 ### Fixed — `reindex` read the catalogue, so it could not repair the catalogue

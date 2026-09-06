@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from rtfm.config import find_rtfm_root
@@ -35,7 +36,10 @@ from rtfm.core.portable import (
     background_python,
     detached_popen_kwargs,
     hard_kill_signal,
+    open_lock_file,
     pid_alive,
+    try_lock_exclusive,
+    unlock,
 )
 
 
@@ -59,20 +63,64 @@ def _load_registry() -> list[str]:
 def _save_registry(projects: list[str]) -> None:
     _REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     cleaned = sorted({p for p in projects if p})
-    _REGISTRY.write_text(
+    # Write to a sibling and rename: a reader must never catch the file
+    # halfway through being written and conclude the fleet is empty.
+    tmp = _REGISTRY.with_suffix(f".json.{os.getpid()}.tmp")
+    tmp.write_text(
         json.dumps({"projects": cleaned}, indent=2) + "\n",
         encoding="utf-8",
     )
+    os.replace(tmp, _REGISTRY)
+
+
+@contextmanager
+def _registry_lock():
+    """Hold the registry lock for a read-modify-write, or give up trying.
+
+    Enrolling a project reads the whole list, appends one entry and writes
+    the whole list back. Unsynchronised, two enrolments that overlap end
+    with the second one's list — which does not contain the first one's
+    project, so that project is silently never serviced again. Measured on
+    a fleet publishing sixteen repositories in parallel: eight projects
+    holding a database and a queue, none of them in the registry, none of
+    them ever scanned, and nothing anywhere saying so.
+
+    Yields ``True`` when the lock is held. After a second of contention it
+    yields ``False`` rather than block a hook or an editor save; the caller
+    then skips the write, and the next command retries.
+    """
+    _REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    fd = open_lock_file(_REGISTRY.with_suffix(".lock"))
+    try:
+        deadline = time.monotonic() + 1.0
+        while True:
+            if try_lock_exclusive(fd):
+                try:
+                    yield True
+                finally:
+                    unlock(fd)
+                return
+            if time.monotonic() >= deadline:
+                yield False
+                return
+            time.sleep(0.02)
+    finally:
+        os.close(fd)
 
 
 def _register_project(rtfm_dir: Path) -> None:
     """Add this ``.rtfm/`` dir to the registry. Idempotent, best-effort."""
     try:
         path = str(rtfm_dir.resolve())
-        current = _load_registry()
-        if path not in current:
-            current.append(path)
-            _save_registry(current)
+        if path in _load_registry():
+            return  # fast path: no lock needed to confirm what is already true
+        with _registry_lock() as held:
+            if not held:
+                return
+            current = _load_registry()
+            if path not in current:
+                current.append(path)
+                _save_registry(current)
     except Exception:
         pass  # registry is best-effort; don't break the spawn
 

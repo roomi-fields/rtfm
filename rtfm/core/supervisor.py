@@ -95,6 +95,25 @@ def _is_db_corruption(exc: BaseException) -> bool:
     return any(m in msg for m in _CORRUPTION_MARKERS)
 
 
+#: Substrings that mean "this *connection* is no longer usable", while the
+#: file on disk may be perfectly fine. SQLite decides read-only-ness once,
+#: when it opens the file, and never revisits it: a database opened during
+#: the seconds a publication holds its directory read-only stays read-only
+#: for the life of that connection, long after the permissions are restored.
+_STALE_HANDLE_MARKERS = (
+    "readonly database",
+    "read-only database",
+    "unable to open database",
+    "disk i/o error",
+)
+
+
+def _is_stale_handle(exc: BaseException) -> bool:
+    """True when the connection is broken but the file may still be good."""
+    msg = str(exc).lower()
+    return any(m in msg for m in _STALE_HANDLE_MARKERS)
+
+
 # ── Paths ────────────────────────────────────────────────────────────────
 
 _RTFM_HOME = Path.home() / ".rtfm"
@@ -412,6 +431,13 @@ class _Slot:
         #: Device+inode of the database ``queue`` is actually connected to.
         #: Compared against the file on disk to catch a replacement.
         self.identity: Optional[tuple[int, int]] = None
+        #: Consecutive queue errors, and the monotonic time before which the
+        #: dispatcher leaves this project alone. Without them a slot whose
+        #: connection has gone bad is re-picked on every pass of a loop that
+        #: spins several times a second: measured at 33 707 identical log
+        #: lines in eighty minutes, six projects, three megabytes of log.
+        self.queue_errors = 0
+        self.retry_at = 0.0
 
     @property
     def active(self) -> bool:
@@ -680,22 +706,59 @@ class Supervisor:
             current = _file_identity(slot.db_path)
             if current is None or current == slot.identity:
                 continue
-            name = slot.rtfm_dir.parent.name
             slot.log("database file was replaced on disk — the connection "
                      "held until now pointed at the previous, unlinked file. "
                      "Reopening; anything queued into it is gone and is "
                      "re-derived by the scan that follows.")
-            self._log(f"{name}: database replaced on disk — reopening")
-            try:
-                slot.close()
-                slot.open(self._log)
-            except Exception as exc:
-                self._log(f"{name}: reopen after replacement failed: {exc}")
-                slot.queue = None
-                continue
-            slot.next_scan_at = now
-            slot.scan_paused = False
-            slot.reconcile_seeded = False
+            self._reopen_slot(slot, "database replaced on disk")
+
+    def _reopen_slot(self, slot: "_Slot", why: str) -> bool:
+        """Drop this project's connection and open a fresh one by path.
+
+        The single recovery for every case where the handle stopped matching
+        the file: the file was replaced underneath it, or it was opened in a
+        moment the directory happened to be read-only. Also re-arms the scan
+        and the reconcile, since whatever the old connection had queued is
+        not necessarily in the file we are now looking at.
+        """
+        name = slot.rtfm_dir.parent.name
+        self._log(f"{name}: {why} — reopening")
+        try:
+            slot.close()
+            slot.open(self._log)
+        except Exception as exc:
+            self._log(f"{name}: reopen failed: {exc}")
+            slot.queue = None
+            return False
+        slot.next_scan_at = time.monotonic()
+        slot.scan_paused = False
+        slot.reconcile_seeded = False
+        return True
+
+    def _note_queue_error(self, slot: "_Slot", exc: BaseException,
+                          where: str) -> None:
+        """React to a peek/dequeue failure: quarantine, reopen, or back off.
+
+        Logging every attempt is what turned a recoverable condition into
+        three megabytes of noise, so the message goes out on the first
+        failure of a run and then only every eighth one. The delay doubles
+        up to five minutes, which is short enough that a project recovers on
+        its own once the cause clears and long enough that a project that
+        never recovers costs nothing.
+        """
+        name = slot.rtfm_dir.parent.name
+        slot.queue_errors += 1
+        n = slot.queue_errors
+        if n == 1 or n % 8 == 0:
+            self._log(f"{name}: {where} error: {exc}" +
+                      (f" (x{n})" if n > 1 else ""))
+        slot.retry_at = time.monotonic() + min(2 ** min(n, 8), 300)
+        if _is_db_corruption(exc):
+            self._recover_slot(slot)
+        elif _is_stale_handle(exc) and not slot.active:
+            if self._reopen_slot(slot, f"{where} on a dead connection: {exc}"):
+                slot.queue_errors = 0
+                slot.retry_at = 0.0
 
     def _refresh_hooks(self, slot: "_Slot") -> None:
         """Bring a project's Claude Code hook stubs up to the installed code.
@@ -774,14 +837,15 @@ class Supervisor:
             for slot in self._slots.values():
                 if id(slot) in skip:
                     continue
+                if slot.retry_at and time.monotonic() < slot.retry_at:
+                    continue  # backing off after a queue error
                 try:
                     head = slot.queue.peek() if slot.queue is not None else None
                 except Exception as exc:
-                    self._log(f"{slot.rtfm_dir.parent.name}: peek error: {exc}")
                     skip.add(id(slot))
-                    if _is_db_corruption(exc):
-                        self._recover_slot(slot)
+                    self._note_queue_error(slot, exc, "peek")
                     continue
+                slot.queue_errors, slot.retry_at = 0, 0.0
                 if head is None:
                     continue
                 priority, created_at, head_type = head
@@ -798,11 +862,10 @@ class Supervisor:
             try:
                 job = best_slot.queue.dequeue()
             except Exception as exc:
-                self._log(f"{best_slot.rtfm_dir.parent.name}: dequeue error: {exc}")
                 skip.add(id(best_slot))  # don't re-pick it this pass
-                if _is_db_corruption(exc):
-                    self._recover_slot(best_slot)
+                self._note_queue_error(best_slot, exc, "dequeue")
                 continue
+            best_slot.queue_errors, best_slot.retry_at = 0, 0.0
             if job is None:
                 # Race: head vanished between peek and dequeue. Single
                 # dispatcher makes this unexpected; skip the slot this pass.
