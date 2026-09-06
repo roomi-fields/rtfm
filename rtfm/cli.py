@@ -1742,6 +1742,24 @@ def cmd_status(args):
                 if len(seen_scans) > 5:
                     print(f"      ... +{len(seen_scans) - 5} more")
 
+            # Anything the index cannot be right about, named here rather
+            # than only in an audit nobody thinks to run. This is the one
+            # command an agent does run when it wants to know where it
+            # stands, so it is where a silent defect has to become visible.
+            try:
+                from rtfm.core.audit import audit_project
+                findings = audit_project(root / ".rtfm" / "library.db", root)
+            except Exception:
+                findings = []
+            if findings:
+                print(f"\nNeeds attention ({len(findings)}):")
+                for f in findings[:5]:
+                    print(f"  ⚠ {f.detail}")
+                if len(findings) > 5:
+                    print(f"      ... +{len(findings) - 5} more")
+                print("  → rtfm audit --here    (what it means)")
+                print("  → rtfm repair          (fix what can be fixed here)")
+
             if not health_flag:
                 print("\n(Run `rtfm status --health` for pending-sync counts.)")
     except Exception:
@@ -2371,6 +2389,36 @@ def cmd_memory(args):
     lib.close()
 
 
+def cmd_repair(args):
+    """Clear index records the current code can no longer produce.
+
+    A scan acts on the difference between disk and what it recorded, so a
+    record that is wrong but stable is never revisited: fixing the code that
+    wrote it does nothing for the files already carrying it. This goes back
+    over those files and hands them to the scan as newcomers.
+
+    The supervisor runs the same pass on every project it opens, so an
+    upgrade repairs an index on its own. This command exists for doing it
+    now, and for saying what it did.
+    """
+    from rtfm.config import find_rtfm_root
+    from rtfm.core.repair import repair_shared_identities
+    from rtfm.cli_worker import ensure_worker_running
+
+    rtfm_root = find_rtfm_root()
+    if rtfm_root is None:
+        sys.exit("repair: no .rtfm/ project root in the cwd chain.")
+    rtfm_dir = rtfm_root / ".rtfm"
+
+    n = repair_shared_identities(rtfm_dir / "library.db", log=print)
+    if not n:
+        print("repair: nothing to repair.")
+        return
+    print(f"repair: {n} file(s) handed back to the scan.")
+    ensure_worker_running(rtfm_dir)
+    print("repair: the worker re-indexes them; watch with `rtfm status`.")
+
+
 def cmd_audit(args):
     """Check what RTFM must be able to say about itself, and say it.
 
@@ -2994,6 +3042,12 @@ def main():
         "--here", action="store_true",
         help="Only this project (default: every registered index).")
     p_audit.set_defaults(func=cmd_audit)
+
+    # repair
+    p_repair = subparsers.add_parser(
+        "repair",
+        help="Clear index records the current code can no longer produce")
+    p_repair.set_defaults(func=cmd_repair)
 
     # monitor
     p_monitor = subparsers.add_parser("monitor", help="Tail the RTFM log (live MCP/hook activity)")

@@ -7,6 +7,40 @@ description: >-
 
 # Changelog
 
+## [0.40.0] — 2026-09-06
+
+### Added — an index repairs itself on upgrade
+
+Fixing the code that wrote a bad record does nothing for the files already
+carrying it. A scan acts on the difference between disk and what it recorded
+last time, so a record that is wrong but *stable* produces no difference and
+is never revisited. Every fix to how a file is recorded therefore has a
+second half that had no home until now.
+
+`rtfm repair` is that second half, and the supervisor runs the same pass on
+every project it opens — which is the moment every upgrade passes through,
+whoever started RTFM and whether or not anyone reads a log. It is safe on
+every start: it finds nothing on an index already repaired, and nothing on
+one that was never affected. A repair that fails never keeps a project from
+being served.
+
+The first pass it carries: files that share an identity, where only the last
+one indexed is readable. Identities used to stop at the first dot, so
+`-se.Alan` and `-se.Alarm` both became `-se`. That was fixed in 0.30, but an
+identity is never recomputed for a path already tracked — the rule that keeps
+a working index stable across upgrades — so every file indexed before the fix
+kept its colliding one. Measured on a fleet weeks after the fix had shipped:
+910 files across two projects, in groups of up to 126 files readable as a
+single document. The repair clears their tracking; the next scan indexes each
+of them separately.
+
+### Added — `rtfm status` names what the index cannot be right about
+
+The audit checks existed and nobody ran them. They now print at the foot of
+`status`, with the two commands that act on them — the one command an agent
+does run when it wants to know where it stands, and so the place a silent
+defect has to become visible.
+
 ## [0.39.6] — 2026-09-06
 
 ### Added — the audit now looks in the other direction

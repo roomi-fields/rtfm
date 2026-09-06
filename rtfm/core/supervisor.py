@@ -448,6 +448,21 @@ class _Slot:
         """Integrity-guard the DB, then open the queue. Returns ``True`` if
         a rebuild was triggered (caller should force an immediate scan)."""
         rebuilt = ensure_healthy_db(self.db_path, log=self.log)
+        # Records a later version of the code can no longer produce are
+        # cleared here, before the project is served. This is the moment
+        # nothing else can be writing to it, and it is the moment every
+        # upgrade passes through — whoever started RTFM, a person or an
+        # agent, and whether or not anyone reads a log.
+        try:
+            from rtfm.core.repair import repair_shared_identities
+            n = repair_shared_identities(self.db_path, log=self.log)
+        except Exception as exc:  # a repair must never keep a project down
+            log(f"{self.rtfm_dir.parent.name}: identity repair skipped: {exc}")
+            n = 0
+        if n:
+            log(f"{self.rtfm_dir.parent.name}: {n} file(s) shared an "
+                f"identity — cleared, they re-enter on the next scan")
+            rebuilt = True  # scan now rather than on the staggered tick
         self.queue = Queue(self.db_path)
         self.identity = _file_identity(self.db_path)
         # Reap zombies left by a previous supervisor/worker that died
