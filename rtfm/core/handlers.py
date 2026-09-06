@@ -296,6 +296,39 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
     )
 
 
+def _vanished_before_we_read_it(abs_path: Path, rel: str, corpus: str,
+                                worker: "JobContext") -> bool:
+    """Handle a file that was listed by a scan and deleted before its turn.
+
+    On a repository people are working in, this is not a failure — it is the
+    ordinary race between a scan that lists and a job that reads, and the
+    right answer is the one the deletion already implies: take the file out
+    of the index and move on. Counting it as a failure fills the failure
+    count with non-events, and a failure count full of non-events is one
+    nobody reads. Measured on a repository that deleted 420 documents in a
+    day: every one of the resulting job failures described a file its author
+    had meant to delete.
+
+    A file is only believed gone when the directory that held it is
+    readable. An unmounted volume makes every file under it look deleted,
+    and emptying an index on that evidence is the one outcome worse than a
+    noisy counter — so that case still raises.
+
+    Returns ``True`` when the job is done and the caller must return.
+    """
+    from rtfm.core.freshness import deleted_source_is_certain
+    if not deleted_source_is_certain(str(abs_path), None):
+        return False
+    lib = Library(str(worker.db_path))
+    try:
+        removed = lib.remove_file(rel, corpus)
+    finally:
+        lib.close()
+    worker._log(f"ingest [{corpus}] {rel}: deleted before it could be read"
+                + (" — taken out of the index" if removed else " — was not indexed"))
+    return True
+
+
 def handle_ingest(job: Job, worker: "JobContext") -> None:
     """P1 — ingest a single file.
 
@@ -313,6 +346,8 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
     abs_path = root / rel
 
     if not abs_path.is_file():
+        if _vanished_before_we_read_it(abs_path, rel, corpus, worker):
+            return
         raise FileNotFoundError(f"{abs_path} no longer on disk")
 
     # Slug + ingest go through the same helper :func:`rtfm.core.sync._path_to_slug`

@@ -86,7 +86,7 @@ def _coerce_float(value, default: float) -> float:
 
 # ── Progressive disclosure helpers ───────────────────────────────────────
 
-def _deduplicate_by_source(results, limit: int):
+def _deduplicate_by_source(results, limit: int, lib=None):
     """Keep only the best chunk per unique source file.
 
     Two-pass dedup:
@@ -136,7 +136,12 @@ def _deduplicate_by_source(results, limit: int):
     # resolver is the *same* one the CLI uses, so both report identical paths.
     from rtfm.core.pathresolve import (
         build_slug_root_resolver, owning_root, resolve_source_path)
-    roots_for_slug = build_slug_root_resolver(_get_library())
+    # The resolver has to come from the index the results came *from*: a
+    # neighbour's slugs mean nothing to our own sync roots, and resolving
+    # them against ours yields paths that do not exist — which then reads,
+    # correctly and uselessly, as "every one of these files is deleted".
+    roots_for_slug = build_slug_root_resolver(lib if lib is not None
+                                              else _get_library())
 
     for entry in ranked:
         entry["count"] = len(entry["all"])
@@ -190,7 +195,7 @@ def _catch_up_before_empty_answer() -> bool:
         return False
 
 
-def _verify_freshness(entries: list[dict]) -> bool:
+def _verify_freshness(entries: list[dict], lib=None) -> bool:
     """Check answered sources against disk, and repair before answering.
 
     The index is eventually consistent; an agent must never be left to
@@ -212,13 +217,19 @@ def _verify_freshness(entries: list[dict]) -> bool:
     try:
         from rtfm.core import freshness
 
-        lib = _get_library()
+        if lib is None:
+            lib = _get_library()
+        # A project we are only visiting is never written to: its worker
+        # owns its queue, and a reader that queues work into someone else's
+        # index is a second writer by another name. Its drift is reported,
+        # not repaired.
+        visiting = bool(getattr(lib, "read_only", False)) or lib is not _library
         verdicts = freshness.verify(
             lib, [(e.get("abs_path", ""), e.get("filepath", "")) for e in entries])
         if not verdicts:
             return False
 
-        repairable = []
+        repairable, gone, withheld = [], [], []
         for entry in entries:
             found = verdicts.get(entry.get("abs_path", ""))
             if not found:
@@ -228,6 +239,28 @@ def _verify_freshness(entries: list[dict]) -> bool:
                     and found.get("corpus")):
                 repairable.append(
                     (entry["root"], found["corpus"], found["filepath"]))
+            elif (found["verdict"] == freshness.GONE and found.get("corpus")
+                  and freshness.deleted_source_is_certain(
+                      entry.get("abs_path", ""), entry.get("root"))):
+                withheld.append(entry)
+                gone.append((found["corpus"], found["filepath"]))
+
+        # Content that is not on disk any more is not an answer, and
+        # labelling it as one leaves the reading to the agent. Measured on a
+        # repository that had just condensed 338 documents into one: eleven
+        # of twelve results named files that no longer existed, the one
+        # surviving authority was buried under them, and the agent concluded
+        # that nothing decided the question. They are withheld and their
+        # removal is queued; the worker re-checks the disk before acting.
+        if visiting:
+            # Say what is wrong; leave the fixing to whoever owns the index.
+            return False
+        for entry in withheld:
+            entries.remove(entry)
+        removed = freshness.queue_removals(str(lib.db_path), gone)
+        if withheld:
+            log("freshness", f"{len(withheld)} deleted source(s) withheld "
+                             f"from the answer, {removed} queued for removal")
 
         job_ids = freshness.requeue(str(lib.db_path), repairable)
         budget = freshness.refresh_wait_seconds()
@@ -254,7 +287,7 @@ def _verify_freshness(entries: list[dict]) -> bool:
 
 
 def _expand_freshness(abs_path: str, filepath: str, corpus: str,
-                      root: str | None) -> tuple[str, bool]:
+                      root: str | None, lib=None) -> tuple[str, bool]:
     """Reconcile an expanded file with its index before reading it.
 
     Returns ``(warning, repaired)``. ``repaired`` means the file was out of
@@ -268,13 +301,16 @@ def _expand_freshness(abs_path: str, filepath: str, corpus: str,
     try:
         from rtfm.core import freshness
 
-        lib = _get_library()
+        if lib is None:
+            lib = _get_library()
         verdicts = freshness.verify(lib, [(abs_path, filepath)])
         found = verdicts.get(abs_path)
         if not found:
             return "", False
 
-        if found["verdict"] == freshness.STALE and root:
+        # A project we are only visiting is reported on, never written to.
+        visiting = bool(getattr(lib, "read_only", False)) or lib is not _library
+        if found["verdict"] == freshness.STALE and root and not visiting:
             job_ids = freshness.requeue(
                 str(lib.db_path), [(root, found.get("corpus") or corpus, filepath)])
             budget = freshness.refresh_wait_seconds()
@@ -287,7 +323,8 @@ def _expand_freshness(abs_path: str, filepath: str, corpus: str,
         log("freshness", f"expand on {found['verdict']}: {abs_path}")
         return (f"⚠ {found['verdict']} — content below is read from disk and "
                 f"current; the line ranges and sections come from the index "
-                f"and may have shifted. Re-indexing queued.", False)
+                f"and may have shifted."
+                + ("" if visiting else " Re-indexing queued."), False)
     except Exception:
         return "", False
 
@@ -442,7 +479,7 @@ class NoIndexHere(RuntimeError):
     just an honest answer, and far better than the alternative."""
 
 
-def _get_library():
+def _get_library(project: str | None = None):
     """Return the Library singleton, opening an existing index only.
 
     The server never creates one. It is a reader, and creating on open is
@@ -466,6 +503,9 @@ def _get_library():
     """
     global _library, _library_identity
     from rtfm.core.library import Library
+
+    if project:
+        return _get_foreign_library(project)
 
     db_path = os.environ.get("RTFM_DB")
     if not db_path:
@@ -492,6 +532,46 @@ def _get_library():
                 f"Use your own file tools in the meantime."
             ) from None
     return _library
+
+
+#: Indexes of *other* projects, opened on demand and kept for the session.
+#: Keyed by the resolved database path, and re-validated by inode on every
+#: call exactly like the local one — a neighbour's index is republished far
+#: more often than one's own.
+_foreign: dict[str, tuple[object, tuple[int, int] | None]] = {}
+_foreign_lock = threading.Lock()
+
+
+def _get_foreign_library(project: str):
+    """Open another project's index, read-only if that is all it allows.
+
+    The knowledge that binds a workshop of repositories together lives in
+    none of them, and an index resolved from the working directory cannot
+    reach it: the query comes back empty, and an empty answer reads as "no
+    such rule exists". This is the way out of that, and it is deliberately
+    a *read*: nothing here writes to a project we are visiting.
+    """
+    from rtfm.core.library import Library
+    from rtfm.core.projects import resolve_project_db, UnknownProject
+
+    try:
+        db_path = str(resolve_project_db(project))
+    except UnknownProject as exc:
+        raise NoIndexHere(str(exc)) from None
+
+    identity = _db_identity(db_path)
+    with _foreign_lock:
+        cached = _foreign.get(db_path)
+        if cached is not None and cached[1] == identity:
+            return cached[0]
+        if cached is not None:
+            try:
+                cached[0].close()
+            except Exception:
+                pass
+        lib = Library(db_path, create=False)
+        _foreign[db_path] = (lib, identity)
+        return lib
 
 
 def _db_identity(db_path):
@@ -538,6 +618,7 @@ def rtfm_search(
     search_type: str = "fts",
     freshness_weight: float = 0.0,
     centrality_weight: float = 0.0,
+    project: str | None = None,
 ) -> str:
     """Search the indexed knowledge base. Returns ranked source paths
     with line ranges, no content. Use rtfm_expand to read content.
@@ -549,9 +630,12 @@ def rtfm_search(
         search_type: "fts" | "semantic" | "hybrid"
         freshness_weight: boost recently indexed files (0.0–0.5)
         centrality_weight: boost files with many incoming edges (0.0–0.5)
+        project: another project's index to search instead of this one —
+            its name (``"hub"``), or its path when two projects share a
+            name. Omit for the project you are working in.
     """
     t0 = time.time()
-    lib = _get_library()
+    lib = _get_library(project)
 
     # Defensive coercion: some MCP clients pass ints as strings
     limit = _coerce_int(limit, 5)
@@ -577,7 +661,7 @@ def rtfm_search(
         return found
 
     results = _run()
-    if not results and _catch_up_before_empty_answer():
+    if not results and not project and _catch_up_before_empty_answer():
         results = _run()
     elapsed = time.time() - t0
 
@@ -586,13 +670,13 @@ def rtfm_search(
         return f"No results found for: {query}"
 
     # Deduplicate: 1 best chunk per source
-    deduped = _deduplicate_by_source(results, limit)
-    if _verify_freshness(deduped):
+    deduped = _deduplicate_by_source(results, limit, lib)
+    if _verify_freshness(deduped, lib):
         # A source had drifted and has just been re-indexed. The ranking and
         # the line ranges were computed from the old content, so ask again
         # rather than hand back an answer we know was built on stale rows.
         results = _run()
-        deduped = _deduplicate_by_source(results, limit) if results else []
+        deduped = _deduplicate_by_source(results, limit, lib) if results else []
         elapsed = time.time() - t0
         if not deduped:
             return f"No results found for: {query}"
@@ -602,6 +686,47 @@ def rtfm_search(
     for entry in deduped:
         lines.append(_format_source_line(entry))
 
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def rtfm_coverage(project: str | None = None) -> str:
+    """How much of a project this index actually holds.
+
+    Say this before answering from the index when completeness matters: a
+    partial index read as a complete one is how an absent result becomes
+    "there is nothing on the subject".
+
+    The denominator is the scan's own list of files — not everything in the
+    directory. Logs, lock files, state files and build output are not
+    counted as gaps, because RTFM was never going to index them.
+
+    Args:
+        project: another project to measure — its name ("hub"), or its path
+            when two projects share a name. Omit for the current one.
+    """
+    from rtfm.core.coverage import measure
+
+    lib = _get_library(project)
+    root = Path(lib.db_path).parent.parent
+    try:
+        cov = measure(root, Path(lib.db_path))
+    except Exception as exc:
+        return f"coverage: could not measure {root} — {exc}"
+
+    lines = [cov.one_line()]
+    if len(cov.sources) > 1 or any(s.error for s in cov.sources):
+        for src in cov.sources:
+            if src.error:
+                lines.append(f"  [{src.corpus}] {src.root}: unreadable — {src.error}")
+            else:
+                lines.append(f"  [{src.corpus}] {src.root}: "
+                             f"{src.readable}/{src.indexable} "
+                             f"({100 * src.ratio:.1f}%)")
+    if cov.unaccounted:
+        lines.append(f"  {cov.unaccounted} tracked file(s) under no configured "
+                     f"source — indexed from a directory no longer listed")
+    log("coverage", f"project={project!r} {cov.readable}/{cov.indexable}")
     return "\n".join(lines)
 
 
@@ -726,6 +851,7 @@ def rtfm_books(
     corpus: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    project: str | None = None,
 ) -> str:
     """List indexed books with per-corpus summary and pagination.
 
@@ -733,11 +859,13 @@ def rtfm_books(
         corpus: filter by corpus name (optional)
         limit: max books per page (default 50, 0 for all)
         offset: skip N books for pagination (default 0)
+        project: another project's index to read instead of this one — its
+            name (``"hub"``), or its path when two projects share a name.
     """
     limit = _coerce_int(limit, 50)
     offset = _coerce_int(offset, 0)
     log("books", f"corpus={corpus!r} limit={limit} offset={offset}")
-    lib = _get_library()
+    lib = _get_library(project)
     books = lib.list_books(corpus=corpus)
     if not books:
         return "No books indexed."
@@ -954,6 +1082,7 @@ def rtfm_context(
     subject: str,
     scope: str | None = None,
     limit: int = 5,
+    project: str | None = None,
 ) -> str:
     """Get sources relevant to a subject. Returns paths + line ranges,
     no content. Use rtfm_expand to read.
@@ -962,9 +1091,11 @@ def rtfm_context(
         subject: topic, concept, file path, or question
         scope: corpus filter (optional)
         limit: max sources (default 5)
+        project: another project's index to read instead of this one — its
+            name (``"hub"``), or its path when two projects share a name.
     """
     t0 = time.time()
-    lib = _get_library()
+    lib = _get_library(project)
 
     limit = _coerce_int(limit, 5)
 
@@ -984,7 +1115,7 @@ def rtfm_context(
 
     # FTS search across all corpora (or scoped) — fast, no model loading
     results = lib.search(subject, limit=fetch_limit, corpus=scope)
-    if not results and _catch_up_before_empty_answer():
+    if not results and not project and _catch_up_before_empty_answer():
         results = lib.search(subject, limit=fetch_limit, corpus=scope)
 
     elapsed = time.time() - t0
@@ -994,11 +1125,11 @@ def rtfm_context(
         return f"No context found for: {subject}\nTip: use Grep/Glob as fallback."
 
     # Deduplicate: 1 best chunk per source
-    deduped = _deduplicate_by_source(results, limit)
-    if _verify_freshness(deduped):
+    deduped = _deduplicate_by_source(results, limit, lib)
+    if _verify_freshness(deduped, lib):
         # A source drifted and was just re-indexed — ask again (see rtfm_search).
         results = lib.search(subject, limit=fetch_limit, corpus=scope)
-        deduped = _deduplicate_by_source(results, limit) if results else []
+        deduped = _deduplicate_by_source(results, limit, lib) if results else []
         elapsed = time.time() - t0
         if not deduped:
             return f"No context found for: {subject}\nTip: use Grep/Glob as fallback."
@@ -1020,6 +1151,7 @@ def rtfm_expand(
     query: str | None = None,
     offset: int = 0,
     count: int = 1,
+    project: str | None = None,
 ) -> str:
     """Read content of an indexed file with line numbers.
 
@@ -1031,9 +1163,11 @@ def rtfm_expand(
         query: filter chunks by relevance within the file
         offset: pagination offset (default 0)
         count: chunks to return, 0 for all remaining (default 1)
+        project: another project's index to read instead of this one — its
+            name (``"hub"``), or its path when two projects share a name.
     """
     t0 = time.time()
-    lib = _get_library()
+    lib = _get_library(project)
     conn = lib._get_conn()
 
     offset = _coerce_int(offset, 0)
@@ -1049,14 +1183,15 @@ def rtfm_expand(
     book_file = book_row["filename"] or ""
     corpus = book_row["corpus"] or ""
     from rtfm.core.pathresolve import owning_root, resolve_source_path
-    corpus_roots = _get_library().list_sync_roots(corpus)
+    corpus_roots = lib.list_sync_roots(corpus)
     abs_path = resolve_source_path(book_file, corpus_roots)
     sync_root = owning_root(abs_path, corpus_roots)
 
     # Content below is read live off disk, so it is never stale — but the
     # chunk boundaries come from the index, and they drift as soon as lines
     # are added above. Repair that before reading; say so if we could not.
-    stale_note, repaired = _expand_freshness(abs_path, book_file, corpus, sync_root)
+    stale_note, repaired = _expand_freshness(abs_path, book_file, corpus,
+                                             sync_root, lib)
     if repaired:
         # The book row may have been rebuilt — resolve it again before
         # reading chunks, or we would read the rows we just replaced.

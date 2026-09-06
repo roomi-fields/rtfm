@@ -882,11 +882,53 @@ class TestFreshnessSignalling:
         assert job is not None and job.type == "ingest"
         assert job.priority == P_USER
 
-    def test_search_flags_a_deleted_file(self, mcp_db, tmp_path):
+    def test_search_withholds_a_deleted_file(self, mcp_db, tmp_path):
+        """A file that is gone is not an answer.
+
+        It used to come back labelled, which leaves the reading to the
+        agent. On a repository that had just condensed 338 documents into
+        one, eleven of twelve results named files that no longer existed,
+        the surviving authority ranked below them, and the agent concluded
+        that nothing decided the question.
+        """
         from rtfm.mcp import rtfm_search
 
         (tmp_path / "doc.md").unlink()
-        assert "deleted since indexing" in rtfm_search("consciousness", limit=3)
+        out = rtfm_search("consciousness", limit=3)
+        assert "doc.md" not in out
+        assert "deleted since indexing" not in out
+
+    def test_search_asks_for_the_deleted_file_to_be_taken_out(
+            self, mcp_db, tmp_path):
+        from rtfm.core.queue import P_USER, Queue
+        from rtfm.mcp import rtfm_search
+
+        (tmp_path / "doc.md").unlink()
+        rtfm_search("consciousness", limit=3)
+
+        q = Queue(str(mcp_db))
+        jobs = []
+        while (job := q.dequeue()) is not None:
+            jobs.append(job)
+        q.close()
+        removals = [j for j in jobs if j.type == "remove"]
+        assert removals, "the index was left describing a file that is gone"
+        assert removals[0].priority == P_USER
+
+    def test_a_source_directory_that_vanished_is_not_a_deletion(
+            self, mcp_db, tmp_path, monkeypatch):
+        """An unmounted volume makes every file under it read as deleted.
+
+        Withholding on that evidence would empty a whole corpus out of the
+        answers for as long as the outage lasts, so the verdict is only
+        believed when the directory that held the file is readable.
+        """
+        from rtfm.core import freshness
+
+        assert not freshness.deleted_source_is_certain(
+            str(tmp_path / "parti" / "doc.md"), str(tmp_path / "parti"))
+        assert freshness.deleted_source_is_certain(
+            str(tmp_path / "doc.md"), str(tmp_path))
 
     def test_expand_warns_that_line_ranges_may_have_shifted(self, mcp_db, tmp_path):
         from rtfm.mcp import rtfm_expand

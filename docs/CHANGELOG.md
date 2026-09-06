@@ -7,6 +7,71 @@ description: >-
 
 # Changelog
 
+## [0.41.0] — 2026-09-06
+
+### Added — reaching another project's index by name
+
+RTFM resolves its database from the working directory. That is right for the
+ordinary case and wrong for the one that matters most in a workshop of
+several repositories: the knowledge that binds them together lives in none
+of them. A rule governing sixteen repositories is kept once, somewhere
+shared, and an agent inside one of them could not reach it — its search
+resolved to its own index, the shared one was not in it, and the query came
+back empty. An empty answer reads as "there is no such rule".
+
+Measured on 2026-09-06: an agent asked whether a project rule settled a
+technical question, found nothing, concluded that nothing settled it, and
+came within one step of deciding alone what had been decided a week earlier.
+The rule existed, dated, and prescribed the order of the steps to take.
+
+`rtfm_search`, `rtfm_context`, `rtfm_expand` and `rtfm_books` take a
+`project`: a name (`"hub"`), or a path when two projects share a name — a
+working tree and its published copy do, and they hold different content, so
+that ambiguity is refused rather than guessed. Names come from the registry
+the supervisor already keeps, and an unknown one is answered with the list
+of reachable ones.
+
+A visit is a read. A neighbour's index has its own worker, and a reader that
+queues work into it is a second writer under another name — so drift in a
+visited project is reported, never repaired, and paths are resolved against
+the index the results came from rather than our own.
+
+### Added — `rtfm coverage` and `rtfm_coverage`
+
+Coverage was being measured by hand, as books over files in the tree,
+because nothing authoritative existed. That denominator counts logs, lock
+files, state files and build output the scan never looks at, so a project
+reads as far more full of holes than it is: one repository measured 98.4%
+where its own figure had been showing a fraction of that.
+
+The denominator is now the scan's own list — same walk, same exclusions,
+same configuration. The measure separates the three ways a file can be
+missing: not indexed yet, indexed with nothing readable behind it, and
+tracked under a source no longer configured.
+
+### Fixed — a file deleted before its turn is a removal, not a failure
+
+A scan lists files; a job reads them later. On a repository people are
+working in, some of those files are gone by the time their turn comes, and
+that is the ordinary race, not a fault. It was counted as a failed job.
+Measured on a repository that deleted 420 documents in a day: every one of
+the resulting failures described a file its author had meant to delete, and
+a failure count full of non-events is one nobody reads.
+
+The file is now taken out of the index and the job completes. A file is only
+believed gone when the directory that held it is readable — an unmounted
+volume makes everything under it look deleted, and emptying an index on that
+evidence is the one outcome worse than a noisy counter.
+
+### Changed — a search no longer offers content that is not there
+
+A result whose file has been deleted used to come back labelled, which
+leaves the reading to the agent. On a repository that had just condensed 338
+documents into one, eleven of twelve results named files that no longer
+existed, the one surviving authority ranked below them, and the agent
+concluded that nothing decided the question. Those results are now withheld
+and their removal queued, under the same rule about unreachable directories.
+
 ## [0.40.0] — 2026-09-06
 
 ### Added — an index repairs itself on upgrade

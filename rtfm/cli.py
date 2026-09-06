@@ -184,6 +184,22 @@ def _repair_stale_sources(lib, deduped, roots_for_slug) -> tuple[dict[str, str],
             if v["verdict"] == freshness.STALE and roots.get(p, (None, None))[1]
             and v.get("corpus")
         ]
+        # A file that is gone is not an answer. Withhold it and ask for it to
+        # be taken out, rather than hand back content with a label the reader
+        # has to act on — see the note in ``rtfm.mcp._verify_freshness``.
+        gone = [(v.get("corpus"), v["filepath"])
+                for p, v in verdicts.items()
+                if v["verdict"] == freshness.GONE and v.get("corpus")
+                and freshness.deleted_source_is_certain(
+                    p, roots.get(p, (None, None))[1])]
+        withheld = {roots[p][0] for p, v in verdicts.items()
+                    if v["verdict"] == freshness.GONE and p in roots
+                    and freshness.deleted_source_is_certain(
+                        p, roots.get(p, (None, None))[1])}
+        if withheld:
+            deduped[:] = [e for e in deduped
+                          if e["best"].chunk.book_slug not in withheld]
+            freshness.queue_removals(str(lib.db_path), gone)
         job_ids = freshness.requeue(str(lib.db_path), repairable)
         budget = freshness.refresh_wait_seconds()
         if (job_ids and budget > 0 and freshness.indexer_is_running()
@@ -2419,6 +2435,45 @@ def cmd_repair(args):
     print("repair: the worker re-indexes them; watch with `rtfm status`.")
 
 
+def cmd_coverage(args):
+    """How much of the project the index actually holds.
+
+    The number people build by hand — books divided by files in the tree —
+    counts logs, lock files and build output the scan never looks at, and so
+    reports a project as far more full of holes than it is. This uses the
+    scan's own list as the denominator.
+    """
+    from rtfm.config import find_rtfm_root
+    from rtfm.core.coverage import measure
+
+    root = find_rtfm_root()
+    if root is None:
+        sys.exit("coverage: no .rtfm/ project root in the cwd chain.")
+    cov = measure(root)
+    if getattr(args, "json", False):
+        import json as _json
+        print(_json.dumps({
+            "indexable": cov.indexable, "readable": cov.readable,
+            "ratio": round(cov.ratio, 4), "unaccounted": cov.unaccounted,
+            "sources": [{"corpus": s.corpus, "root": s.root,
+                         "indexable": s.indexable, "readable": s.readable,
+                         "tracked_not_readable": s.tracked_not_readable,
+                         "missing": s.missing, "error": s.error}
+                        for s in cov.sources]}, indent=2))
+        return
+    print(cov.one_line())
+    if len(cov.sources) > 1 or any(s.error for s in cov.sources):
+        for s in cov.sources:
+            if s.error:
+                print(f"  [{s.corpus}] {s.root}: unreadable — {s.error}")
+            else:
+                print(f"  [{s.corpus}] {s.root}: "
+                      f"{s.readable}/{s.indexable} ({100 * s.ratio:.1f}%)")
+    if cov.unaccounted:
+        print(f"  {cov.unaccounted} tracked file(s) under no configured "
+              f"source — indexed from a directory no longer listed")
+
+
 def cmd_audit(args):
     """Check what RTFM must be able to say about itself, and say it.
 
@@ -3048,6 +3103,14 @@ def main():
         "repair",
         help="Clear index records the current code can no longer produce")
     p_repair.set_defaults(func=cmd_repair)
+
+    # coverage
+    p_cov = subparsers.add_parser(
+        "coverage",
+        help="How much of the project the index actually holds")
+    p_cov.add_argument("--json", action="store_true",
+                       help="Machine-readable output.")
+    p_cov.set_defaults(func=cmd_coverage)
 
     # monitor
     p_monitor = subparsers.add_parser("monitor", help="Tail the RTFM log (live MCP/hook activity)")

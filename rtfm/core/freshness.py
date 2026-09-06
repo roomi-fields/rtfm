@@ -191,6 +191,60 @@ def verify(lib, items: Iterable[tuple[str, str]]) -> dict[str, dict]:
     return verdicts
 
 
+
+def deleted_source_is_certain(abs_path: str, root: Optional[str]) -> bool:
+    """Whether "this file is gone" can be believed.
+
+    A missing file and an unreachable one look identical to ``stat``: an
+    unmounted volume, a network share that dropped, a project directory
+    borrowed by a publication for a second — every file under them reads as
+    deleted. Dropping their content from an answer on that evidence would
+    empty the index of a whole corpus for as long as the outage lasts.
+
+    So the verdict is only believed when the directory that held the file is
+    itself readable. That distinguishes a file someone deleted from a place
+    that is not there right now, which is the whole question.
+    """
+    try:
+        parent = Path(abs_path).parent
+        if not parent.is_dir():
+            return False
+        if root:
+            root_path = Path(root)
+            if not root_path.is_dir():
+                return False
+        return True
+    except OSError:
+        return False
+
+
+def queue_removals(db_path: str, gone: Iterable[tuple[str, str]]) -> int:
+    """Ask for deleted files to be taken out of the index.
+
+    *gone* items are ``(corpus, relative_path)``. Best-effort, like
+    :func:`requeue`: a read that noticed the deletion must still answer.
+    The worker checks the disk again before acting, so a file that comes
+    back between the search and the job is kept.
+    """
+    jobs = [t for t in gone if t[0] and t[1]]
+    if not jobs:
+        return 0
+    try:
+        from rtfm.core.queue import Queue, P_USER
+        q = Queue(db_path)
+        try:
+            n = 0
+            for corpus, rel in jobs:
+                if q.enqueue("remove", {"corpus": corpus, "filepath": rel},
+                             priority=P_USER) is not None:
+                    n += 1
+            return n
+        finally:
+            q.close()
+    except Exception:
+        return 0
+
+
 def requeue(db_path: str, stale: Iterable[tuple[str, str, str]]) -> list[int]:
     """Queue a top-priority re-ingest for files found out of date.
 
