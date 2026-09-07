@@ -7,6 +7,48 @@ description: >-
 
 # Changelog
 
+## [0.43.0] — 2026-09-07
+
+### Fixed — the write-ahead file never gave its space back
+
+Beside one 4.36 GB index sat a 4.37 GB write-ahead file. A checkpoint
+reported three live pages in it: everything else was space long since
+written into the database and never handed back. `journal_size_limit`
+defaults to "no limit", so SQLite keeps the file at whatever high-water mark
+a heavy re-index once pushed it to, for the life of the database. A
+truncating checkpoint reclaimed all of it in a tenth of a second.
+
+Every connection now bounds it at 64 MB, so it cannot happen again, and the
+hourly reconcile truncates a journal already over that bound — which is what
+existing indexes need, their file having grown before the limit existed.
+
+The write-ahead file is not a log and holds no history: after a checkpoint
+its content is already in the database, so there is nothing in it to keep
+for a while. There is only space to give back.
+
+### Changed — a finished job is forgotten after a month
+
+The record of jobs run is worth keeping long enough to answer "what did the
+index do last month", and no longer. One project held 766 000 finished rows,
+640 MB — the second-largest thing in its database — and a failure count that
+still reported a defect fixed four days earlier. A counter that never
+forgets is one nobody reads. `done` and `failed` rows older than thirty days
+are dropped by the hourly reconcile; anything pending or running is the
+queue itself and is never touched, whatever its age.
+
+### Fixed — `rtfm history` took an identity nobody could guess
+
+It accepted a book slug and nothing else. `CLAUDE.md` is filed under
+`default--claude` — a name no one would guess, and one that for files
+indexed before 0.30 does not even carry the extension. So the command
+answered "No version history" while fifty versions of the file sat in the
+index, and a workshop of sixteen repositories concluded that RTFM's version
+history did not work anywhere.
+
+It takes a path now, like every other command that names a file, and the
+rule that turns a path into a document is the one `rtfm_expand` already used
+— moved to one place so the two cannot drift apart. A slug still works.
+
 ## [0.42.0] — 2026-09-07
 
 ### Added — `.rtfmignore` can say "index this, but keep no history of it"

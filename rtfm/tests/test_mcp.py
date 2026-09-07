@@ -536,41 +536,44 @@ class TestMetadataOnlyOutput:
 
 
 class TestResolveBookByPath:
-    """Tests for _resolve_book_by_path helper."""
+    """Tests for the shared path→book rule (rtfm.core.pathresolve)."""
 
     def test_resolve_by_absolute_path(self, multi_source_db):
         """Resolve book using absolute file path via sync_root."""
-        from rtfm.mcp import _resolve_book_by_path, _get_library
+        from rtfm.core.pathresolve import resolve_book_by_path
+        from rtfm.mcp import _get_library
 
         lib = _get_library()
         conn = lib._get_conn()
 
         root = multi_source_db.parent
         filepath = str(root / "python_guide.md")
-        row = _resolve_book_by_path(conn, filepath)
+        row = resolve_book_by_path(conn, filepath)
 
         assert row is not None
         assert row["filename"] == "python_guide.md"
 
     def test_resolve_nonexistent(self, multi_source_db):
         """Unknown path returns None."""
-        from rtfm.mcp import _resolve_book_by_path, _get_library
+        from rtfm.core.pathresolve import resolve_book_by_path
+        from rtfm.mcp import _get_library
 
         lib = _get_library()
         conn = lib._get_conn()
 
-        row = _resolve_book_by_path(conn, "/nonexistent/file.py")
+        row = resolve_book_by_path(conn, "/nonexistent/file.py")
         assert row is None
 
     def test_resolve_relative_direct(self, multi_source_db):
         """Resolve book by exact match on relative filename."""
-        from rtfm.mcp import _resolve_book_by_path, _get_library
+        from rtfm.core.pathresolve import resolve_book_by_path
+        from rtfm.mcp import _get_library
 
         lib = _get_library()
         conn = lib._get_conn()
 
         # Relative filename stored by sync
-        row = _resolve_book_by_path(conn, "python_guide.md")
+        row = resolve_book_by_path(conn, "python_guide.md")
         assert row is not None
         assert row["filename"] == "python_guide.md"
 

@@ -85,3 +85,60 @@ def build_slug_root_resolver(lib) -> Callable[[str], list]:
         return root_cache[corpus]
 
     return roots_for_slug
+
+
+def resolve_book_by_path(conn, filepath: str):
+    """Resolve a file path to a book row.
+
+    Every command that names a file — expand, history — goes through this,
+    so they all agree on what a path means. Asking a user for the internal
+    identity instead is what made ``rtfm history`` unusable: ``CLAUDE.md``
+    is filed under ``default--claude``, a name nobody would guess and one
+    that, for files indexed before 0.30, does not even carry the extension.
+
+    Strict matching — no LIKE, no fuzzy:
+    1. Exact match on books.filename = filepath
+    2. Strip each sync_root prefix, match relative path
+
+    Returns sqlite3.Row or None.
+    """
+    # 1. Exact match (covers directly ingested files with absolute paths)
+    row = conn.execute(
+        "SELECT id, slug, title, filename, corpus, metadata FROM books WHERE filename = ?",
+        (filepath,),
+    ).fetchone()
+    if row:
+        return row
+
+    # 2. Strip sync_root and try relative path
+    roots = conn.execute("SELECT corpus, root_path FROM sync_roots").fetchall()
+    candidates = []
+    for root_row in roots:
+        root_path = root_row["root_path"].rstrip("/").rstrip("\\")
+        prefix = root_path + "/"
+        if filepath.startswith(prefix):
+            rel = filepath[len(prefix):]
+            row = conn.execute(
+                "SELECT id, slug, title, filename, corpus, metadata FROM books WHERE filename = ?",
+                (rel,),
+            ).fetchone()
+            if row:
+                candidates.append(row)
+
+    if len(candidates) == 1:
+        return candidates[0]
+    elif len(candidates) > 1:
+        # Dedup by last 2 path components, keep shortest path
+        by_key: dict[str, dict] = {}
+        for c in candidates:
+            fname = c["filename"] or ""
+            parts = fname.replace("\\", "/").split("/")
+            dedup_key = "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+            if dedup_key not in by_key or len(fname) < len(by_key[dedup_key]["filename"] or ""):
+                by_key[dedup_key] = c
+        results = list(by_key.values())
+        if len(results) == 1:
+            return results[0]
+        return min(results, key=lambda r: len(r["filename"] or ""))
+
+    return None

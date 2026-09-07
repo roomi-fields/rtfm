@@ -304,6 +304,15 @@ class Library:
         conn = sqlite3.connect(self.db_path, timeout=60)
         conn.execute("PRAGMA busy_timeout = 60000")
         conn.execute("PRAGMA journal_mode = WAL")
+        # Bound the write-ahead file. Without a limit SQLite never gives
+        # the space back: the file keeps its high-water mark for the life
+        # of the database, so one heavy re-index leaves a journal that
+        # outlives it by weeks. Measured on one project: 4.37 GB of
+        # journal beside a 4.36 GB database, of which three pages were
+        # live — the rest was reusable space the filesystem could not
+        # have back. 64 MB is well above any single transaction here and
+        # small enough that nobody notices it.
+        conn.execute("PRAGMA journal_size_limit = 67108864")
         return conn
 
     def _connect_read_only(self) -> sqlite3.Connection:

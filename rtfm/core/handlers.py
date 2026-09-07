@@ -675,6 +675,38 @@ def handle_ocr(job: Job, worker: "JobContext") -> None:
         lib.close()
 
 
+#: How long a finished job stays readable. Long enough to answer "what did
+#: the index do last month", short enough that the record of what it did is
+#: not itself the largest thing in the database: one project held 766 000
+#: finished rows, 640 MB, and a failure count that still reported a defect
+#: fixed four days earlier — a counter that never forgets is one nobody
+#: reads.
+JOB_HISTORY_DAYS = 30
+
+#: Below this the journal is doing its job and truncating it would only
+#: force the next writer to grow the file again. Above it, the space is a
+#: high-water mark left by work that is long finished.
+WAL_TRUNCATE_ABOVE_BYTES = 64 * 1024 * 1024
+
+
+def _forget_old_jobs(conn, worker: "JobContext") -> int:
+    """Drop finished jobs older than :data:`JOB_HISTORY_DAYS`.
+
+    Only ``done`` and ``failed`` rows: anything pending or running is the
+    queue itself, whatever its age.
+    """
+    try:
+        cur = conn.execute(
+            "DELETE FROM work_queue WHERE status IN ('done', 'failed') "
+            "AND finished_at IS NOT NULL "
+            "AND finished_at < datetime('now', ?)",
+            (f"-{JOB_HISTORY_DAYS} days",))
+        return cur.rowcount or 0
+    except Exception as exc:  # pragma: no cover - defensive
+        worker._log(f"vacuum: could not trim job history — {exc}")
+        return 0
+
+
 def handle_vacuum(job: Job, worker: "JobContext") -> None:
     """P4 — VACUUM the SQLite DB to reclaim space from deleted rows.
 
@@ -695,16 +727,33 @@ def handle_vacuum(job: Job, worker: "JobContext") -> None:
     reason = (job.payload or {}).get("reason") or "explicit"
     db_path = Path(worker.db_path)
     before_mb = db_path.stat().st_size / (1024 * 1024) if db_path.exists() else 0.0
+    wal = db_path.with_name(db_path.name + "-wal")
+    wal_before_mb = wal.stat().st_size / (1024 * 1024) if wal.exists() else 0.0
 
     conn = sqlite3.connect(str(db_path), isolation_level=None)
     try:
         conn.execute("PRAGMA busy_timeout = 60000")
+        forgotten = _forget_old_jobs(conn, worker)
+        # Hand the write-ahead file's space back before rebuilding. It is
+        # not a log and holds no history: after a checkpoint its content is
+        # already in the database, and what remains is a high-water mark
+        # SQLite never gives up on its own. One project carried 4.37 GB of
+        # it beside a 4.36 GB database, of which three pages were live.
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("VACUUM")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         conn.close()
 
     after_mb = db_path.stat().st_size / (1024 * 1024) if db_path.exists() else 0.0
-    worker._log(f"vacuum done — {before_mb:.0f}M → {after_mb:.0f}M ({reason})")
+    wal_after_mb = wal.stat().st_size / (1024 * 1024) if wal.exists() else 0.0
+    extra = []
+    if forgotten:
+        extra.append(f"{forgotten} finished job(s) forgotten")
+    if wal_before_mb - wal_after_mb >= 1:
+        extra.append(f"journal {wal_before_mb:.0f}M → {wal_after_mb:.0f}M")
+    worker._log(f"vacuum done — {before_mb:.0f}M → {after_mb:.0f}M ({reason})"
+                + (" — " + ", ".join(extra) if extra else ""))
 
 
 def handle_remove(job: Job, worker: "JobContext") -> None:
@@ -786,6 +835,32 @@ def handle_reconcile(job: Job, worker: "JobContext") -> None:
         f"re-queued {stats['chunks_requeued']} chunk(s) "
         f"as {stats['embed_jobs']} P5 batch(es)"
     )
+    # Housekeeping the index cannot do while it is busy, done here because
+    # this is the pass that runs on a clock rather than on an event. Both
+    # are cheap and both are about the *record* of the work, never the work.
+    import sqlite3
+    conn = sqlite3.connect(str(worker.db_path), isolation_level=None, timeout=60)
+    try:
+        conn.execute("PRAGMA busy_timeout = 60000")
+        forgotten = _forget_old_jobs(conn, worker)
+        if forgotten:
+            worker._log(f"reconcile: forgot {forgotten} finished job(s) older "
+                        f"than {JOB_HISTORY_DAYS} days")
+        # The write-ahead file is not a log and holds no history: once
+        # checkpointed its content is already in the database, and what is
+        # left is a high-water mark SQLite never hands back on its own.
+        wal = Path(str(worker.db_path) + "-wal")
+        before = wal.stat().st_size if wal.exists() else 0
+        if before > WAL_TRUNCATE_ABOVE_BYTES:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            after = wal.stat().st_size if wal.exists() else 0
+            worker._log(f"reconcile: journal {before / 1e6:.0f}M → "
+                        f"{after / 1e6:.0f}M")
+    except Exception as exc:  # housekeeping must never fail a reconcile
+        worker._log(f"reconcile: housekeeping skipped — {exc}")
+    finally:
+        conn.close()
+
     if job.payload.get("vacuum") and stats["orphans_purged"] > 0:
         queue = Queue(str(worker.db_path))
         try:

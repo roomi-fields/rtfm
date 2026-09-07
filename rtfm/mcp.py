@@ -22,6 +22,7 @@ import threading
 from pathlib import Path
 
 from rtfm._mcp import FastMCP
+from rtfm.core.pathresolve import resolve_book_by_path
 from rtfm.log import log
 
 mcp = FastMCP("rtfm")
@@ -360,57 +361,6 @@ def _render_chunk(abs_path: str, line_start: int | None, line_end: int | None,
         return "\n".join(result)
     except Exception as e:
         return f"[error reading {abs_path}: {e}]"
-
-
-def _resolve_book_by_path(conn, filepath: str):
-    """Resolve an absolute file path to a book row.
-
-    Strict matching — no LIKE, no fuzzy:
-    1. Exact match on books.filename = filepath
-    2. Strip each sync_root prefix, match relative path
-
-    Returns sqlite3.Row or None.
-    """
-    # 1. Exact match (covers directly ingested files with absolute paths)
-    row = conn.execute(
-        "SELECT id, slug, title, filename, corpus, metadata FROM books WHERE filename = ?",
-        (filepath,),
-    ).fetchone()
-    if row:
-        return row
-
-    # 2. Strip sync_root and try relative path
-    roots = conn.execute("SELECT corpus, root_path FROM sync_roots").fetchall()
-    candidates = []
-    for root_row in roots:
-        root_path = root_row["root_path"].rstrip("/").rstrip("\\")
-        prefix = root_path + "/"
-        if filepath.startswith(prefix):
-            rel = filepath[len(prefix):]
-            row = conn.execute(
-                "SELECT id, slug, title, filename, corpus, metadata FROM books WHERE filename = ?",
-                (rel,),
-            ).fetchone()
-            if row:
-                candidates.append(row)
-
-    if len(candidates) == 1:
-        return candidates[0]
-    elif len(candidates) > 1:
-        # Dedup by last 2 path components, keep shortest path
-        by_key: dict[str, dict] = {}
-        for c in candidates:
-            fname = c["filename"] or ""
-            parts = fname.replace("\\", "/").split("/")
-            dedup_key = "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
-            if dedup_key not in by_key or len(fname) < len(by_key[dedup_key]["filename"] or ""):
-                by_key[dedup_key] = c
-        results = list(by_key.values())
-        if len(results) == 1:
-            return results[0]
-        return min(results, key=lambda r: len(r["filename"] or ""))
-
-    return None
 
 
 def _format_source_line(entry: dict, rank: int = 0) -> str:
@@ -1174,7 +1124,7 @@ def rtfm_expand(
     count = _coerce_int(count, 1)
 
     # Resolve path → book (strict matching, no fuzzy)
-    book_row = _resolve_book_by_path(conn, source)
+    book_row = resolve_book_by_path(conn, source)
     if not book_row:
         return f"File not found in RTFM index: {source}\nTip: use rtfm_search to find indexed files."
 
@@ -1195,7 +1145,7 @@ def rtfm_expand(
     if repaired:
         # The book row may have been rebuilt — resolve it again before
         # reading chunks, or we would read the rows we just replaced.
-        book_row = _resolve_book_by_path(conn, source) or book_row
+        book_row = resolve_book_by_path(conn, source) or book_row
         book_slug = book_row["slug"]
         book_title = book_row["title"]
 
@@ -1391,7 +1341,7 @@ def rtfm_graph(
     book_slug = source
     book_row = conn.execute("SELECT slug FROM books WHERE slug = ?", (source,)).fetchone()
     if not book_row:
-        book_row = _resolve_book_by_path(conn, source)
+        book_row = resolve_book_by_path(conn, source)
         if book_row:
             book_slug = book_row["slug"]
         else:
@@ -1452,7 +1402,7 @@ def rtfm_history(
     book_slug = source
     book_row = conn.execute("SELECT slug FROM books WHERE slug = ?", (source,)).fetchone()
     if not book_row:
-        book_row = _resolve_book_by_path(conn, source)
+        book_row = resolve_book_by_path(conn, source)
         if book_row:
             book_slug = book_row["slug"]
         else:

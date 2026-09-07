@@ -167,6 +167,9 @@ class Queue:
                                    check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
+            # See ``Library._connect_read_write``: without this the journal
+            # never shrinks back from its high-water mark.
+            conn.execute("PRAGMA journal_size_limit=67108864")
             # 60s. The original 10s was breaking on multi-session Claude
             # Code setups where ~3 MCP servers + the worker + a CLI
             # ``rtfm sync`` all touch the same DB. WAL allows N readers

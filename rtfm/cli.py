@@ -2570,11 +2570,30 @@ def cmd_graph(args):
 
 
 def cmd_history(args):
-    """Show file version history or specific version."""
+    """Show file version history or specific version.
+
+    Takes a path, like every other command that names a file. It used to
+    take the internal identity and nothing else, which made the feature
+    unreachable in practice: ``CLAUDE.md`` is filed under ``default--claude``
+    — a name nobody would guess, and one that for files indexed before 0.30
+    does not even carry the extension. Measured on a workshop of sixteen
+    repositories: every attempt answered "No version history" while fifty
+    versions of the file sat in the index.
+    """
+    from rtfm.core.pathresolve import resolve_book_by_path
+
     lib = _get_lib(args)
+    source = args.source
+    if not lib.get_file_history(source):
+        row = resolve_book_by_path(lib._get_conn(), source)
+        if row is None and not os.path.isabs(source):
+            row = resolve_book_by_path(
+                lib._get_conn(), os.path.abspath(source))
+        if row is not None:
+            source = row["slug"]
 
     if args.version is not None:
-        ver = lib.get_file_version(args.source, args.version)
+        ver = lib.get_file_version(source, args.version)
         if not ver:
             print(f"Version {args.version} not found for: {args.source}")
         elif args.format == "json":
@@ -2584,7 +2603,7 @@ def cmd_history(args):
             print(f"Size: {ver.get('file_size', 0):,} bytes | Hash: {ver['content_hash'][:8]}")
             print(f"\n{ver['snapshot']}")
     else:
-        history = lib.get_file_history(args.source)
+        history = lib.get_file_history(source)
         if not history:
             print(f"No version history for: {args.source}")
         elif args.format == "json":
@@ -3051,7 +3070,7 @@ def main():
 
     # history
     p_history = subparsers.add_parser("history", help="Show file version history", parents=[db_parent])
-    p_history.add_argument("source", help="Book slug to query")
+    p_history.add_argument("source", help="File path (or book slug)")
     p_history.add_argument("--version", "-v", type=int, help="Show specific version content")
     p_history.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_history.set_defaults(func=cmd_history)
