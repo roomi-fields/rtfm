@@ -143,7 +143,7 @@ class MarkdownParser(BaseParser):
         """Parse a markdown file into chunks."""
         metadata = metadata or {}
 
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
 
         book_title = metadata.get('title') or extract_title_from_filename(path.stem)
@@ -304,7 +304,7 @@ class MarkdownParser(BaseParser):
 
     def extract_metadata(self, path: Path) -> dict:
         """Extract metadata from markdown file."""
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read(2000)  # Read first part for metadata
 
         metadata = {

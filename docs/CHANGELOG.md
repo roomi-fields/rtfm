@@ -7,6 +7,43 @@ description: >-
 
 # Changelog
 
+## [0.45.0] — 2026-09-07
+
+### Fixed — three bad bytes cost a whole document
+
+Markdown was the one format RTFM decoded strictly. A document carrying an
+emoji that had lost its first three bytes failed to decode, and the failure
+took the file with it: 40 KB of good prose, out of the index from the day it
+was written. Nothing recorded it — `ingest_failures` held zero rows — and
+the file was tracked as seen, so nothing would ever retry it.
+
+It cost more than its own absence. It carried a cross-reference that had
+gone dead, and the project's own checks never found it either: a file that
+cannot be read escapes every check that reads files.
+
+Markdown now decodes the way every other parser already did. Indexed
+leniently is not indexed silently: the ingest says how many bytes were not
+valid text, so whoever wonders why a passage reads oddly has something to go
+on.
+
+### Changed — the job record is bounded by count as well as age
+
+Thirty days assumes a steady rate of work, and a busy project has no such
+thing: one index produced 792 135 finished jobs inside the window, so the
+record of the work was the second-largest thing in the database while every
+row in it was legitimately recent. At most 20 000 finished jobs are kept,
+whatever their age. Pending and running rows are the queue itself and are
+never touched.
+
+### Fixed — freeing space did not give it back
+
+Deleting rows hands their space to SQLite, not to the disk: the file keeps
+it for future rows. That is right for a few thousand rows and wrong for what
+housekeeping frees — one index sat at 4.36 GB of which 3.30 GB was space it
+had already released and would never use again, because a rebuild was only
+ever asked for after a purge of orphans. A pass that frees ten thousand rows
+or any stored history now asks for one.
+
 ## [0.44.0] — 2026-09-07
 
 ### Changed — version history is a read, so agents get it

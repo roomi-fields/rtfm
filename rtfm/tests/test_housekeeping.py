@@ -244,3 +244,119 @@ class TestHistoryIsReachableByPath:
     def test_an_unknown_file_says_so(self, indexed):
         _, db = indexed
         assert "No version history" in self._history(db, "jamais-vu.md")
+
+
+class TestTheCountBound:
+    """An age bound alone assumes a steady rate of work, and a busy project
+    has no such thing: one index produced 792 135 finished jobs inside the
+    thirty-day window, so the record of the work was the second-largest
+    thing in the database while every row in it was legitimately recent."""
+
+    @pytest.fixture
+    def busy(self, tmp_path):
+        from rtfm.core.handlers import JOB_HISTORY_MAX
+        db = tmp_path / "library.db"
+        q = Queue(db)
+        q.close()
+        conn = sqlite3.connect(db, isolation_level=None)
+        conn.execute("BEGIN")
+        conn.executemany(
+            "INSERT INTO work_queue (type, priority, payload, status, "
+            "created_at, finished_at) VALUES ('embed',50,?, 'done',"
+            "datetime('now'), datetime('now'))",
+            [(f'{{"n":{i}}}',) for i in range(JOB_HISTORY_MAX + 500)])
+        conn.execute("COMMIT")
+        return db, conn
+
+    def test_recent_work_beyond_the_bound_is_still_dropped(self, busy):
+        from rtfm.core.handlers import JOB_HISTORY_MAX
+        db, conn = busy
+        assert _forget_old_jobs(conn, _Worker(db)) == 500
+        assert conn.execute(
+            "SELECT COUNT(*) FROM work_queue").fetchone()[0] == JOB_HISTORY_MAX
+
+    def test_the_newest_are_the_ones_kept(self, busy):
+        db, conn = busy
+        _forget_old_jobs(conn, _Worker(db))
+        oldest, newest = conn.execute(
+            "SELECT MIN(id), MAX(id) FROM work_queue").fetchone()
+        assert oldest == 501 and newest == 20_500
+
+    def test_unfinished_work_survives_the_count_bound(self, busy):
+        db, conn = busy
+        conn.execute(
+            "INSERT INTO work_queue (type, priority, payload, status, "
+            "created_at) VALUES ('ingest',10,'{\"n\":-1}','pending',"
+            "datetime('now','-400 days'))")
+        _forget_old_jobs(conn, _Worker(db))
+        assert conn.execute(
+            "SELECT COUNT(*) FROM work_queue WHERE status='pending'"
+        ).fetchone()[0] == 1
+
+    def test_a_quiet_project_loses_nothing(self, tmp_path):
+        db = tmp_path / "library.db"
+        q = Queue(db)
+        q.close()
+        conn = sqlite3.connect(db, isolation_level=None)
+        conn.execute(
+            "INSERT INTO work_queue (type, priority, payload, status, "
+            "created_at, finished_at) VALUES ('embed',50,'{}','done',"
+            "datetime('now'), datetime('now'))")
+        assert _forget_old_jobs(conn, _Worker(db)) == 0
+
+
+class TestAskingForTheSpaceBack:
+    """Deleting rows hands their space to SQLite, not to the disk. One index
+    sat at 4.36 GB of which 3.30 GB was space it had already released and
+    would never use again."""
+
+    def _reconcile(self, db, payload=None):
+        from rtfm.core.handlers import handle_reconcile
+        from rtfm.core.queue import Job
+        worker = _Worker(db)
+        handle_reconcile(Job(id=1, type="reconcile", priority=40,
+                             payload=payload or {}, status="running",
+                             created_at="", started_at=None, finished_at=None,
+                             error=None, attempts=1), worker)
+        return worker
+
+    def _vacuums(self, db):
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            return conn.execute(
+                "SELECT COUNT(*) FROM work_queue WHERE type='vacuum'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_a_big_clear_out_asks_for_a_rebuild(self, tmp_path):
+        from rtfm.core.handlers import VACUUM_AFTER_ROWS_FREED
+        db = tmp_path / "library.db"
+        q = Queue(db)
+        q.close()
+        conn = sqlite3.connect(db, isolation_level=None)
+        conn.execute("BEGIN")
+        conn.executemany(
+            "INSERT INTO work_queue (type, priority, payload, status, "
+            "created_at, finished_at) VALUES ('embed',50,?,'done',"
+            "datetime('now','-90 days'), datetime('now','-90 days'))",
+            [(f'{{"n":{i}}}',) for i in range(VACUUM_AFTER_ROWS_FREED + 10)])
+        conn.execute("COMMIT")
+        conn.close()
+
+        self._reconcile(db)
+        assert self._vacuums(db) == 1
+
+    def test_a_small_one_does_not(self, tmp_path):
+        db = tmp_path / "library.db"
+        q = Queue(db)
+        q.close()
+        conn = sqlite3.connect(db, isolation_level=None)
+        conn.execute(
+            "INSERT INTO work_queue (type, priority, payload, status, "
+            "created_at, finished_at) VALUES ('embed',50,'{}','done',"
+            "datetime('now','-90 days'), datetime('now','-90 days'))")
+        conn.close()
+        self._reconcile(db)
+        assert self._vacuums(db) == 0, (
+            "a rebuild costs more than the space a handful of rows returns")

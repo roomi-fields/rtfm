@@ -7,6 +7,7 @@ be folded in later without changing behaviour.
 """
 
 import hashlib
+import pathlib
 import re
 
 
@@ -113,3 +114,25 @@ def merge_short_paragraphs(paragraphs: list[str]) -> list[str]:
             result.append(buffer)
 
     return result
+
+
+def read_text_lossy(path) -> tuple[str, int]:
+    """Read a text file, replacing bytes that are not valid text.
+
+    A file is not worth losing over a few bad bytes. One document in a
+    workshop of sixteen repositories carried an emoji missing its first
+    three bytes — three bytes in 40 KB — and a strict decode failed the
+    whole file. It was tracked as seen, no failure was recorded anywhere,
+    and it stayed out of the index from the day it was written. It also
+    carried a dead cross-reference nobody found, because a file that cannot
+    be read escapes the checks that read files.
+
+    Returns the text and the number of bytes that had to be replaced, so a
+    caller can say so instead of quietly serving damaged content.
+    """
+    raw = pathlib.Path(path).read_bytes()
+    try:
+        return raw.decode("utf-8"), 0
+    except UnicodeDecodeError:
+        text = raw.decode("utf-8", errors="replace")
+        return text, text.count("\ufffd")

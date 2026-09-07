@@ -296,6 +296,27 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
     )
 
 
+#: Beyond this a file is not damaged text, it is not text.
+UNDECODABLE_LIMIT = 64
+
+
+def _undecodable_bytes(path: Path) -> int:
+    """How many bytes of *path* are not valid text, capped for cost.
+
+    Zero for a healthy file, which is nearly all of them, at the price of
+    one decode attempt that stops at the first bad byte.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return 0
+    try:
+        raw.decode("utf-8")
+        return 0
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace").count("\ufffd")
+
+
 def _vanished_before_we_read_it(abs_path: Path, rel: str, corpus: str,
                                 worker: "JobContext") -> bool:
     """Handle a file that was listed by a scan and deleted before its turn.
@@ -389,6 +410,16 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
             book_slug = old_slug
         else:
             book_slug = lib.allocate_book_slug(book_slug, rel, corpus)
+
+        # Reading a file leniently keeps three bad bytes from costing the
+        # whole document — but a document served with holes in it must not
+        # be served silently, or the next person to wonder why a passage is
+        # missing has nothing to go on.
+        _damaged = _undecodable_bytes(abs_path)
+        if _damaged:
+            worker._log(f"ingest [{corpus}] {rel}: {_damaged} byte(s) are not "
+                        f"valid text and were replaced — the file is indexed, "
+                        f"those characters are not what it says")
 
         file_hash = _compute_hash(abs_path)
         try:
@@ -683,6 +714,18 @@ def handle_ocr(job: Job, worker: "JobContext") -> None:
 #: reads.
 JOB_HISTORY_DAYS = 30
 
+#: And no more than this many, whatever their age. An age bound alone
+#: assumes a steady rate of work, and a busy project has no such thing: one
+#: index produced 792 135 finished jobs inside the thirty-day window, so the
+#: record of the work was the second-largest thing in the database while
+#: every row in it was "recent". Twenty thousand is far more than any
+#: inspection reads and costs a few tens of megabytes.
+JOB_HISTORY_MAX = 20_000
+
+#: Enough freed rows that the file is worth rebuilding. Below it, the space
+#: will simply be reused and a rebuild costs more than it returns.
+VACUUM_AFTER_ROWS_FREED = 10_000
+
 #: Below this the journal is doing its job and truncating it would only
 #: force the next writer to grow the file again. Above it, the space is a
 #: high-water mark left by work that is long finished.
@@ -701,7 +744,17 @@ def _forget_old_jobs(conn, worker: "JobContext") -> int:
             "AND finished_at IS NOT NULL "
             "AND finished_at < datetime('now', ?)",
             (f"-{JOB_HISTORY_DAYS} days",))
-        return cur.rowcount or 0
+        dropped = cur.rowcount or 0
+        # Then the count bound. Keeping the newest rows by id rather than by
+        # date: ids are monotonic and a row with no finish stamp must not
+        # sort to the front of what is kept.
+        cur = conn.execute(
+            "DELETE FROM work_queue WHERE status IN ('done', 'failed') "
+            "AND id NOT IN (SELECT id FROM work_queue "
+            "               WHERE status IN ('done', 'failed') "
+            "               ORDER BY id DESC LIMIT ?)",
+            (JOB_HISTORY_MAX,))
+        return dropped + (cur.rowcount or 0)
     except Exception as exc:  # pragma: no cover - defensive
         worker._log(f"vacuum: could not trim job history — {exc}")
         return 0
@@ -879,12 +932,14 @@ def handle_reconcile(job: Job, worker: "JobContext") -> None:
     # this is the pass that runs on a clock rather than on an event. Both
     # are cheap and both are about the *record* of the work, never the work.
     import sqlite3
+    forgotten = dropped = 0
     conn = sqlite3.connect(str(worker.db_path), isolation_level=None, timeout=60)
     try:
         conn.execute("PRAGMA busy_timeout = 60000")
         forgotten = _forget_old_jobs(conn, worker)
         if forgotten:
-            worker._log(f"reconcile: forgot {forgotten} finished job(s) older "
+            worker._log(f"reconcile: forgot {forgotten} finished job(s) — "
+                        f"kept the last {JOB_HISTORY_MAX:,} and nothing older "
                         f"than {JOB_HISTORY_DAYS} days")
         dropped, freed = _forget_unwanted_history(conn, worker)
         if dropped:
@@ -905,10 +960,17 @@ def handle_reconcile(job: Job, worker: "JobContext") -> None:
     finally:
         conn.close()
 
-    if job.payload.get("vacuum") and stats["orphans_purged"] > 0:
+    # Deleting rows hands their space back to SQLite, not to the disk: the
+    # file keeps it for future rows. That is right for a few thousand rows
+    # and wrong for what housekeeping frees — one index sat at 4.36 GB of
+    # which 3.30 GB was space it had already released and would never use.
+    # So a pass that frees a lot asks for the file to be rebuilt.
+    freed_a_lot = forgotten >= VACUUM_AFTER_ROWS_FREED or dropped > 0
+    if (job.payload.get("vacuum") and stats["orphans_purged"] > 0) or freed_a_lot:
         queue = Queue(str(worker.db_path))
         try:
-            queue.enqueue("vacuum", {"reason": "after-reconcile"})
+            queue.enqueue("vacuum", {"reason": "after-housekeeping"
+                                     if freed_a_lot else "after-reconcile"})
         finally:
             queue.close()
 
