@@ -7,6 +7,27 @@ description: >-
 
 # Changelog
 
+## [0.44.0] — 2026-09-07
+
+### Changed — version history is a read, so agents get it
+
+`rtfm_history` was the only read-only tool held back from the default tool
+profile, alongside the ones that write. An agent could search, expand and
+walk the graph, but not ask what a file used to say — and had no way to know
+the answer existed. It joins the other reads, and takes `project` like them.
+
+### Added — `rtfm gc` clears archives the project no longer wants
+
+Declaring a file under `[versions]` in `.rtfmignore` stops the next copy
+from being made; it cannot undo the ones already stored. The hourly
+reconcile — which `rtfm gc` triggers — now drops the snapshots of files the
+project has declared unversioned. The file, its index entry and its
+searchability are untouched; only the stored copies of its past go.
+
+On the index that prompted the section: six mailboxes holding fifty
+near-identical copies each, two thirds of a 3.2 GB archive standing beside a
+300 MB index.
+
 ## [0.43.0] — 2026-09-07
 
 ### Fixed — the write-ahead file never gave its space back

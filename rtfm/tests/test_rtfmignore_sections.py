@@ -169,3 +169,102 @@ class TestTheSnapshotIsActuallySkipped:
             assert lib.search("precis", limit=3)
         finally:
             lib.close()
+
+
+class TestThePurgeOfWhatWasAlreadyStored:
+    """Declaring ``[versions]`` stops the next copy; it cannot undo the ones
+    already made. On the index that prompted the section, six mailboxes held
+    fifty near-identical copies each — two thirds of a 3.2 GB archive
+    standing beside a 300 MB index. This is the other half."""
+
+    @pytest.fixture
+    def archived(self, tmp_path):
+        from rtfm.core.library import Library
+        root = tmp_path / "projet"
+        (root / ".rtfm").mkdir(parents=True)
+        (root / "courrier").mkdir()
+        db = root / ".rtfm" / "library.db"
+        lib = Library(db)
+        lib.set_sync_root("default", str(root))
+        for rel in ("courrier/hub.md", "docs.md"):
+            f = root / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("Du contenu.\n" * 50)
+            slug = rel.replace("/", "-").replace(".", "-")
+            lib.ingest(f, corpus="default",
+                       metadata={"book_slug": slug, "source_file": rel})
+            lib.update_indexed_file(rel, "h", "default", slug,
+                                    file_size=f.stat().st_size)
+            for _ in range(3):
+                lib.save_file_version(slug, "h")
+        lib.close()
+        return root, db
+
+    def _reconcile(self, db):
+        from rtfm.core.handlers import handle_reconcile
+        from rtfm.core.queue import Job
+
+        class _W:
+            db_path = db
+
+            def __init__(self):
+                self.lines = []
+
+            def _log(self, msg):
+                self.lines.append(msg)
+        w = _W()
+        handle_reconcile(Job(id=1, type="reconcile", priority=40, payload={},
+                             status="running", created_at="", started_at=None,
+                             finished_at=None, error=None, attempts=1), w)
+        return w
+
+    def _snapshots(self, db, slug=None):
+        import sqlite3
+        c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            if slug is None:
+                return c.execute("SELECT COUNT(*) FROM file_versions").fetchone()[0]
+            return c.execute(
+                "SELECT COUNT(*) FROM file_versions v JOIN books b "
+                "ON b.id = v.book_id WHERE b.slug = ?", (slug,)).fetchone()[0]
+        finally:
+            c.close()
+
+    def test_without_the_section_nothing_is_dropped(self, archived):
+        root, db = archived
+        before = self._snapshots(db)
+        assert before > 0
+        self._reconcile(db)
+        assert self._snapshots(db) == before
+
+    def test_the_declared_files_lose_their_archive(self, archived):
+        root, db = archived
+        (root / ".rtfmignore").write_text("[versions]\ncourrier/*.md\n")
+        w = self._reconcile(db)
+        assert self._snapshots(db, "courrier-hub-md") == 0
+        assert any("keeps no history" in ln for ln in w.lines)
+
+    def test_the_others_keep_theirs(self, archived):
+        root, db = archived
+        (root / ".rtfmignore").write_text("[versions]\ncourrier/*.md\n")
+        self._reconcile(db)
+        assert self._snapshots(db, "docs-md") == 3
+
+    def test_the_file_itself_is_untouched(self, archived):
+        root, db = archived
+        (root / ".rtfmignore").write_text("[versions]\ncourrier/*.md\n")
+        self._reconcile(db)
+        assert (root / "courrier" / "hub.md").exists()
+        from rtfm.core.library import Library
+        lib = Library(db, create=False)
+        try:
+            assert "courrier/hub.md" in lib.list_indexed_files()
+        finally:
+            lib.close()
+
+    def test_a_second_pass_finds_nothing_left(self, archived):
+        root, db = archived
+        (root / ".rtfmignore").write_text("[versions]\ncourrier/*.md\n")
+        self._reconcile(db)
+        w = self._reconcile(db)
+        assert not any("keeps no history" in ln for ln in w.lines)

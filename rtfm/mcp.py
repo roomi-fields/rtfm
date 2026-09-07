@@ -1379,23 +1379,26 @@ def rtfm_graph(
 
 # ── History tools ────────────────────────────────────────────────────────
 
-@_admin_tool()
+@mcp.tool()
 def rtfm_history(
     source: str,
     version: int | None = None,
+    project: str | None = None,
 ) -> str:
     """Show version history of an indexed file, or retrieve a specific version.
 
     Each time a file is re-synced, its previous content is saved as a snapshot.
 
     Args:
-        source: Book slug or absolute file path.
+        source: file path (an identity also works).
         version: Version number to retrieve (optional). If omitted, lists all versions.
+        project: another project's index to read instead of this one — its
+            name ("hub"), or its path when two projects share a name.
     """
     if version is not None:
         version = _coerce_int(version, 0) or None
     log("history", f"source={source!r} version={version!r}")
-    lib = _get_library()
+    lib = _get_library(project)
     conn = lib._get_conn()
 
     # Resolve source

@@ -707,6 +707,46 @@ def _forget_old_jobs(conn, worker: "JobContext") -> int:
         return 0
 
 
+def _forget_unwanted_history(conn, worker: "JobContext") -> tuple[int, int]:
+    """Drop stored snapshots of files the project declared unversioned.
+
+    Declaring a file under ``[versions]`` in ``.rtfmignore`` stops the next
+    copy from being made; it cannot undo the ones already there. On the
+    index that prompted the section, six mailboxes held fifty near-identical
+    copies each — two thirds of a 3.2 GB archive standing beside a 300 MB
+    index. This is the other half of that declaration.
+
+    Returns ``(snapshots dropped, bytes they held)``.
+    """
+    try:
+        from rtfm.core.sync import history_is_wanted, load_version_ignore_spec
+        roots = [r[0] for r in conn.execute(
+            "SELECT DISTINCT root_path FROM sync_roots").fetchall()]
+        roots = [Path(r) for r in roots if r]
+        if not roots or not any(load_version_ignore_spec(r) for r in roots):
+            return (0, 0)
+
+        doomed: list[int] = []
+        freed = 0
+        for book_id, filename, size in conn.execute(
+                """SELECT v.book_id, b.filename, SUM(LENGTH(v.snapshot))
+                   FROM file_versions v JOIN books b ON b.id = v.book_id
+                   GROUP BY v.book_id""").fetchall():
+            rel = filename or ""
+            if rel and not any(history_is_wanted(root, rel) for root in roots):
+                doomed.append(book_id)
+                freed += size or 0
+        if not doomed:
+            return (0, 0)
+        marks = ",".join("?" * len(doomed))
+        cur = conn.execute(
+            f"DELETE FROM file_versions WHERE book_id IN ({marks})", doomed)
+        return (cur.rowcount or 0, freed)
+    except Exception as exc:  # pragma: no cover - defensive
+        worker._log(f"reconcile: could not trim stored history — {exc}")
+        return (0, 0)
+
+
 def handle_vacuum(job: Job, worker: "JobContext") -> None:
     """P4 — VACUUM the SQLite DB to reclaim space from deleted rows.
 
@@ -846,6 +886,10 @@ def handle_reconcile(job: Job, worker: "JobContext") -> None:
         if forgotten:
             worker._log(f"reconcile: forgot {forgotten} finished job(s) older "
                         f"than {JOB_HISTORY_DAYS} days")
+        dropped, freed = _forget_unwanted_history(conn, worker)
+        if dropped:
+            worker._log(f"reconcile: dropped {dropped} snapshot(s) of files "
+                        f"the project keeps no history of — {freed / 1e6:.0f}M")
         # The write-ahead file is not a log and holds no history: once
         # checkpointed its content is already in the database, and what is
         # left is a high-water mark SQLite never hands back on its own.
