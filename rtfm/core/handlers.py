@@ -378,7 +378,9 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
             old_slug = existing["book_slug"]
             old_hash = existing.get("file_hash", "")
             try:
-                lib.save_file_version(old_slug, old_hash, prune_limit=50)
+                from rtfm.core.sync import history_is_wanted
+                if history_is_wanted(root, rel):
+                    lib.save_file_version(old_slug, old_hash, prune_limit=50)
             except Exception:
                 pass  # versioning is best-effort
             # A file that has not moved keeps the identity it was indexed

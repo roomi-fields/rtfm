@@ -7,6 +7,37 @@ description: >-
 
 # Changelog
 
+## [0.42.0] — 2026-09-07
+
+### Added — `.rtfmignore` can say "index this, but keep no history of it"
+
+RTFM keeps a full copy of a file's text every time it changes, capped at
+fifty versions per file. Fifty is right for a source file of a few
+kilobytes and ruinous for a log or a mailbox: measured on one workshop, a
+24 MB mailbox appended to every few minutes held fifty near-identical copies
+of itself — 740 MB for one file — and six such files accounted for two
+thirds of a 3.2 GB archive, against roughly 300 MB for the index itself.
+
+The cap counts versions, not bytes, and nothing inside RTFM can tell an
+appended log from an edited document. The project can. `.rtfmignore` now
+takes section headers: everything above the first one keeps the meaning the
+file has always had — do not index this — and `[versions]` lists what to
+index while keeping no history of it.
+
+```
+dist/
+*.tmp.md
+
+[versions]
+courrier/*.md
+*.log
+```
+
+A file written before sections existed has no header, so all of its lines
+are still indexing rules and it reads exactly as it did. A misspelt header
+is ignored rather than read as a pattern, so a typo cannot silently drop a
+directory from the index.
+
 ## [0.41.0] — 2026-09-06
 
 ### Added — reaching another project's index by name

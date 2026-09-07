@@ -134,7 +134,77 @@ def _load_rtfmignore_spec(root: Path):
     (e.g. generated docs) — leave ``.gitignore`` honored but override
     with ``.rtfmignore``.
     """
-    return _load_pathspec(root / ".rtfmignore")
+    return _rtfmignore_sections(root).get(_INDEX_SECTION)
+
+
+#: The section a pattern belongs to when the file names none — what
+#: ``.rtfmignore`` has always meant: do not index this at all.
+_INDEX_SECTION = "index"
+
+#: Files to index, but keep no history for. RTFM stores a full copy of a
+#: file's text on every change (see ``save_file_version``), capped at fifty
+#: versions per file. Fifty is right for a source file of a few kilobytes
+#: and ruinous for a log or a mailbox: measured on one workshop, a 24 MB
+#: mailbox appended to every few minutes held fifty near-identical copies
+#: of itself — 740 MB for one file, and six such files accounted for two
+#: thirds of a 3.2 GB archive. The cap counts versions, not bytes, and
+#: nothing in it can tell an appended log from an edited document. The
+#: project can: this is where it says so.
+_VERSION_SECTION = "versions"
+
+_SECTIONS = (_INDEX_SECTION, _VERSION_SECTION)
+
+
+def _rtfmignore_sections(root: Path) -> dict:
+    """Parse ``.rtfmignore`` into one matcher per section.
+
+    The file is gitignore syntax with an addition of RTFM's own: a line of
+    the form ``[name]`` opens a section, and the patterns under it apply to
+    that concern instead of to indexing. Everything before the first header
+    keeps the meaning the file has always had, so a ``.rtfmignore`` written
+    before sections existed reads exactly as it did.
+
+    An unknown section name is ignored rather than treated as a pattern —
+    a typo must not silently exclude a directory called ``[versons]``.
+    """
+    path = root / ".rtfmignore"
+    if not path.is_file():
+        return {}
+    try:
+        import pathspec  # type: ignore
+    except ImportError:
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return {}
+
+    buckets: dict[str, list[str]] = {name: [] for name in _SECTIONS}
+    current = _INDEX_SECTION
+    for line in raw:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            name = stripped[1:-1].strip().lower()
+            current = name if name in _SECTIONS else None
+            continue
+        if current is not None:
+            buckets[current].append(line)
+    return {name: pathspec.PathSpec.from_lines("gitwildmatch", lines)
+            for name, lines in buckets.items() if any(
+                ln.strip() and not ln.strip().startswith("#") for ln in lines)}
+
+
+def load_version_ignore_spec(root: Path):
+    """Matcher for files this project keeps no history of, or ``None``."""
+    return _rtfmignore_sections(root).get(_VERSION_SECTION)
+
+
+def history_is_wanted(root: Path, rel: str) -> bool:
+    """Whether a snapshot of *rel* should be kept before it is re-indexed."""
+    spec = load_version_ignore_spec(root)
+    if spec is None:
+        return True
+    return not spec.match_file(rel.replace("\\", "/"))
 
 # ── mass-removal circuit breaker ────────────────────────────────────────────
 # A full sync deletes every indexed file not seen on disk. That is only
@@ -1102,7 +1172,9 @@ def sync(
                 snap_slug = old_info["book_slug"] if old_info and old_info.get("book_slug") else book_slug
                 old_hash = old_info["file_hash"] if old_info else ""
                 try:
-                    library.save_file_version(snap_slug, old_hash, prune_limit=retain_history)
+                    if history_is_wanted(root, rel):
+                        library.save_file_version(snap_slug, old_hash,
+                                                  prune_limit=retain_history)
                 except Exception:
                     pass  # Non-critical — versioning is best-effort
 
