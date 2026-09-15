@@ -7,6 +7,30 @@ description: >-
 
 # Changelog
 
+## [0.46.1] — 2026-09-15
+
+### Fixed — an index could still be created where no index belongs
+
+It happened three times on one machine, each time through a different
+creator, because the rule lived in none of them: a 27 GB index of twenty-six
+already-indexed projects; on 2026-07-29 a home directory and a development
+tree indexed whole, 9.9 GB of duplicates; and on 2026-09-07 the same
+development tree again, from the plugin at the start of a session opened at
+its root.
+
+The rule has one home now, and both creators — `rtfm init` and the plugin's
+session start — ask it first. Refused: the filesystem root, a home directory
+or anything above it, a directory inside an index directory, and a directory
+already holding an indexed project below it. A project that already has its
+own index may be initialised again.
+
+### Added — status and audit say when the plugin is behind
+
+The Claude Code plugin runs its own copy of RTFM, not the installed package.
+On one machine it stayed at 0.39.4 for eight days while the package reached
+0.45.0, and every fix in between reached no agent. `rtfm status` and
+`rtfm audit` now say so, with the command that updates it.
+
 ## [0.46.0] — 2026-09-15
 
 ### Fixed — the plugin created indexes that nobody ever scanned

@@ -1655,6 +1655,10 @@ def cmd_status(args):
             # Said here, unconditionally, because the block below only
             # speaks when the queue is busy — and an unenrolled project's
             # queue never is.
+            from rtfm.plugin.drift import warning as _drift_warning
+            _drift = _drift_warning(_root_for_worker)
+            if _drift:
+                print("\n" + _drift)
             from rtfm.core import registry as _registry
             if ((_rtfm_dir / "library.db").exists()
                     and not _registry.is_enrolled(_rtfm_dir)):
@@ -2237,6 +2241,11 @@ def cmd_init(args):
         print("Tip: This looks like an Obsidian vault. "
               "Run 'rtfm vault' for Obsidian-specific features.\n")
 
+    from rtfm.core.placement import refusal_to_index
+    refusal = refusal_to_index(root)
+    if refusal:
+        sys.exit(f"init: not initialising {root}: {refusal}")
+
     print(f"Initializing RTFM in {root} ...")
 
     summary = init_project(
@@ -2507,6 +2516,11 @@ def cmd_audit(args):
     else:
         report = audit_fleet()
         findings, projects = report.findings, report.projects
+
+    from rtfm.plugin.drift import warning as _drift_warning
+    _drift = _drift_warning()
+    if _drift:
+        print(_drift + "\n")
 
     if not findings:
         print(f"audit: {projects} index(es), nothing to report.")

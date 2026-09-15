@@ -160,6 +160,12 @@ def init_project(
     from rtfm.core.sync import sync
 
     project_root = Path(project_root).resolve()
+    # Every creator of a project index asks the same question first — see
+    # rtfm.core.placement for the three times nothing did.
+    from rtfm.core.placement import refusal_to_index
+    refusal = refusal_to_index(project_root)
+    if refusal:
+        raise ValueError(f"not initialising {project_root}: {refusal}")
     rel_db = db_path or ".rtfm/library.db"
     abs_db = project_root / rel_db
 
