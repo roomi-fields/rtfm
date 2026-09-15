@@ -7,6 +7,57 @@ description: >-
 
 # Changelog
 
+## [0.46.0] — 2026-09-15
+
+### Fixed — the plugin created indexes that nobody ever scanned
+
+The plugin's session-start hook indexes the project a session opens in, and
+its end-of-turn hook indexes what the agent edited. Neither ever enrolled the
+project with the supervisor, so the supervisor never scanned it. A monorepo
+agents moved into on 2026-09-07 was used for eight days and held only the
+files they had happened to edit; the project list had not been written once
+in that time.
+
+Both hooks now enrol the project — registration only, never starting a worker
+from plugin code, which would run whatever version the plugin cache holds.
+Projects already stranded recover at their next session. `rtfm status` says
+plainly when a project is not enrolled, because its queue is never busy and
+the worker block never spoke.
+
+The same hook indexed wherever a session was opened, including the root of a
+development tree already holding thirty indexed projects. It now refuses a
+home directory, anything above one, and a directory that already contains an
+indexed project; `rtfm init` remains for a deliberate choice.
+
+Hook fixes reach Claude Code users when the plugin is updated: the plugin runs
+its own copy of RTFM, not the installed package.
+
+### Fixed — the test suite wrote into the developer's project list
+
+The path to the project list was defined twice, and a test replaced a
+function under a name its command never used — the command imports its own
+copy at call time. The real function ran, enrolled the test's temporary
+directory and made sure the real supervisor was up: thirty-three such
+directories had accumulated. The list now has one module and one path, the
+suite redirects it for every test, and a guard fails if the path is built
+anywhere else.
+
+### Fixed — a refused binary read as a silent loss
+
+The ingest refuses binaries on purpose but recorded them like a text file that
+produced nothing — the exact shape the audit looks for. One project reported
+7 857 such files, of which 7 543 were compiled libraries, CAD drawings and
+scans awaiting OCR; the 314 real losses were buried. A refused binary is now
+recorded with no identity, excluded from the audit and from coverage, and rows
+written the old way are re-marked when a project is opened or by `rtfm repair`.
+
+### Fixed — the archive purge asked every directory but the right one
+
+A file declared unversioned kept its archive whenever the same index gathered
+another directory without that declaration: one index kept 1.7 GB of mailbox
+history its mail directory had declared unwanted. Each file is now judged by
+the rules of the directory it was indexed from.
+
 ## [0.45.0] — 2026-09-07
 
 ### Fixed — three bad bytes cost a whole document

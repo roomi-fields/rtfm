@@ -1193,7 +1193,8 @@ def sync(
                 filepath=rel,
                 file_hash=file_hash,
                 corpus=corpus,
-                book_slug=book_slug,
+                # No identity for a refused binary — see handle_ingest.
+                book_slug=None if stats.get("skipped") == "binary" else book_slug,
                 file_size=fpath.stat().st_size,
                 root_path=str(root),
             )
@@ -1201,7 +1202,7 @@ def sync(
             # PDFs are almost always scans needing OCR; other formats may
             # just be empty or corrupt. We surface both separately so the
             # CLI/MCP can suggest the right fix.
-            if stats.get("chunks", 0) == 0:
+            if stats.get("chunks", 0) == 0 and not stats.get("skipped"):
                 if fpath.suffix.lower() == ".pdf":
                     result.suspect_scans.append(rel)
                 else:

@@ -165,9 +165,9 @@ class TestAFailureThatKeepsFailing:
 class TestEnrollingTwoProjectsAtOnce:
 
     def test_neither_is_lost(self, tmp_path, monkeypatch):
-        import rtfm.cli_worker as cw
+        import rtfm.core.registry as reg
         registry = tmp_path / "workers.json"
-        monkeypatch.setattr(cw, "_REGISTRY", registry)
+        monkeypatch.setattr(reg, "REGISTRY_PATH", registry)
 
         dirs = []
         for i in range(24):
@@ -179,7 +179,7 @@ class TestEnrollingTwoProjectsAtOnce:
 
         def enrol(d):
             start.wait()
-            cw._register_project(d)
+            reg.register(d)
 
         threads = [threading.Thread(target=enrol, args=(d,)) for d in dirs]
         for t in threads:
@@ -193,10 +193,10 @@ class TestEnrollingTwoProjectsAtOnce:
         assert not missing, f"{len(missing)} project(s) enrolled and dropped"
 
     def test_a_reader_never_sees_half_a_list(self, tmp_path, monkeypatch):
-        import rtfm.cli_worker as cw
+        import rtfm.core.registry as reg
         registry = tmp_path / "workers.json"
-        monkeypatch.setattr(cw, "_REGISTRY", registry)
-        cw._save_registry([str(tmp_path / f"p{i}" / ".rtfm") for i in range(500)])
+        monkeypatch.setattr(reg, "REGISTRY_PATH", registry)
+        reg.save([str(tmp_path / f"p{i}" / ".rtfm") for i in range(500)])
 
         seen: list[int] = []
         stop = threading.Event()
@@ -213,7 +213,7 @@ class TestEnrollingTwoProjectsAtOnce:
         for i in range(500, 560):
             d = tmp_path / f"p{i}" / ".rtfm"
             d.mkdir(parents=True)
-            cw._register_project(d)
+            reg.register(d)
         stop.set()
         reader.join()
 
@@ -221,24 +221,24 @@ class TestEnrollingTwoProjectsAtOnce:
         assert seen, "the reader never ran"
 
     def test_enrolling_twice_changes_nothing(self, tmp_path, monkeypatch):
-        import rtfm.cli_worker as cw
+        import rtfm.core.registry as reg
         registry = tmp_path / "workers.json"
-        monkeypatch.setattr(cw, "_REGISTRY", registry)
+        monkeypatch.setattr(reg, "REGISTRY_PATH", registry)
         d = tmp_path / "projet" / ".rtfm"
         d.mkdir(parents=True)
-        cw._register_project(d)
+        reg.register(d)
         first = registry.read_text()
-        cw._register_project(d)
+        reg.register(d)
         assert registry.read_text() == first
 
     def test_a_jammed_lock_does_not_block_the_caller(self, tmp_path, monkeypatch):
         """A hook that saves a file must not wait on the registry."""
-        import rtfm.cli_worker as cw
+        import rtfm.core.registry as reg
         registry = tmp_path / "workers.json"
-        monkeypatch.setattr(cw, "_REGISTRY", registry)
-        monkeypatch.setattr(cw, "try_lock_exclusive", lambda fd: False)
+        monkeypatch.setattr(reg, "REGISTRY_PATH", registry)
+        monkeypatch.setattr(reg, "try_lock_exclusive", lambda fd: False)
         d = tmp_path / "projet" / ".rtfm"
         d.mkdir(parents=True)
         started = time.monotonic()
-        cw._register_project(d)
+        reg.register(d)
         assert time.monotonic() - started < 5.0

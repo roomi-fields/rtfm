@@ -23,10 +23,10 @@ import os
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
 from pathlib import Path
 
 from rtfm.config import find_rtfm_root
+from rtfm.core import registry
 from rtfm.core.queue import Queue
 from rtfm.core.supervisor import (
     clear_stop_request, clear_supervisor_state, request_stop,
@@ -36,93 +36,8 @@ from rtfm.core.portable import (
     background_python,
     detached_popen_kwargs,
     hard_kill_signal,
-    open_lock_file,
     pid_alive,
-    try_lock_exclusive,
-    unlock,
 )
-
-
-# ── Cross-project worker registry ───────────────────────────────────────
-# Every ``.rtfm/`` dir that has ever had work is listed here; the supervisor
-# reads it to know which projects to service.
-
-_REGISTRY = Path.home() / ".rtfm" / "workers.json"
-
-
-def _load_registry() -> list[str]:
-    if not _REGISTRY.exists():
-        return []
-    try:
-        data = json.loads(_REGISTRY.read_text(encoding="utf-8"))
-        return list(data.get("projects", []))
-    except Exception:
-        return []
-
-
-def _save_registry(projects: list[str]) -> None:
-    _REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-    cleaned = sorted({p for p in projects if p})
-    # Write to a sibling and rename: a reader must never catch the file
-    # halfway through being written and conclude the fleet is empty.
-    tmp = _REGISTRY.with_suffix(f".json.{os.getpid()}.tmp")
-    tmp.write_text(
-        json.dumps({"projects": cleaned}, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp, _REGISTRY)
-
-
-@contextmanager
-def _registry_lock():
-    """Hold the registry lock for a read-modify-write, or give up trying.
-
-    Enrolling a project reads the whole list, appends one entry and writes
-    the whole list back. Unsynchronised, two enrolments that overlap end
-    with the second one's list — which does not contain the first one's
-    project, so that project is silently never serviced again. Measured on
-    a fleet publishing sixteen repositories in parallel: eight projects
-    holding a database and a queue, none of them in the registry, none of
-    them ever scanned, and nothing anywhere saying so.
-
-    Yields ``True`` when the lock is held. After a second of contention it
-    yields ``False`` rather than block a hook or an editor save; the caller
-    then skips the write, and the next command retries.
-    """
-    _REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-    fd = open_lock_file(_REGISTRY.with_suffix(".lock"))
-    try:
-        deadline = time.monotonic() + 1.0
-        while True:
-            if try_lock_exclusive(fd):
-                try:
-                    yield True
-                finally:
-                    unlock(fd)
-                return
-            if time.monotonic() >= deadline:
-                yield False
-                return
-            time.sleep(0.02)
-    finally:
-        os.close(fd)
-
-
-def _register_project(rtfm_dir: Path) -> None:
-    """Add this ``.rtfm/`` dir to the registry. Idempotent, best-effort."""
-    try:
-        path = str(rtfm_dir.resolve())
-        if path in _load_registry():
-            return  # fast path: no lock needed to confirm what is already true
-        with _registry_lock() as held:
-            if not held:
-                return
-            current = _load_registry()
-            if path not in current:
-                current.append(path)
-                _save_registry(current)
-    except Exception:
-        pass  # registry is best-effort; don't break the spawn
 
 
 # ── Lazy version-drift restart (called from cli.main) ────────────────────
@@ -154,7 +69,7 @@ def _maybe_lazy_restart_stale_workers() -> None:
         pass
 
     # Nothing registered yet → nothing to supervise.
-    if not _load_registry():
+    if not registry.load():
         return
 
     try:
@@ -236,7 +151,7 @@ def ensure_worker_running(rtfm_dir: Path) -> int | None:
     supervisor is running" — the supervisor picks the new project up on its
     next registry poll. Returns the supervisor PID.
     """
-    _register_project(rtfm_dir)
+    registry.register(rtfm_dir)
     return ensure_supervisor_running()
 
 
@@ -260,7 +175,7 @@ def _report_stalled_work() -> None:
     import sqlite3
 
     stalled: list[tuple[str, int]] = []
-    for entry in _load_registry():
+    for entry in registry.load():
         db = Path(entry) / "library.db"
         if not db.exists():
             continue
@@ -315,7 +230,7 @@ def cmd_worker(args):
         # ``rtfm worker start`` from a project root also enrolls it.
         rtfm_root = find_rtfm_root()
         if rtfm_root is not None:
-            _register_project(rtfm_root / ".rtfm")
+            registry.register(rtfm_root / ".rtfm")
         pid = ensure_supervisor_running()
         if pid is None:
             print("worker: could not start (another starter won the race).")

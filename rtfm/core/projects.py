@@ -20,18 +20,14 @@ and that name is enough to say which index a question is about.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from rtfm.core import registry
 
 
 class UnknownProject(Exception):
     """Raised with the names that *are* reachable — an error that lists the
     alternatives turns a dead end into the next query."""
-
-
-def _registry_path() -> Path:
-    from rtfm.core.supervisor import REGISTRY_PATH
-    return REGISTRY_PATH
 
 
 def known_projects() -> dict[str, Path]:
@@ -42,11 +38,7 @@ def known_projects() -> dict[str, Path]:
     stable, so the answer is too; :func:`resolve_project_db` is the one that
     refuses to guess between them.
     """
-    try:
-        entries = json.loads(
-            _registry_path().read_text(encoding="utf-8"))["projects"]
-    except (OSError, ValueError, KeyError):
-        return {}
+    entries = registry.load()
     found: dict[str, Path] = {}
     for entry in entries:
         rtfm_dir = Path(entry)
@@ -59,11 +51,7 @@ def known_projects() -> dict[str, Path]:
 
 def candidates(name: str) -> list[Path]:
     """Every index enrolled under *name*, in registry order."""
-    try:
-        entries = json.loads(
-            _registry_path().read_text(encoding="utf-8"))["projects"]
-    except (OSError, ValueError, KeyError):
-        return []
+    entries = registry.load()
     return [Path(e) / "library.db" for e in entries
             if Path(e).parent.name == name and (Path(e) / "library.db").is_file()]
 

@@ -77,6 +77,80 @@ def _init_project(project_root: Path) -> bool:
         return False
 
 
+#: Directories never walked when looking for projects nested below.
+_NEVER_WALK = {"node_modules", ".git", ".venv", "venv", "__pycache__",
+               ".rtfm", "dist", "build", ".cache"}
+_WALK_DEPTH = 3
+_WALK_BUDGET = 5000
+
+
+def _refusal(project_root: Path) -> str | None:
+    """Why *project_root* must not be indexed automatically, or ``None``.
+
+    A session can be opened anywhere, and this hook used to index wherever
+    it was. Opened at the root of a development tree, it created an index
+    there — beside the thirty projects that tree already held, each with
+    its own. Once before, the same thing produced a 27 GB index of
+    twenty-six already-indexed projects and three days of scanning.
+
+    Two shapes are refused: a home directory or anything above one, and a
+    directory that already contains an indexed project. A bounded walk
+    decides the second; a tree too large to walk within budget is not
+    refused on that alone. ``rtfm init`` stays available for a deliberate
+    choice.
+    """
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        home = None
+    if home is not None and (project_root == home or project_root in home.parents):
+        return "a home directory, or one above it, is not a project"
+
+    budget = _WALK_BUDGET
+    stack = [(project_root, 0)]
+    while stack and budget > 0:
+        here, depth = stack.pop()
+        try:
+            children = [c for c in here.iterdir()
+                        if c.is_dir() and not c.is_symlink()]
+        except OSError:
+            continue
+        for child in children:
+            budget -= 1
+            if child.name in _NEVER_WALK:
+                continue
+            if (child / ".rtfm" / "library.db").is_file():
+                return (f"it already contains an indexed project ({child}) — "
+                        f"index each project where it lives")
+            if depth + 1 < _WALK_DEPTH:
+                stack.append((child, depth + 1))
+    return None
+
+
+def _enrol(project_root: Path) -> None:
+    """Put the project on the supervisor's list, and say so if it was not.
+
+    This hook created indexes and never enrolled them, so the supervisor
+    never scanned them: a monorepo opened by agents on 2026-09-07 was used
+    for a week and held only the files they happened to edit. Enrolment is
+    registration only — never starting a worker from plugin code, which
+    would run whatever version the plugin cache holds.
+    """
+    try:
+        from rtfm.core import registry
+    except Exception as e:
+        _log(f"enrol ERROR: {e}", project_root)
+        return
+    rtfm_dir = project_root / ".rtfm"
+    if registry.is_enrolled(rtfm_dir):
+        return
+    if registry.register(rtfm_dir):
+        _log("enrolled — the worker now scans this project", project_root)
+    else:
+        _log("could not enrol — the worker will not scan this project; "
+             "run `rtfm worker start` here", project_root)
+
+
 def _grant_mcp_permissions(project_root: Path) -> None:
     """Pre-approve RTFM MCP tool calls in project settings so the user isn't
     prompted on every search/expand. Writes to .claude/settings.local.json
@@ -130,11 +204,19 @@ def main() -> None:
 
     db_path = project_root / ".rtfm" / "library.db"
     if not db_path.exists():
+        refusal = _refusal(project_root)
+        if refusal:
+            sys.stderr.write(
+                f"[rtfm-bootstrap] not indexing {project_root}: {refusal}\n")
+            return
         _log("initializing project", project_root)
         if _init_project(project_root):
             _log("project initialized", project_root)
         else:
             _log("init failed", project_root)
+
+    if db_path.exists():
+        _enrol(project_root)
 
     _grant_mcp_permissions(project_root)
 

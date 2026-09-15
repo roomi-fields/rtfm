@@ -30,6 +30,7 @@ class SourceCoverage:
     readable: int = 0           # of those, files with content in the index
     tracked_not_readable: int = 0   # seen, recorded, nothing behind them
     missing: int = 0            # indexable, never seen by any scan
+    skipped: int = 0            # binaries the ingest refused on purpose
     error: str = ""
 
     @property
@@ -127,12 +128,13 @@ def measure(root: Path, db_path: Optional[Path] = None) -> Coverage:
 
             # One question per batch rather than one per file: a source of
             # 30 000 files must not cost 30 000 round trips.
-            readable = tracked = 0
+            readable = tracked = skipped = 0
             for i in range(0, len(rels), 400):
                 batch = rels[i:i + 400]
                 marks = ",".join("?" * len(batch))
                 rows = conn.execute(
                     f"""SELECT i.filepath,
+                               i.book_slug IS NULL AS skipped,
                                (SELECT 1 FROM books b
                                  WHERE b.slug = i.book_slug
                                    AND b.corpus = i.corpus) AS has_content
@@ -140,10 +142,17 @@ def measure(root: Path, db_path: Optional[Path] = None) -> Coverage:
                         WHERE i.corpus = ? AND i.filepath IN ({marks})""",
                     (corpus, *batch)).fetchall()
                 for row in rows:
+                    seen_paths.add((corpus, row["filepath"]))
+                    if row["skipped"]:
+                        # A binary is not a gap: nothing readable was ever
+                        # going to come out of it.
+                        skipped += 1
+                        continue
                     tracked += 1
                     if row["has_content"]:
                         readable += 1
-                    seen_paths.add((corpus, row["filepath"]))
+            entry.skipped = skipped
+            entry.indexable -= skipped
             entry.readable = readable
             entry.tracked_not_readable = tracked - readable
             entry.missing = entry.indexable - tracked

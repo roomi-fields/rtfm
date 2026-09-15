@@ -7,7 +7,7 @@ from rtfm import Library
 
 
 @pytest.fixture(autouse=True)
-def never_touch_the_real_fleet(monkeypatch):
+def never_touch_the_real_fleet(monkeypatch, tmp_path_factory):
     """Keep the test suite out of the developer's live supervisor.
 
     ``cli.main`` opens every command with a version-drift check that reads the
@@ -23,6 +23,21 @@ def never_touch_the_real_fleet(monkeypatch):
     """
     monkeypatch.setattr(
         "rtfm.cli_worker._maybe_lazy_restart_stale_workers",
+        lambda *a, **k: None,
+    )
+    # The project list, and the starting of the daemon that reads it. A test
+    # replaced ``ensure_worker_running`` under a name the command it called
+    # never used — the command imports its own copy at call time — so the
+    # real function ran: it enrolled the test's temporary directory in the
+    # developer's list and made sure the real supervisor was up. Thirty-three
+    # such directories had piled up before anyone looked. Redirected here, for
+    # every test, by the one path every reader and writer goes through.
+    monkeypatch.setattr(
+        "rtfm.core.registry.REGISTRY_PATH",
+        tmp_path_factory.mktemp("rtfm-home") / "workers.json",
+    )
+    monkeypatch.setattr(
+        "rtfm.cli_worker.ensure_supervisor_running",
         lambda *a, **k: None,
     )
 

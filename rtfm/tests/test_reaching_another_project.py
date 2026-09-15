@@ -54,7 +54,7 @@ def fleet(tmp_path, monkeypatch):
     registry = tmp_path / "workers.json"
     registry.write_text(json.dumps(
         {"projects": [str(r / ".rtfm") for r in made.values()]}))
-    monkeypatch.setattr("rtfm.core.supervisor.REGISTRY_PATH", registry)
+    monkeypatch.setattr("rtfm.core.registry.REGISTRY_PATH", registry)
     return made
 
 
@@ -90,11 +90,11 @@ class TestNamingAnIndex:
         registry = tmp_path / "w2.json"
         registry.write_text(json.dumps(
             {"projects": [str(tmp_path / "parti" / ".rtfm")]}))
-        monkeypatch.setattr("rtfm.core.supervisor.REGISTRY_PATH", registry)
+        monkeypatch.setattr("rtfm.core.registry.REGISTRY_PATH", registry)
         assert known_projects() == {}
 
     def test_no_registry_at_all_is_not_an_error(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("rtfm.core.supervisor.REGISTRY_PATH",
+        monkeypatch.setattr("rtfm.core.registry.REGISTRY_PATH",
                             tmp_path / "absent.json")
         assert known_projects() == {}
         with pytest.raises(UnknownProject):

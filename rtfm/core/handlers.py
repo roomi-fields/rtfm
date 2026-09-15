@@ -415,7 +415,8 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
         # whole document — but a document served with holes in it must not
         # be served silently, or the next person to wonder why a passage is
         # missing has nothing to go on.
-        _damaged = _undecodable_bytes(abs_path)
+        from rtfm.core.sniff import looks_binary
+        _damaged = 0 if looks_binary(abs_path) else _undecodable_bytes(abs_path)
         if _damaged:
             worker._log(f"ingest [{corpus}] {rel}: {_damaged} byte(s) are not "
                         f"valid text and were replaced — the file is indexed, "
@@ -481,11 +482,14 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
                     f"re-queued")
                 return
             raise
+        # A binary the ingest refused is recorded with no identity: seen,
+        # deliberately empty. Recorded with one, it is indistinguishable
+        # from a text file that silently produced nothing.
         lib.update_indexed_file(
             filepath=rel,
             file_hash=file_hash,
             corpus=corpus,
-            book_slug=book_slug,
+            book_slug=None if stats.get("skipped") == "binary" else book_slug,
             file_size=abs_path.stat().st_size,
             root_path=str(root),
         )
@@ -769,24 +773,45 @@ def _forget_unwanted_history(conn, worker: "JobContext") -> tuple[int, int]:
     copies each — two thirds of a 3.2 GB archive standing beside a 300 MB
     index. This is the other half of that declaration.
 
+    Each file is judged by the ``.rtfmignore`` of the directory it was
+    indexed from, and by no other. Asking every configured directory
+    instead let any directory *without* the section answer "keep it": one
+    index gathering a repository and its shared mail directory kept 1.7 GB
+    of mailbox archive that the mail directory had declared unwanted,
+    because the repository beside it had no opinion.
+
     Returns ``(snapshots dropped, bytes they held)``.
     """
     try:
         from rtfm.core.sync import history_is_wanted, load_version_ignore_spec
-        roots = [r[0] for r in conn.execute(
-            "SELECT DISTINCT root_path FROM sync_roots").fetchall()]
-        roots = [Path(r) for r in roots if r]
-        if not roots or not any(load_version_ignore_spec(r) for r in roots):
+        by_corpus: dict[str, set[str]] = {}
+        for corpus, root in conn.execute(
+                "SELECT corpus, root_path FROM sync_roots").fetchall():
+            if root:
+                by_corpus.setdefault(corpus, set()).add(root)
+        roots = set().union(*by_corpus.values()) if by_corpus else set()
+        declaring = {r for r in roots if load_version_ignore_spec(Path(r))}
+        if not declaring:
             return (0, 0)
 
         doomed: list[int] = []
         freed = 0
-        for book_id, filename, size in conn.execute(
-                """SELECT v.book_id, b.filename, SUM(LENGTH(v.snapshot))
-                   FROM file_versions v JOIN books b ON b.id = v.book_id
+        for book_id, corpus, rel, root, size in conn.execute(
+                """SELECT v.book_id, i.corpus, i.filepath, i.root_path,
+                          SUM(LENGTH(v.snapshot))
+                   FROM file_versions v
+                   JOIN books b ON b.id = v.book_id
+                   JOIN indexed_files i
+                     ON i.book_slug = b.slug AND i.corpus = b.corpus
                    GROUP BY v.book_id""").fetchall():
-            rel = filename or ""
-            if rel and not any(history_is_wanted(root, rel) for root in roots):
+            if not root:
+                # Rows tracked before the directory was recorded. Only a
+                # corpus gathered from a single directory says which one;
+                # with several, guessing could erase a history nobody
+                # declared unwanted, so the file is left alone.
+                only = by_corpus.get(corpus, set())
+                root = next(iter(only)) if len(only) == 1 else None
+            if root in declaring and not history_is_wanted(Path(root), rel):
                 doomed.append(book_id)
                 freed += size or 0
         if not doomed:

@@ -1650,6 +1650,17 @@ def cmd_status(args):
         _root_for_worker = _frr()
         if _root_for_worker is not None:
             _rtfm_dir = _root_for_worker / ".rtfm"
+            # An index nobody enrolled is never scanned: it holds what it
+            # held the day it was created, plus whatever an agent edits.
+            # Said here, unconditionally, because the block below only
+            # speaks when the queue is busy — and an unenrolled project's
+            # queue never is.
+            from rtfm.core import registry as _registry
+            if ((_rtfm_dir / "library.db").exists()
+                    and not _registry.is_enrolled(_rtfm_dir)):
+                print("\n⚠ Not enrolled: the worker never scans this project —"
+                      " only files an agent edits reach the index.")
+                print("  → rtfm worker start    (run here to enrol it)")
             _sstate = _sr()
             # Queue stats (cheap; reads from the same library.db)
             _q = _Q(str(_rtfm_dir / "library.db"))
@@ -2426,9 +2437,12 @@ def cmd_repair(args):
         sys.exit("repair: no .rtfm/ project root in the cwd chain.")
     rtfm_dir = rtfm_root / ".rtfm"
 
+    from rtfm.core.repair import remark_skipped_binaries
+    marked = remark_skipped_binaries(rtfm_dir / "library.db", log=print)
     n = repair_shared_identities(rtfm_dir / "library.db", log=print)
     if not n:
-        print("repair: nothing to repair.")
+        print("repair: nothing more to repair." if marked
+              else "repair: nothing to repair.")
         return
     print(f"repair: {n} file(s) handed back to the scan.")
     ensure_worker_running(rtfm_dir)

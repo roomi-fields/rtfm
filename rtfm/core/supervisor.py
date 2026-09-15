@@ -46,6 +46,7 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from rtfm.core import registry as _registry
 from rtfm.core.dbcare import ensure_healthy_db, make_rotating_logger
 from rtfm.core.portable import (
     background_python,
@@ -121,7 +122,6 @@ SUPERVISOR_LOCK = _RTFM_HOME / "supervisor.lock"
 SUPERVISOR_STATE = _RTFM_HOME / "supervisor_state.json"
 SUPERVISOR_STOP = _RTFM_HOME / "supervisor.stop"
 SUPERVISOR_LOG = _RTFM_HOME / "supervisor.log"
-REGISTRY_PATH = _RTFM_HOME / "workers.json"
 
 
 # ── On-disk state (so ``rtfm worker status`` can report without the DB) ──
@@ -463,6 +463,14 @@ class _Slot:
             log(f"{self.rtfm_dir.parent.name}: {n} file(s) shared an "
                 f"identity — cleared, they re-enter on the next scan")
             rebuilt = True  # scan now rather than on the staggered tick
+        # Binaries indexed before skips were recorded look like files that
+        # produced nothing — the defect the audit exists to find. Marking
+        # them here keeps that check about real losses.
+        try:
+            from rtfm.core.repair import remark_skipped_binaries
+            remark_skipped_binaries(self.db_path, log=self.log)
+        except Exception as exc:  # bookkeeping must never keep a project down
+            log(f"{self.rtfm_dir.parent.name}: binary re-marking skipped: {exc}")
         self.queue = Queue(self.db_path)
         self.identity = _file_identity(self.db_path)
         # Reap zombies left by a previous supervisor/worker that died
@@ -485,13 +493,13 @@ class _Slot:
 class Supervisor:
     def __init__(
         self,
-        registry_path: Path = REGISTRY_PATH,
+        registry_path: Optional[Path] = None,
         log: Optional[Callable[[str], None]] = None,
         max_concurrent: Optional[int] = None,
         scan_interval: float = SCAN_INTERVAL_SECONDS,
         reconcile_interval: float = RECONCILE_INTERVAL_SECONDS,
     ):
-        self._registry_path = registry_path
+        self._registry_path = registry_path or _registry.REGISTRY_PATH
         self._log = log or (lambda m: None)
         # 0 (unlimited) is meaningless for a thread pool; clamp to a sane
         # minimum of 1 so the supervisor always makes progress.

@@ -274,7 +274,10 @@ def check_mute_files(conn) -> tuple[int, str] | None:
 
     Files that legitimately carry no text — images, fonts, audio, anything
     empty — are excluded, or the check would report every asset in the
-    tree as a defect.
+    tree as a defect. A file the ingest skipped as binary is recorded with
+    no identity and excluded outright; the suffix list only covers rows
+    written before that was recorded. Without it, one project reported 670
+    "silent" files that were compiled libraries and CAD drawings.
     """
     if not _table_exists(conn, "indexed_files"):
         return None
@@ -282,7 +285,7 @@ def check_mute_files(conn) -> tuple[int, str] | None:
         f"AND LOWER(i.filepath) NOT LIKE '%{ext}'" for ext in NO_TEXT_SUFFIXES)
     n = conn.execute(
         f"""SELECT COUNT(*) FROM indexed_files i
-            WHERE i.file_size > 0 {excluded}
+            WHERE i.file_size > 0 AND i.book_slug IS NOT NULL {excluded}
               AND NOT EXISTS (SELECT 1 FROM books b
                               WHERE b.slug = i.book_slug
                                 AND b.corpus = i.corpus)"""
@@ -365,12 +368,8 @@ def audit_project(db_path: Path, project_root: Path | None = None) -> list[Findi
 def audit_fleet(registry: list[str] | None = None) -> AuditReport:
     """Run every check against every registered project."""
     if registry is None:
-        from rtfm.core.supervisor import REGISTRY_PATH
-        try:
-            registry = json.loads(
-                REGISTRY_PATH.read_text(encoding="utf-8"))["projects"]
-        except (OSError, ValueError, KeyError):
-            registry = []
+        from rtfm.core import registry as _registry
+        registry = _registry.load()
 
     report = AuditReport()
     for entry in registry:

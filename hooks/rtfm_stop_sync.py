@@ -153,6 +153,18 @@ def main() -> None:
         # Clear the queue only after a successful sync — if we crashed
         # mid-flight, the next turn will retry the same files.
         tmp.unlink(missing_ok=True)
+        # A project fed only by this hook, and never enrolled, is never
+        # scanned: it holds what agents edited and nothing else. Enrol it
+        # (registration only — never start a worker from plugin code).
+        try:
+            from rtfm.core import registry
+            if not registry.is_enrolled(rtfm_dir):
+                if registry.register(rtfm_dir):
+                    _log(project_root, "enrolled — the worker now scans this project")
+                else:
+                    _log(project_root, "could not enrol — run `rtfm worker start` here")
+        except Exception as e:
+            _log(project_root, f"enrol ERROR: {e}")
     except Exception as e:
         _log(project_root, f"stop-sync ERROR: {e}")
 

@@ -49,7 +49,7 @@ class TestADeadSupervisorSaysWhatIsWaiting:
 
         entries = [self._project_with_jobs(tmp_path, "alpha", 3),
                    self._project_with_jobs(tmp_path, "beta", 1)]
-        monkeypatch.setattr(cw, "_load_registry", lambda: entries)
+        monkeypatch.setattr("rtfm.core.registry.load", lambda: entries)
 
         cw._report_stalled_work()
         out = capsys.readouterr().out
@@ -62,7 +62,7 @@ class TestADeadSupervisorSaysWhatIsWaiting:
         import rtfm.cli_worker as cw
 
         entries = [self._project_with_jobs(tmp_path, "idle", 0)]
-        monkeypatch.setattr(cw, "_load_registry", lambda: entries)
+        monkeypatch.setattr("rtfm.core.registry.load", lambda: entries)
 
         cw._report_stalled_work()
         assert capsys.readouterr().out == ""
