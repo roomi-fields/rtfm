@@ -529,6 +529,12 @@ class Library:
                     ON edges(source_book_id, target_book_id, relation_type, source_detail);
             """)
 
+        # What a file needs before it can be quoted — author, title, the
+        # range where the author's own text runs. Kept in a table of its own
+        # because a book row is rewritten on every re-index.
+        from rtfm.core.citation import ensure_schema as _ensure_cards
+        _ensure_cards(conn)
+
         # Create file_versions table if missing
         cursor = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='file_versions'"

@@ -7,6 +7,31 @@ description: >-
 
 # Changelog
 
+## [0.47.0] — 2026-09-23
+
+### Added — a bibliographic card for an indexed file
+
+Quoting a passage needs what a search result does not carry: who wrote it,
+under what title, and — for a scanned book — between which pages the author's
+own text runs, so a preface by someone else is never attributed to them.
+
+Three sites kept that description in three shapes beside their own corpus,
+and one engine read all three. Lists describing the same corpus drift, and
+the one that drifts is the one nobody looks at, so the description now lives
+next to the index it describes: `rtfm cite <path>` reads one card,
+`rtfm cite --corpus <name>` lists a corpus, `--set` records one and
+`--from` a whole file of them, all with JSON output. `--unknown` reports
+cards naming a file the index does not track, which is how a renamed file
+silently loses its description.
+
+Cards live in a table of their own, keyed by corpus and path, because a
+document's row is deleted and rewritten on every re-index.
+
+There is no permission flag: a card naming an author and a title is
+attributed and may be quoted, one without is background reading. That
+follows from what is recorded, so there is no state to set and none to
+drift.
+
 ## [0.46.1] — 2026-09-15
 
 ### Fixed — an index could still be created where no index belongs

@@ -2497,6 +2497,78 @@ def cmd_coverage(args):
               f"source — indexed from a directory no longer listed")
 
 
+
+def cmd_cite(args):
+    """Read or record what an indexed file needs before it can be quoted.
+
+    The facts only — who wrote it, under what title, where the author's own
+    text runs. No permission flag: a card naming an author and a title is
+    attributed and quotable, one without is background reading — which
+    follows from what is recorded, so nothing has to be set by hand.
+    """
+    from rtfm.core import citation
+
+    lib = _get_lib(args)
+    conn = lib._get_conn()
+    try:
+        if args.from_file:
+            cards = citation.load_cards_file(args.from_file)
+            n = citation.put_many(conn, cards, corpus=args.corpus or "default")
+            print(f"cite: {n} card(s) recorded.")
+            unknown = citation.unknown_files(conn)
+            if unknown:
+                print(f"cite: {len(unknown)} card(s) name a file this index "
+                      f"does not track — `rtfm cite --unknown` lists them.")
+            return
+
+        if args.set:
+            if not args.path:
+                sys.exit("cite: --set needs the file the card describes.")
+            card = json.loads(args.set)
+            card.setdefault("file", args.path)
+            written = citation.put(conn, card, corpus=args.corpus or "default")
+            print(json.dumps(written, indent=2, ensure_ascii=False))
+            return
+
+        if args.delete:
+            if not args.path:
+                sys.exit("cite: --delete needs a file.")
+            gone = citation.delete(conn, args.path, args.corpus)
+            print("cite: card removed." if gone else "cite: no card for that file.")
+            return
+
+        if args.unknown:
+            cards = citation.unknown_files(conn)
+        elif args.path:
+            card = citation.get(conn, args.path, args.corpus)
+            if card is None:
+                if args.format == "json":
+                    print("null")
+                    return
+                sys.exit(f"cite: nothing recorded for {args.path}")
+            cards = [card]
+        else:
+            cards = citation.list_cards(conn, args.corpus)
+
+        if args.format == "json":
+            print(json.dumps(cards if not args.path or args.unknown else cards[0],
+                             indent=2, ensure_ascii=False))
+            return
+        if not cards:
+            print("cite: no card recorded.")
+            return
+        for c in cards:
+            rng = f" [{c['range'][0]}-{c['range'][1]}]" if c["range"] else ""
+            mark = "" if c["attributed"] else "  (unattributed — background only)"
+            print(f"[{c['corpus']}] {c['file']}\n"
+                  f"    {c['author'] or '?'} — {c['title'] or '?'}"
+                  f" ({c['nature'] or '?'}){rng}{mark}")
+    except citation.InvalidCard as exc:
+        sys.exit(f"cite: {exc}")
+    finally:
+        lib.close()
+
+
 def cmd_audit(args):
     """Check what RTFM must be able to say about itself, and say it.
 
@@ -3144,6 +3216,26 @@ def main():
         "--here", action="store_true",
         help="Only this project (default: every registered index).")
     p_audit.set_defaults(func=cmd_audit)
+
+    # cite
+    p_cite = subparsers.add_parser(
+        "cite",
+        help="What an indexed file needs before it can be quoted",
+        parents=[db_parent])
+    p_cite.add_argument("path", nargs="?",
+                        help="File the card describes (omit to list).")
+    p_cite.add_argument("--corpus", "-c", help="Corpus the file belongs to.")
+    p_cite.add_argument("--format", "-f", choices=["text", "json"],
+                        default="text")
+    p_cite.add_argument("--set", metavar="JSON",
+                        help="Record this card (JSON object).")
+    p_cite.add_argument("--from", dest="from_file", metavar="FILE",
+                        help="Record every card in a JSON file (a list).")
+    p_cite.add_argument("--delete", action="store_true",
+                        help="Forget the card for this file.")
+    p_cite.add_argument("--unknown", action="store_true",
+                        help="List cards naming a file this index does not track.")
+    p_cite.set_defaults(func=cmd_cite)
 
     # repair
     p_repair = subparsers.add_parser(
