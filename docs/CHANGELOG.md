@@ -7,6 +7,17 @@ description: >-
 
 # Changelog
 
+## [0.47.3] — 2026-10-06
+
+### Fixed — a project with many sources never ran anything but scans
+
+The periodic scan started a new round every minute, whether or not the last
+round was finished. On a project with 48 source directories a round took six
+minutes, so the queue always held a scan, and a scan goes first: OCR jobs
+waited five weeks and embeddings three, under a backlog of 484 — too small to
+trip the pause that stops scanning above 500. A new round now starts one
+interval after the previous one ends.
+
 ## [0.47.2] — 2026-10-06
 
 ### Fixed — every scan walked the directories it excludes

@@ -1029,17 +1029,31 @@ class TestScanningDoesNotStarveTheWorkItFinds:
         assert supervisor.enqueued == [slot]
         slot.queue.close()
 
-    def test_pending_scans_do_not_count_as_a_backlog(self, tmp_path):
-        """A queue full of scans is the state this stops, not a reason to
-        keep going."""
-        import rtfm.core.supervisor as sup
-
-        slot = self._slot_with_backlog(tmp_path, 0)
-        for i in range(sup.SCAN_BACKLOG_PAUSE + 5):
-            slot.queue.enqueue("scan", {"root": f"/r{i}", "corpus": "c"})
+    def test_no_new_round_while_the_last_one_is_queued(self, tmp_path):
+        """A round over many directories outlasts the interval. Re-enqueued
+        each minute, it kept a scan at the project's head for good, and the
+        embeddings and OCR ranked below it waited weeks."""
+        slot = self._slot_with_backlog(tmp_path, 3)
+        slot.queue.enqueue("scan", {"root": "/r", "corpus": "c"})
         supervisor = self._supervisor(slot)
         supervisor._enqueue_periodic()
+        assert supervisor.enqueued == []
+        slot.queue.close()
 
+    def test_the_next_round_waits_an_interval_after_the_last_ends(self, tmp_path):
+        slot = self._slot_with_backlog(tmp_path, 3)
+        slot.queue.enqueue("scan", {"root": "/r", "corpus": "c"})
+        supervisor = self._supervisor(slot)
+        supervisor._enqueue_periodic()            # round still queued: skip
+
+        conn = slot.queue._get_conn()
+        conn.execute("DELETE FROM work_queue WHERE type = 'scan'")
+        conn.commit()
+        supervisor._enqueue_periodic()            # just ended: not yet
+        assert supervisor.enqueued == []
+
+        slot.next_scan_at = 0.0                   # an interval later
+        supervisor._enqueue_periodic()
         assert supervisor.enqueued == [slot]
         slot.queue.close()
 

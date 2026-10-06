@@ -1104,6 +1104,16 @@ class Supervisor:
         except Exception:
             return 0
 
+    def _scan_round_in_progress(self, slot: _Slot) -> bool:
+        try:
+            conn = slot.queue._get_conn()
+            return conn.execute(
+                "SELECT 1 FROM work_queue WHERE type = 'scan' "
+                "AND status IN ('pending', 'running') LIMIT 1"
+            ).fetchone() is not None
+        except Exception:
+            return False
+
     def _enqueue_periodic(self) -> None:
         now = time.monotonic()
         for slot in self._slots.values():
@@ -1111,6 +1121,15 @@ class Supervisor:
                 continue
             if now >= slot.next_scan_at:
                 slot.next_scan_at = now + self._scan_interval
+                # A round still in the queue is not over: the next one starts
+                # an interval after it ends, not an interval after it began.
+                # A round over 48 directories took six minutes and was
+                # re-enqueued every minute, so the project always had a scan
+                # at its head and nothing ranked below ever ran — 53 OCR jobs
+                # waited five weeks, embeddings three, under a backlog too
+                # small to trip the pause below.
+                if self._scan_round_in_progress(slot):
+                    continue
                 backlog = self._backlog(slot)
                 if backlog > SCAN_BACKLOG_PAUSE:
                     if not slot.scan_paused:
