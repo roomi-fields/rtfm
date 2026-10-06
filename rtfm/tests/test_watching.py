@@ -157,6 +157,7 @@ class _FakeQueue:
 def _bare_supervisor(slot, watcher=None):
     s = sup.Supervisor.__new__(sup.Supervisor)
     s._slots = {"p": slot}
+    s._wanted = {"p"}
     s._scan_interval = 60.0
     s._reconcile_interval = 3600.0
     s._watcher = watcher

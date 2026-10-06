@@ -643,6 +643,8 @@ class Supervisor:
                     self._sync_registry()
                 with self._step("collect-opened"):
                     self._collect_opened()
+                with self._step("drop-unwanted"):
+                    self._drop_unwanted()
                 with self._step("check-replaced-dbs"):
                     self._reopen_replaced_databases()
                 with self._step("reap"):
@@ -727,7 +729,9 @@ class Supervisor:
             data = json.loads(self._registry_path.read_text(encoding="utf-8"))
             projects = list(data.get("projects", []))
         except (OSError, ValueError):
-            projects = []
+            # An unreadable list says nothing about what is wanted; keep
+            # serving what was, rather than dropping every project.
+            return
 
         wanted = {p for p in projects if Path(p).is_dir()}
         self._wanted = wanted
@@ -736,9 +740,20 @@ class Supervisor:
                 continue
             slot = _Slot(Path(path))
             self._opening[path] = (slot, self._opener.submit(slot.open, self._log))
-        # Drop removed (only if idle — never yank a slot mid-job).
+        self._drop_unwanted()
+
+    def _drop_unwanted(self) -> None:
+        """Let go of projects taken off the list.
+
+        A project busy at the moment it left the list used to be kept —
+        the list is only re-read when it changes, so nothing looked again —
+        and went on being served as if still on it: pausing one project took
+        a restart of the whole indexer. It now gets no new work from the
+        moment it leaves, and is let go as soon as what it has in flight is
+        done.
+        """
         for path in list(self._slots):
-            if path not in wanted and not self._slots[path].active:
+            if path not in self._wanted and not self._slots[path].active:
                 self._forget_sources(self._slots[path])
                 self._slots[path].close()
                 del self._slots[path]
@@ -941,8 +956,8 @@ class Supervisor:
             # Pick the globally-oldest dispatchable head across all projects.
             best_slot: Optional[_Slot] = None
             best_key: Optional[tuple[int, str]] = None
-            for slot in self._slots.values():
-                if id(slot) in skip:
+            for path, slot in self._slots.items():
+                if id(slot) in skip or path not in self._wanted:
                     continue
                 if slot.retry_at and time.monotonic() < slot.retry_at:
                     continue  # backing off after a queue error
@@ -1312,8 +1327,8 @@ class Supervisor:
     def _enqueue_periodic(self) -> None:
         now = time.monotonic()
         changes, failures = self._take_notifications()
-        for slot in self._slots.values():
-            if slot.queue is None:
+        for path, slot in self._slots.items():
+            if slot.queue is None or path not in self._wanted:
                 continue
             try:
                 self._refresh_sources(slot)

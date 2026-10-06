@@ -7,6 +7,17 @@ description: >-
 
 # Changelog
 
+## [0.49.3] — 2026-10-06
+
+### Fixed — a project taken off the list went on being served
+
+The indexer re-reads its project list only when the list changes, and let go
+of a removed project only if it happened to be idle at that very moment. A
+project busy then was kept for good and served as before, so pausing one
+project took a restart of the whole indexer. A project off the list now gets
+no new work from that moment, and is let go once its jobs in flight finish.
+An unreadable list no longer drops every project either.
+
 ## [0.49.2] — 2026-10-06
 
 ### Fixed — a scanned book queued whole was read whole, and timed out

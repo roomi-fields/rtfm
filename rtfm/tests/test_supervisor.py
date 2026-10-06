@@ -425,6 +425,58 @@ def test_registry_sync_add_and_remove(tmp_path: Path):
         sup._pool.shutdown(wait=False)
 
 
+def test_a_busy_project_taken_off_the_list_gets_no_more_work(
+        tmp_path: Path, monkeypatch):
+    """Busy when it left the list, it used to be kept and served as before:
+    pausing one project took a restart of the whole indexer."""
+    a = tmp_path / "a" / ".rtfm"; a.mkdir(parents=True)
+    Library(str(a / "library.db")).close()
+    reg = _registry(tmp_path, [a])
+    gate = threading.Event()
+    import rtfm.core.handlers as handlers_mod
+    monkeypatch.setitem(handlers_mod.HANDLERS, "remove",
+                        lambda job, ctx: gate.wait(timeout=5.0))
+
+    sup = _make_sup(reg, max_concurrent=1)
+    try:
+        _sync(sup)
+        slot = _only_slot(sup)
+        slot.queue.enqueue("remove", {"filepath": "a", "corpus": "x"})
+        slot.queue.enqueue("remove", {"filepath": "b", "corpus": "x"})
+        sup._dispatch()
+        assert slot.active
+
+        reg.write_text(json.dumps({"projects": []}), encoding="utf-8")
+        sup._registry_mtime = -1.0
+        sup._sync_registry()
+        assert str(a) in sup._slots, "kept while its job runs"
+
+        gate.set(); _drain(sup)
+        sup._dispatch()
+        assert not sup._inflight, "no new work once off the list"
+        sup._drop_unwanted()
+        assert sup._slots == {}
+    finally:
+        gate.set()
+        sup._pool.shutdown(wait=True)
+
+
+def test_an_unreadable_list_drops_nobody(tmp_path: Path):
+    a = tmp_path / "a" / ".rtfm"; a.mkdir(parents=True)
+    Library(str(a / "library.db")).close()
+    reg = _registry(tmp_path, [a])
+    sup = _make_sup(reg)
+    try:
+        _sync(sup)
+        reg.write_text("{ pas fini", encoding="utf-8")
+        sup._registry_mtime = -1.0
+        sup._sync_registry()
+        sup._drop_unwanted()
+        assert set(sup._slots) == {str(a)}
+    finally:
+        sup._pool.shutdown(wait=False)
+
+
 def test_dispatch_serves_global_arrival_order(tmp_path: Path, monkeypatch):
     """Documents run in the order they were queued, across projects — the
     oldest pending job anywhere goes first, regardless of project name. Here
@@ -557,6 +609,7 @@ class TestUserLaneReserve:
         sup._log = lambda msg: None
         sup._max_concurrent = 2
         sup._slots = slots
+        sup._wanted = set(slots)
         sup._inflight = {}
         sup._pool = None
         return sup
@@ -1043,6 +1096,7 @@ class TestScanningDoesNotStarveTheWorkItFinds:
 
         s = sup.Supervisor.__new__(sup.Supervisor)
         s._slots = {"p": slot}
+        s._wanted = {"p"}
         s._scan_interval = 60.0
         s._reconcile_interval = 3600.0
         s._watcher = None
