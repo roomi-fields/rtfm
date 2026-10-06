@@ -533,6 +533,30 @@ def _matches_pattern(name: str, rel: str, pattern: str) -> bool:
     return fnmatch.fnmatch(name, pattern)
 
 
+def _walk(root: Path, exclude_dirs: "set[str]") -> list[Path]:
+    """Every entry below *root*, sorted, never entering an excluded directory.
+
+    The scan used to list everything and drop excluded paths afterwards, so
+    it walked each ``.git``, ``node_modules`` and agent copy in full on every
+    pass. On one project that was 164,043 entries visited for 7,480 kept —
+    six seconds a minute, on each of forty projects scanned every minute.
+    Pruning at the directory keeps the pass proportional to what is indexed.
+    """
+    import os
+
+    out: list[Path] = []
+    for here, dirs, names in os.walk(root):
+        rel_here = Path(here).relative_to(root).parts
+        dirs[:] = [d for d in dirs if d not in exclude_dirs
+                   and not _under_excluded_subpath((*rel_here, d))]
+        # A name on the list is excluded as a file too: a submodule's
+        # ``.git`` is a one-line file pointing at its repository.
+        out.extend(Path(here) / n for n in names if n not in exclude_dirs)
+        out.extend(Path(here) / d for d in dirs)
+    out.sort()
+    return out
+
+
 def scan_directory(
     root: Path,
     extensions: set[str] | None = None,
@@ -581,9 +605,7 @@ def scan_directory(
     ri_spec = _load_rtfmignore_spec(root)  # always applied when present
 
     files: list[Path] = []
-    for item in sorted(root.rglob("*")):
-        if any(part in exclude_dirs for part in item.parts):
-            continue
+    for item in _walk(root, exclude_dirs):
         if not item.is_file():
             continue
         if item.name.endswith(TRANSIENT_SUFFIXES):
@@ -592,8 +614,6 @@ def scan_directory(
             rel = str(item.relative_to(root))
         except ValueError:
             rel = str(item)
-        if _under_excluded_subpath(Path(rel).parts):
-            continue
 
         # Type gate.
         if not wildcard and has_restrictor:

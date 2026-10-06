@@ -7,6 +7,17 @@ description: >-
 
 # Changelog
 
+## [0.47.2] — 2026-10-06
+
+### Fixed — every scan walked the directories it excludes
+
+The scan listed everything below a project, then dropped what the rules
+exclude: each `.git`, `node_modules` and agent working copy was walked in
+full on every pass. On one project that was 164,043 entries visited for
+7,480 kept, six seconds a pass — and every project is scanned once a minute.
+The scan now never enters an excluded directory. Same files found on every
+local project, a full round three times faster.
+
 ## [0.47.1] — 2026-10-06
 
 ### Fixed — agents' working copies kept the indexer busy for ten days

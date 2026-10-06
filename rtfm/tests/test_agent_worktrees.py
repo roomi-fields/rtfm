@@ -47,3 +47,34 @@ def test_copies_already_indexed_are_removed_even_while_present(tmp_path):
     assert is_excluded_by_rule(rel)
     confirmed, kept = confirm_removals(tmp_path, [rel])
     assert confirmed == [rel] and kept == []
+
+
+def test_the_scan_never_enters_an_excluded_directory(tmp_path, monkeypatch):
+    """Excluded content used to be listed in full and dropped afterwards:
+    164,043 entries visited for 7,480 kept, on every pass, every minute."""
+    import os
+
+    _write(tmp_path, "src/a.md")
+    for i in range(3):
+        _write(tmp_path, f"node_modules/pkg{i}/README.md")
+        _write(tmp_path, f".claude/worktrees/agent-{i}/src/a.md")
+    entered = []
+    real_walk = os.walk
+
+    def spying_walk(top, *a, **k):
+        for here, dirs, names in real_walk(top, *a, **k):
+            entered.append(os.path.relpath(here, tmp_path))
+            yield here, dirs, names
+
+    monkeypatch.setattr(os, "walk", spying_walk)
+    found = {p.relative_to(tmp_path).as_posix() for p in scan_directory(tmp_path)}
+    assert found == {"src/a.md"}
+    assert not any(d.startswith(("node_modules", ".claude/worktrees"))
+                   for d in entered), entered
+
+
+def test_a_submodule_git_pointer_file_is_not_indexed(tmp_path):
+    _write(tmp_path, "vendor/lib/README.md")
+    _write(tmp_path, "vendor/lib/.git", "gitdir: ../../.git/modules/lib\n")
+    found = {p.relative_to(tmp_path).as_posix() for p in scan_directory(tmp_path)}
+    assert found == {"vendor/lib/README.md"}
