@@ -1041,18 +1041,23 @@ class TestScanningDoesNotStarveTheWorkItFinds:
         slot.queue.close()
 
     def test_the_next_round_waits_an_interval_after_the_last_ends(self, tmp_path):
+        """Timed from the last check, the gap was twelve seconds — taken by
+        housekeeping, so the embeddings still never started."""
         slot = self._slot_with_backlog(tmp_path, 3)
         slot.queue.enqueue("scan", {"root": "/r", "corpus": "c"})
         supervisor = self._supervisor(slot)
-        supervisor._enqueue_periodic()            # round still queued: skip
+        supervisor._enqueue_periodic()            # round still queued
+        assert supervisor.enqueued == []
 
         conn = slot.queue._get_conn()
         conn.execute("DELETE FROM work_queue WHERE type = 'scan'")
         conn.commit()
-        supervisor._enqueue_periodic()            # just ended: not yet
+        slot.next_scan_at = 0.0                   # the short recheck is due
+        supervisor._enqueue_periodic()            # sees the end: not yet
         assert supervisor.enqueued == []
+        assert slot.next_scan_at >= time.monotonic() + 59
 
-        slot.next_scan_at = 0.0                   # an interval later
+        slot.next_scan_at = 0.0                   # a full interval later
         supervisor._enqueue_periodic()
         assert supervisor.enqueued == [slot]
         slot.queue.close()

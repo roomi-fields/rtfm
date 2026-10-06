@@ -368,6 +368,10 @@ AUDIT_INTERVAL_SECONDS = 3600.0
 # is never paused: this is only the background sweep looking for changes
 # nobody announced.
 SCAN_BACKLOG_PAUSE = 500
+
+# While a round of scans is still queued, how often to look whether it has
+# ended — the next round is timed from that end, to this precision.
+SCAN_ROUND_RECHECK_SECONDS = 5.0
 AUDIT_FIRST_DELAY_SECONDS = 300.0
 STALL_POLL_SECONDS = 5.0
 
@@ -424,6 +428,7 @@ class _Slot:
         self.exclusive = False
         self.next_scan_at = 0.0        # monotonic
         self.scan_paused = False       # backlog too large to look for more
+        self.scan_round_open = False   # last round seen still in the queue
         self.next_reconcile_at = 0.0   # monotonic; 0 until seeded
         self.reconcile_seeded = False
         self.jobs_done = 0
@@ -1120,16 +1125,23 @@ class Supervisor:
             if slot.queue is None:
                 continue
             if now >= slot.next_scan_at:
-                slot.next_scan_at = now + self._scan_interval
                 # A round still in the queue is not over: the next one starts
-                # an interval after it ends, not an interval after it began.
-                # A round over 48 directories took six minutes and was
-                # re-enqueued every minute, so the project always had a scan
-                # at its head and nothing ranked below ever ran — 53 OCR jobs
-                # waited five weeks, embeddings three, under a backlog too
-                # small to trip the pause below.
+                # an interval after it *ends*. A round over 48 directories
+                # took six minutes and was re-enqueued every minute, so the
+                # project always had a scan at its head and nothing ranked
+                # below ever ran — 53 OCR jobs waited five weeks, embeddings
+                # three, under a backlog too small to trip the pause below.
+                # Counting the interval from the last check instead of the
+                # end left a twelve-second gap, taken by housekeeping.
                 if self._scan_round_in_progress(slot):
+                    slot.scan_round_open = True
+                    slot.next_scan_at = now + SCAN_ROUND_RECHECK_SECONDS
                     continue
+                if slot.scan_round_open:
+                    slot.scan_round_open = False
+                    slot.next_scan_at = now + self._scan_interval
+                    continue
+                slot.next_scan_at = now + self._scan_interval
                 backlog = self._backlog(slot)
                 if backlog > SCAN_BACKLOG_PAUSE:
                     if not slot.scan_paused:

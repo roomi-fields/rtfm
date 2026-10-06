@@ -7,6 +7,16 @@ description: >-
 
 # Changelog
 
+## [0.47.4] — 2026-10-06
+
+### Fixed — the pause between scan rounds was timed from the wrong moment
+
+0.47.3 waited for a round to end before starting the next, but counted the
+interval from the last time it looked, not from the end: the next round left
+twelve seconds after the previous one, housekeeping took them, and the
+starved work still never started. The interval now runs from the observed
+end of the round.
+
 ## [0.47.3] — 2026-10-06
 
 ### Fixed — a project with many sources never ran anything but scans
