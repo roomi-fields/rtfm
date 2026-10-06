@@ -82,6 +82,23 @@ DEFAULT_EXCLUDE_DIRS: set[str] = {
     ".codegraph",
 }
 
+#: Directories excluded as a *path*, not by name alone: the name on its own
+#: is too common to skip everywhere. ``.claude/worktrees`` holds the full
+#: copies of the repository that Claude Code agents work in, created per
+#: agent and deleted when it finishes. Indexed, each copy was read, embedded
+#: and removed again: on one project 11,064 of 11,111 ingests in a day came
+#: from there, two cores busy for ten days on content the index already had.
+EXCLUDE_SUBPATHS: tuple[tuple[str, ...], ...] = ((".claude", "worktrees"),)
+
+
+def _under_excluded_subpath(parts: "tuple[str, ...]") -> bool:
+    for sub in EXCLUDE_SUBPATHS:
+        n = len(sub)
+        if any(tuple(parts[i:i + n]) == sub for i in range(len(parts) - n + 1)):
+            return True
+    return False
+
+
 #: File-name endings that are never content. A SQLite write-ahead log and
 #: its shared-memory index exist only while a database is open, carry no
 #: text, and appear and vanish under the scan — one of them was indexed
@@ -322,6 +339,8 @@ def is_excluded_by_rule(rel: str,
     parts = Path(rel).parts
     if any(part in (exclude_dirs or DEFAULT_EXCLUDE_DIRS) for part in parts):
         return True
+    if _under_excluded_subpath(parts):
+        return True
     return Path(rel).name.endswith(TRANSIENT_SUFFIXES)
 
 
@@ -532,7 +551,8 @@ def scan_directory(
     Filters, in order:
 
     1. :data:`DEFAULT_EXCLUDE_DIRS` — always skipped (``.git``, ``.venv``,
-       ``node_modules``, ``.rtfm``, …).
+       ``node_modules``, ``.rtfm``, …) — and :data:`EXCLUDE_SUBPATHS`
+       (``.claude/worktrees``).
     2. **Type gate** — a file passes when *no* positive restrictor is set
        (index-all default) OR it matches the suffix allow-list *extensions*
        OR it matches an *include* pattern. ``*``/``**``/``.*`` in *extensions*
@@ -572,6 +592,8 @@ def scan_directory(
             rel = str(item.relative_to(root))
         except ValueError:
             rel = str(item)
+        if _under_excluded_subpath(Path(rel).parts):
+            continue
 
         # Type gate.
         if not wildcard and has_restrictor:

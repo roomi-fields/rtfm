@@ -7,6 +7,19 @@ description: >-
 
 # Changelog
 
+## [0.47.1] — 2026-10-06
+
+### Fixed — agents' working copies kept the indexer busy for ten days
+
+Claude Code agents work in full copies of the repository under
+`.claude/worktrees/`, one per agent, deleted when it finishes. Each copy was
+indexed, embedded, then removed, and the next agent started it again: on one
+project 11,064 of a day's 11,111 ingests came from there, and the indexer
+held two cores for ten days on content the index already had under its real
+path. That path is now never indexed, and copies already in an index are
+removed at the next pass. The rest of `.claude` — notes, agent definitions —
+stays indexed, and a `worktrees` directory anywhere else is not touched.
+
 ## [0.47.0] — 2026-09-23
 
 ### Added — a bibliographic card for an indexed file
