@@ -7,6 +7,16 @@ description: >-
 
 # Changelog
 
+## [0.49.1] — 2026-10-06
+
+### Fixed — text recognition could take every core at once
+
+Recognising the text of a scanned PDF runs a program that uses several
+cores per page, and nothing limited how many ran together: a backlog of 53
+scanned PDFs held eleven lanes at once and took the machine to a load of 33.
+At most two now run at a time across all projects; other work keeps the
+remaining lanes.
+
 ## [0.49.0] — 2026-10-06
 
 ### Changed — sources are looked at when they change, not every minute

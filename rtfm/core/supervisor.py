@@ -326,6 +326,12 @@ class SupervisorLock:
 # every core instead of one.
 EXCLUSIVE_JOB_TYPES = frozenset({"scan", "reconcile", "vacuum"})
 
+# Text recognition on scanned PDFs runs an external program that uses
+# several cores per page. Started on every free lane, 53 scanned PDFs held
+# eleven of them at once and took the machine to a load of 33. Across the
+# whole fleet, this many run at a time; the rest waits its turn.
+OCR_MAX_CONCURRENT = 2
+
 #: Lanes held back for P_USER work, on top of the concurrency cap.
 #:
 #: Priority alone is not enough: it decides who gets the *next* free lane,
@@ -893,6 +899,10 @@ class Supervisor:
             return False
         if head_type in EXCLUSIVE_JOB_TYPES:
             return slot.inflight == 0
+        if head_type == "ocr":
+            running = sum(1 for _, job in self._inflight.values()
+                          if job.type == "ocr")
+            return running < OCR_MAX_CONCURRENT
         return True
 
     def _dispatch(self) -> bool:

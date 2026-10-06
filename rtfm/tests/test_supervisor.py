@@ -301,6 +301,39 @@ def test_dispatch_runs_handler_and_marks_done(tmp_path: Path, monkeypatch):
         sup._pool.shutdown(wait=True)
 
 
+def test_text_recognition_runs_at_most_two_at_a_time(tmp_path: Path, monkeypatch):
+    """Each one runs a program using several cores per page: on every free
+    lane, 53 scanned PDFs held eleven lanes and took the machine to a load
+    of 33. Other work still fills the lanes left."""
+    rtfm_dir = tmp_path / "proj" / ".rtfm"
+    rtfm_dir.mkdir(parents=True)
+    Library(str(rtfm_dir / "library.db")).close()
+    gate = threading.Event()
+
+    import rtfm.core.handlers as handlers_mod
+    for t in ("ocr", "remove"):
+        monkeypatch.setitem(handlers_mod.HANDLERS, t,
+                            lambda job, ctx: gate.wait(timeout=5.0))
+
+    sup = _make_sup(_registry(tmp_path, [rtfm_dir]), max_concurrent=8)
+    try:
+        _sync(sup)
+        slot = _only_slot(sup)
+        for i in range(5):
+            slot.queue.enqueue("ocr", {"filepath": f"scan{i}.pdf", "corpus": "x"})
+        sup._dispatch()
+        assert [j.type for _, j in sup._inflight.values()] == ["ocr", "ocr"]
+
+        slot.queue.enqueue("remove", {"filepath": "a", "corpus": "x"},
+                           priority=1)
+        sup._dispatch()
+        assert sorted(j.type for _, j in sup._inflight.values()) == [
+            "ocr", "ocr", "remove"]
+    finally:
+        gate.set()
+        sup._pool.shutdown(wait=True)
+
+
 def test_project_parallelises_writes_but_serialises_exclusive(
         tmp_path: Path, monkeypatch):
     """Parallelisable jobs (ingest/remove/embed) of one project run
