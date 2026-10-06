@@ -7,6 +7,18 @@ description: >-
 
 # Changelog
 
+## [0.49.2] — 2026-10-06
+
+### Fixed — a scanned book queued whole was read whole, and timed out
+
+A scanned PDF is read in tranches of 50 pages, each with a 30-minute budget.
+When its page count was unknown at the moment it was found, it was queued as
+one job covering the whole book — still under the budget of one tranche —
+and long books failed: eight on one project, never retried. The reader now
+counts the pages first and splits a long book into tranches before reading
+anything. Books that already failed that way are queued again on the next
+start (or by `rtfm repair`), once.
+
 ## [0.49.1] — 2026-10-06
 
 ### Fixed — text recognition could take every core at once

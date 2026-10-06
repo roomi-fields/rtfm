@@ -530,6 +530,13 @@ class _Slot:
             remark_skipped_binaries(self.db_path, log=self.log)
         except Exception as exc:  # bookkeeping must never keep a project down
             log(f"{self.rtfm_dir.parent.name}: binary re-marking skipped: {exc}")
+        # Scanned books read whole timed out and stayed failed; the reader
+        # now splits them, so they go back in the queue once.
+        try:
+            from rtfm.core.repair import requeue_unsplit_scans
+            requeue_unsplit_scans(self.db_path, log=self.log)
+        except Exception as exc:  # a repair must never keep a project down
+            log(f"{self.rtfm_dir.parent.name}: scan requeue skipped: {exc}")
         # A source taken out of the configuration left its files in the
         # index for good. Every start takes them out.
         try:

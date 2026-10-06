@@ -2448,6 +2448,8 @@ def cmd_repair(args):
 
     from rtfm.core.repair import forget_undeclared_sources, remark_skipped_binaries
     retired = forget_undeclared_sources(rtfm_dir / "library.db", log=print)
+    from rtfm.core.repair import requeue_unsplit_scans
+    retired += requeue_unsplit_scans(rtfm_dir / "library.db", log=print)
     marked = remark_skipped_binaries(rtfm_dir / "library.db", log=print) or retired
     n = repair_shared_identities(rtfm_dir / "library.db", log=print)
     if not n:

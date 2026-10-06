@@ -262,6 +262,8 @@ def run_pdfium_op(request: dict):
             return _pdftext_inprocess(path)
         if op == "metadata":
             return _pdfmeta_inprocess(path)
+        if op == "page_count":
+            return _page_count_inprocess(path)
         if op == "ocr":
             return _tesseract_inprocess(
                 path,
@@ -576,6 +578,32 @@ def extract_with_marker(path: Path) -> list[dict]:
         raise PDFExtractionError(f"marker extraction failed: {payload['error']}")
 
     return [{"page": 1, "text": payload.get("markdown", "")}]
+
+
+def _page_count_inprocess(path: Path) -> int:
+    """Number of pages. Only ever called inside the child."""
+    import pypdfium2 as pdfium
+
+    # Bytes read here, not a path handed to pdfium: the same hardening as
+    # ``measure_pdf_text`` for files on slow or flaky mounts.
+    doc = pdfium.PdfDocument(path.read_bytes())
+    try:
+        return len(doc)
+    finally:
+        doc.close()
+
+
+#: Counting pages opens the file and reads its page tree: seconds at most.
+_PAGE_COUNT_TIMEOUT_S = 120
+
+
+def count_pdf_pages(path: Path) -> int:
+    """How many pages *path* has, read in a disposable child process.
+
+    Raises :class:`PDFExtractionError` when the file cannot be opened.
+    """
+    return int(_call_pdfium_child({"op": "page_count", "path": str(path)},
+                                  _PAGE_COUNT_TIMEOUT_S, "page count"))
 
 
 def _pdfmeta_inprocess(path: Path) -> dict:

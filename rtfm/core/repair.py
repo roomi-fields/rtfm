@@ -295,3 +295,53 @@ def forget_undeclared_sources(
     say(f"source retirement: {len(gone)} file(s) of sources no longer "
         f"declared taken out ({', '.join(corpora)})")
     return len(gone)
+
+
+def requeue_unsplit_scans(
+    db_path: Path,
+    log: Callable[[str], None] | None = None,
+) -> int:
+    """Put back scanned books that timed out because they were read whole.
+
+    A scan queued before its page count was known was read as one block,
+    under the time budget of a single tranche, and long books failed — a
+    failure that is never retried on its own. The reader now splits such a
+    book before reading it, so these go back in the queue once and come out
+    as tranches. Idempotent: a requeued row is no longer a failure.
+    """
+    import json
+
+    say = log or (lambda m: None)
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=60)
+    except sqlite3.Error as exc:
+        say(f"scan requeue: cannot open the index ({exc})")
+        return 0
+    try:
+        if not _table_exists(conn, "work_queue"):
+            return 0
+        rows = conn.execute(
+            "SELECT id, payload FROM work_queue WHERE type = 'ocr' "
+            "AND status = 'failed' AND error LIKE '%timed out%'").fetchall()
+        back = 0
+        for job_id, payload in rows:
+            try:
+                if json.loads(payload).get("page_end") is not None:
+                    continue  # a tranche: its own budget, a genuine timeout
+            except ValueError:
+                continue
+            try:
+                conn.execute(
+                    "UPDATE work_queue SET status = 'pending', error = NULL, "
+                    "started_at = NULL, finished_at = NULL, attempts = 0 "
+                    "WHERE id = ?", (job_id,))
+                back += 1
+            except sqlite3.IntegrityError:
+                conn.execute("DELETE FROM work_queue WHERE id = ?", (job_id,))
+        conn.commit()
+        if back:
+            say(f"scan requeue: {back} scanned book(s) read whole and timed "
+                f"out — queued again, to be read in tranches")
+        return back
+    finally:
+        conn.close()

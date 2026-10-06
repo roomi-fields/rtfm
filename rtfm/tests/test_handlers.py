@@ -470,3 +470,108 @@ class TestOCRSplit:
         n2 = c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         c.close()
         assert n2 == n1
+
+
+class TestAScanQueuedWholeIsSplit:
+    """A scan queued before its page count was known used to be read whole,
+    under the time budget of one tranche: eight books timed out at 30 min."""
+
+    def _setup(self, tmp_path, monkeypatch, pages, count_fails=False):
+        from rtfm.core import handlers
+        from rtfm.core.library import Library
+        import rtfm.parsers.pdf as pdfmod
+
+        root = tmp_path / "src"
+        root.mkdir()
+        (root / "livre.pdf").write_bytes(b"%PDF-1.4\nfake\n%%EOF\n")
+        db = tmp_path / ".rtfm" / "library.db"
+        db.parent.mkdir(parents=True)
+        Library(str(db)).close()
+        (tmp_path / ".rtfm" / "config.json").write_text(
+            '{"ocr_backend":"tesseract","ocr_langs":"eng"}')
+        read = []
+
+        def fake_tess(path, langs="eng", page_start=1, page_end=None, scale=2.0):
+            read.append((page_start, page_end))
+            return [{"page": 1, "text": "texte reconnu\n\nsuite"}]
+
+        def fake_count(path):
+            if count_fails:
+                raise pdfmod.PDFExtractionError("unreadable")
+            return pages
+
+        monkeypatch.setattr(pdfmod, "extract_with_tesseract", fake_tess)
+        monkeypatch.setattr(pdfmod, "count_pdf_pages", fake_count)
+        job = Job(id=1, type="ocr", priority=3,
+                  payload={"root": str(root), "corpus": "c",
+                           "filepath": "livre.pdf", "page_start": 1,
+                           "page_end": None},
+                  status="running", created_at="", started_at=None,
+                  finished_at=None, error=None, attempts=1)
+        handlers.handle_ocr(job, SimpleNamespace(db_path=db, _log=lambda m: None))
+        return db, read
+
+    def test_a_long_book_becomes_tranches(self, tmp_path, monkeypatch):
+        from rtfm.core.queue import Queue
+        db, read = self._setup(tmp_path, monkeypatch, pages=130)
+        assert read == [], "nothing read whole"
+        q = Queue(str(db))
+        try:
+            ranges = sorted((j.payload["page_start"], j.payload["page_end"])
+                            for j in q.list_pending() if j.type == "ocr")
+        finally:
+            q.close()
+        assert ranges == [(1, 50), (51, 100), (101, 130)]
+
+    def test_a_short_one_is_read_with_its_end_known(self, tmp_path, monkeypatch):
+        _, read = self._setup(tmp_path, monkeypatch, pages=20)
+        assert read == [(1, 20)]
+
+    def test_a_count_that_fails_still_reads_it(self, tmp_path, monkeypatch):
+        _, read = self._setup(tmp_path, monkeypatch, pages=0, count_fails=True)
+        assert read == [(1, None)]
+
+
+def test_pages_are_counted_in_a_child(tmp_path):
+    pdfium = pytest.importorskip("pypdfium2")
+    from rtfm.parsers.pdf import count_pdf_pages
+
+    doc = pdfium.PdfDocument.new()
+    for _ in range(3):
+        doc.new_page(200, 200)
+    path = tmp_path / "trois.pdf"
+    doc.save(str(path))
+    doc.close()
+    assert count_pdf_pages(path) == 3
+
+
+def test_books_read_whole_that_timed_out_are_queued_again(tmp_path):
+    import json
+    import sqlite3
+    from rtfm.core.library import Library
+    from rtfm.core.repair import requeue_unsplit_scans
+
+    db = tmp_path / "library.db"
+    Library(str(db)).close()
+    q = Queue(str(db))
+    whole = q.enqueue("ocr", {"filepath": "livre.pdf", "corpus": "c",
+                              "page_start": 1, "page_end": None})
+    tranche = q.enqueue("ocr", {"filepath": "autre.pdf", "corpus": "c",
+                                "page_start": 1, "page_end": 50})
+    other = q.enqueue("ocr", {"filepath": "casse.pdf", "corpus": "c",
+                              "page_start": 1, "page_end": None})
+    for job_id, err in ((whole, "tesseract extraction timed out after 1800s"),
+                        (tranche, "tesseract extraction timed out after 1800s"),
+                        (other, "pdfium crashed (signal 11)")):
+        q._get_conn().execute(
+            "UPDATE work_queue SET status='failed', error=? WHERE id=?", (err, job_id))
+    q._get_conn().commit()
+    q.close()
+
+    assert requeue_unsplit_scans(db) == 1
+    assert requeue_unsplit_scans(db) == 0, "idempotent"
+    conn = sqlite3.connect(db)
+    status = {json.loads(p)["filepath"]: s for p, s in
+              conn.execute("SELECT payload, status FROM work_queue")}
+    assert status == {"livre.pdf": "pending", "autre.pdf": "failed",
+                      "casse.pdf": "failed"}

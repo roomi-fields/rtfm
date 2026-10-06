@@ -652,6 +652,29 @@ def handle_ocr(job: Job, worker: "JobContext") -> None:
     book_title = extract_title_from_filename(abs_path.stem)
     backend, langs = _ocr_config(worker.db_path)
 
+    # A scan queued without its page count — the count was unknown when it
+    # was found — would be read whole under one tranche's time budget. Eight
+    # books timed out that way. Count now, and split if it is long.
+    if backend != "marker" and page_end is None and page_start == 1:
+        from rtfm.parsers.pdf import count_pdf_pages
+        try:
+            page_count = count_pdf_pages(abs_path)
+        except Exception as exc:
+            worker._log(f"ocr [{corpus}] {rel}: page count failed ({exc}) "
+                        f"— read whole")
+            page_count = 0
+        if page_count > PAGES_PER_OCR_JOB:
+            queue = Queue(str(worker.db_path))
+            try:
+                n = enqueue_ocr_jobs(queue, str(root), corpus, rel, page_count)
+            finally:
+                queue.close()
+            worker._log(f"ocr [{corpus}] {rel}: {page_count} pages, "
+                        f"split into {n} tranche(s)")
+            return
+        if page_count > 0:
+            page_end = page_count
+
     # OCR just this tranche.
     if backend == "marker":
         pages = extract_with_marker(abs_path)  # whole file (marker has no range)
