@@ -369,9 +369,44 @@ AUDIT_INTERVAL_SECONDS = 3600.0
 # nobody announced.
 SCAN_BACKLOG_PAUSE = 500
 
-# While a round of scans is still queued, how often to look whether it has
-# ended — the next round is timed from that end, to this precision.
-SCAN_ROUND_RECHECK_SECONDS = 5.0
+# How each source is looked at. A source the kernel can watch is scanned when
+# it reports a change, once the activity has settled, and otherwise once a
+# day in case a notification was lost. A source it cannot watch — a network
+# share, whose changes made on the other machine are never reported — is
+# looked at on a clock that slows down while nothing changes: one minute,
+# doubling after every scan that finds nothing, up to an hour, back to one
+# minute as soon as a scan finds something. The old rule looked at every
+# source every minute, idle or not, for ever.
+SAFETY_SCAN_SECONDS = 24 * 3600.0
+POLL_MAX_SECONDS = 3600.0
+CHANGE_SETTLE_SECONDS = 5.0
+CHANGE_MIN_SPACING_SECONDS = 30.0
+# A scan that never reports back (its claim lost and swept) must not leave
+# its source unscanned for good.
+SCAN_LOST_AFTER_SECONDS = 6 * 3600.0
+
+
+class _SourceSchedule:
+    """When one source of one project is next looked at, and how."""
+
+    __slots__ = ("source", "config", "payload", "network", "watched",
+                 "interval", "next_at", "queued_at", "changed_at",
+                 "change_scan_at")
+
+    def __init__(self, source: dict, config: dict, payload: dict,
+                 network: bool, first_at: float, base_interval: float):
+        #: The configuration entry and the project configuration it came
+        #: from: every scan payload is built from them, by the one author.
+        self.source = source
+        self.config = config
+        self.payload = payload
+        self.network = network
+        self.watched = False
+        self.interval = base_interval
+        self.next_at = first_at
+        self.queued_at: Optional[float] = None
+        self.changed_at: Optional[float] = None
+        self.change_scan_at = 0.0
 AUDIT_FIRST_DELAY_SECONDS = 300.0
 STALL_POLL_SECONDS = 5.0
 
@@ -426,9 +461,13 @@ class _Slot:
         # a scan/reconcile/vacuum runs, and forces that job to run alone.
         self.inflight = 0
         self.exclusive = False
-        self.next_scan_at = 0.0        # monotonic
+        #: (corpus, root) → schedule, rebuilt when the configuration changes.
+        self.sources: dict[tuple[str, str], _SourceSchedule] = {}
+        self.config_mtime: Optional[float] = None
+        #: When the sources of a newly admitted project are first looked at
+        #: (staggered across the fleet; now, for a rebuilt index).
+        self.first_scan_at = 0.0
         self.scan_paused = False       # backlog too large to look for more
-        self.scan_round_open = False   # last round seen still in the queue
         self.next_reconcile_at = 0.0   # monotonic; 0 until seeded
         self.reconcile_seeded = False
         self.jobs_done = 0
@@ -443,6 +482,15 @@ class _Slot:
         #: lines in eighty minutes, six projects, three megabytes of log.
         self.queue_errors = 0
         self.retry_at = 0.0
+
+    def scan_everything_now(self) -> None:
+        """Look at every source at once — the index may not be what it was."""
+        now = time.monotonic()
+        self.first_scan_at = now
+        self.config_mtime = None
+        for src in self.sources.values():
+            src.next_at = now
+            src.queued_at = None
 
     @property
     def active(self) -> bool:
@@ -543,6 +591,11 @@ class Supervisor:
         self._next_audit = time.monotonic() + AUDIT_FIRST_DELAY_SECONDS
         self._next_identity_check = 0.0
 
+        self._watcher = None
+        self._changes_lock = threading.Lock()
+        self._changes: dict = {}
+        self._watch_failures: dict = {}
+
         self._stop = False
         self._stop_checked = 0.0
         self._auto_respawn = False
@@ -564,6 +617,7 @@ class Supervisor:
         # comes from the lock, but the counters live here.
         self._snapshot()
         self._preload_model()
+        self._start_watcher()
         self._start_stall_watchdog()
         try:
             while not self._stop:
@@ -672,6 +726,7 @@ class Supervisor:
         # Drop removed (only if idle — never yank a slot mid-job).
         for path in list(self._slots):
             if path not in wanted and not self._slots[path].active:
+                self._forget_sources(self._slots[path])
                 self._slots[path].close()
                 del self._slots[path]
                 self._log(f"- project {Path(path).parent.name}")
@@ -693,10 +748,10 @@ class Supervisor:
             # ASAP to repopulate.
             now = time.monotonic()
             if rebuilt:
-                slot.next_scan_at = now
+                slot.first_scan_at = now
             else:
                 span = self._scan_interval / max(1, len(self._wanted))
-                slot.next_scan_at = now + (self._open_stagger * span)
+                slot.first_scan_at = now + (self._open_stagger * span)
                 self._open_stagger = (self._open_stagger + 1) % max(1, len(self._wanted))
             self._slots[path] = slot
             self._log(f"+ project {Path(path).parent.name}"
@@ -765,7 +820,7 @@ class Supervisor:
             self._log(f"{name}: reopen failed: {exc}")
             slot.queue = None
             return False
-        slot.next_scan_at = time.monotonic()
+        slot.scan_everything_now()
         slot.scan_paused = False
         slot.reconcile_seeded = False
         return True
@@ -952,7 +1007,7 @@ class Supervisor:
             self._log(f"{name}: runtime-corruption recovery failed, parking "
                       f"until restart: {exc}")
             return
-        slot.next_scan_at = time.monotonic()  # rebuild from source ASAP
+        slot.scan_everything_now()  # rebuild from source ASAP
         self._log(f"{name}: runtime DB corruption healed"
                   + (" (quarantined + rebuilding from source)" if rebuilt
                      else " (reopened)"))
@@ -968,7 +1023,7 @@ class Supervisor:
         if handler is None:
             raise RuntimeError(f"no handler for type={job.type!r}")
         ctx = JobContext(str(slot.db_path), slot.log)
-        handler(job, ctx)
+        return handler(job, ctx)
 
     def _reap_finished(self) -> None:
         done = [f for f in self._inflight if f.done()]
@@ -981,8 +1036,10 @@ class Supervisor:
             # closing write, and letting anything escape here strands the row
             # for good — the pop already happened.
             try:
-                fut.result()
+                outcome = fut.result()
             except BaseException as exc:
+                if job.type == "scan":
+                    self._scan_finished(slot, job, None)
                 tb = traceback.format_exc(limit=20)
                 self._close(slot, job, "mark_failed",
                             f"{type(exc).__name__}: {exc}\n{tb}")
@@ -990,6 +1047,8 @@ class Supervisor:
                 self._jobs_failed += 1
                 slot.log(f"job#{job.id} {job.type} FAILED: {exc}")
                 continue
+            if job.type == "scan":
+                self._scan_finished(slot, job, outcome)
             self._close(slot, job, "mark_done")
             slot.jobs_done += 1
             self._jobs_done += 1
@@ -1116,52 +1175,147 @@ class Supervisor:
         except Exception:
             return 0
 
-    def _scan_round_in_progress(self, slot: _Slot) -> bool:
+    # ── when each source is looked at ────────────────────────────────────
+
+    def _start_watcher(self) -> None:
+        """Watch local sources when the system can say what changed."""
+        self._watcher = None
+        if os.environ.get("RTFM_NO_WATCH"):
+            self._log("change notification disabled (RTFM_NO_WATCH) — "
+                      "every source is looked at on a clock")
+            return
         try:
-            conn = slot.queue._get_conn()
-            return conn.execute(
-                "SELECT 1 FROM work_queue WHERE type = 'scan' "
-                "AND status IN ('pending', 'running') LIMIT 1"
-            ).fetchone() is not None
+            from rtfm.core.watch import TreeWatcher, watching_supported
+            if not watching_supported():
+                self._log("change notification unavailable on this system — "
+                          "every source is looked at on a clock")
+                return
+            self._watcher = TreeWatcher(self._on_source_changed,
+                                        self._on_watch_failed, log=self._log)
+        except Exception as exc:
+            self._log(f"change notification unavailable ({exc}) — "
+                      f"every source is looked at on a clock")
+            self._watcher = None
+
+    def _on_source_changed(self, key) -> None:
+        """Watcher thread: a watched source changed."""
+        with self._changes_lock:
+            self._changes[key] = time.monotonic()
+
+    def _on_watch_failed(self, key, reason: str) -> None:
+        """Watcher thread: a source could not be watched."""
+        with self._changes_lock:
+            self._watch_failures[key] = reason
+
+    def _refresh_sources(self, slot: _Slot) -> None:
+        """Bring the slot's sources in line with its configuration."""
+        cfg_path = slot.rtfm_dir / "config.json"
+        try:
+            mtime = cfg_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        if mtime == slot.config_mtime:
+            return
+        slot.config_mtime = mtime
+        from rtfm.config import build_scan_payload, load_config
+        from rtfm.core.sync import DEFAULT_EXCLUDE_DIRS
+        from rtfm.core.watch import is_network_path
+        try:
+            cfg = load_config(slot.rtfm_dir.parent)
         except Exception:
-            return False
+            cfg = {}
+        wanted: dict[tuple[str, str], tuple[dict, dict]] = {}
+        for src in cfg.get("sources") or [
+                {"path": str(slot.rtfm_dir.parent),
+                 "corpus": cfg.get("corpus", "default")}]:
+            # ``build_scan_payload`` is lexical by contract — it never
+            # touches the filesystem: one source on an unreachable mount
+            # would otherwise block this thread, and with it every project.
+            payload = build_scan_payload(src, cfg)
+            wanted[(payload["corpus"], payload["root"])] = (src, payload)
+        name = slot.rtfm_dir.parent.name
+        for key in [k for k in slot.sources if k not in wanted]:
+            if self._watcher is not None:
+                self._watcher.unwatch((str(slot.rtfm_dir), *key))
+            del slot.sources[key]
+        for key, (src, payload) in wanted.items():
+            known = slot.sources.get(key)
+            if known is not None:
+                known.source, known.config, known.payload = src, cfg, payload
+                continue
+            network = is_network_path(payload["root"])
+            sched = _SourceSchedule(src, cfg, payload, network,
+                                    slot.first_scan_at, self._scan_interval)
+            slot.sources[key] = sched
+            if self._watcher is not None and not network:
+                sched.watched = True
+                sched.interval = SAFETY_SCAN_SECONDS
+                self._watcher.watch(
+                    (str(slot.rtfm_dir), *key), payload["root"],
+                    frozenset(DEFAULT_EXCLUDE_DIRS),
+                    honor_gitignore=payload.get("honor_gitignore", True))
+            else:
+                why = ("network share" if network
+                       else "change notification unavailable")
+                slot.log(f"[{key[0]}] {key[1]}: looked at on a clock ({why})")
+        if not slot.sources:
+            slot.log(f"{name}: no source to look at")
+
+    def _forget_sources(self, slot: _Slot) -> None:
+        if self._watcher is not None:
+            for key in slot.sources:
+                self._watcher.unwatch((str(slot.rtfm_dir), *key))
+        slot.sources.clear()
+
+    def _take_notifications(self) -> tuple[dict, dict]:
+        with self._changes_lock:
+            changes, self._changes = self._changes, {}
+            failures, self._watch_failures = self._watch_failures, {}
+        return changes, failures
+
+    def _scan_finished(self, slot: _Slot, job: Job, changes) -> None:
+        """Time a source's next look from the end of this one.
+
+        *changes* is what the scan found — ``None`` when it failed or could
+        not tell. A source on a clock slows down while it finds nothing.
+        """
+        key = (job.payload.get("corpus"), job.payload.get("root"))
+        sched = slot.sources.get(key)
+        if sched is None:
+            return
+        now = time.monotonic()
+        sched.queued_at = None
+        if not sched.watched:
+            if changes:
+                sched.interval = self._scan_interval
+            elif changes == 0:
+                sched.interval = min(sched.interval * 2, POLL_MAX_SECONDS)
+        sched.next_at = now + sched.interval
 
     def _enqueue_periodic(self) -> None:
         now = time.monotonic()
+        changes, failures = self._take_notifications()
         for slot in self._slots.values():
             if slot.queue is None:
                 continue
-            if now >= slot.next_scan_at:
-                # A round still in the queue is not over: the next one starts
-                # an interval after it *ends*. A round over 48 directories
-                # took six minutes and was re-enqueued every minute, so the
-                # project always had a scan at its head and nothing ranked
-                # below ever ran — 53 OCR jobs waited five weeks, embeddings
-                # three, under a backlog too small to trip the pause below.
-                # Counting the interval from the last check instead of the
-                # end left a twelve-second gap, taken by housekeeping.
-                if self._scan_round_in_progress(slot):
-                    slot.scan_round_open = True
-                    slot.next_scan_at = now + SCAN_ROUND_RECHECK_SECONDS
-                    continue
-                if slot.scan_round_open:
-                    slot.scan_round_open = False
-                    slot.next_scan_at = now + self._scan_interval
-                    continue
-                slot.next_scan_at = now + self._scan_interval
-                backlog = self._backlog(slot)
-                if backlog > SCAN_BACKLOG_PAUSE:
-                    if not slot.scan_paused:
-                        slot.scan_paused = True
-                        slot.log(
-                            f"periodic scan paused: {backlog} job(s) already "
-                            f"waiting — looking for more would only keep the "
-                            f"slot busy. Resumes under {SCAN_BACKLOG_PAUSE}.")
-                    continue
-                if slot.scan_paused:
-                    slot.scan_paused = False
-                    slot.log(f"periodic scan resumed ({backlog} job(s) left)")
-                self._enqueue_scans(slot)
+            try:
+                self._refresh_sources(slot)
+            except Exception as exc:
+                slot.log(f"source refresh error: {exc}")
+            here = str(slot.rtfm_dir)
+            for (owner, corpus, root), reason in failures.items():
+                sched = slot.sources.get((corpus, root)) if owner == here else None
+                if sched is not None and sched.watched:
+                    sched.watched = False
+                    sched.interval = self._scan_interval
+                    sched.next_at = now
+                    slot.log(f"[{corpus}] {root}: cannot be watched ({reason})"
+                             f" — looked at on a clock")
+            for (owner, corpus, root), at in changes.items():
+                sched = slot.sources.get((corpus, root)) if owner == here else None
+                if sched is not None:
+                    sched.changed_at = at
+            self._enqueue_due_scans(slot, now)
             if not slot.reconcile_seeded:
                 slot.next_reconcile_at = now + self._reconcile_interval
                 slot.reconcile_seeded = True
@@ -1172,34 +1326,51 @@ class Supervisor:
                 except Exception as exc:
                     slot.log(f"reconcile enqueue error: {exc}")
 
-    def _enqueue_scans(self, slot: _Slot) -> None:
-        """Enqueue one P1 ``scan`` job per configured source for a project.
+    def _enqueue_due_scans(self, slot: _Slot, now: float) -> None:
+        due_on_clock = []
+        for sched in slot.sources.values():
+            if sched.queued_at is not None and now - sched.queued_at > SCAN_LOST_AFTER_SECONDS:
+                sched.queued_at = None
+            # A reported change goes ahead of the clock and of the backlog
+            # pause: it is known work, not a search for some. It waits for
+            # the activity to settle, and two in a row are spaced.
+            if (sched.changed_at is not None
+                    and now - sched.changed_at >= CHANGE_SETTLE_SECONDS
+                    and now - sched.change_scan_at >= CHANGE_MIN_SPACING_SECONDS):
+                sched.changed_at = None
+                sched.change_scan_at = now
+                self._enqueue_scan(slot, sched, now)
+                continue
+            if sched.queued_at is None and now >= sched.next_at:
+                due_on_clock.append(sched)
+        if not due_on_clock:
+            return
+        backlog = self._backlog(slot)
+        if backlog > SCAN_BACKLOG_PAUSE:
+            for sched in due_on_clock:
+                sched.next_at = now + self._scan_interval
+            if not slot.scan_paused:
+                slot.scan_paused = True
+                slot.log(
+                    f"periodic scan paused: {backlog} job(s) already "
+                    f"waiting — looking for more would only keep the "
+                    f"slot busy. Resumes under {SCAN_BACKLOG_PAUSE}.")
+            return
+        if slot.scan_paused:
+            slot.scan_paused = False
+            slot.log(f"periodic scan resumed ({backlog} job(s) left)")
+        for sched in due_on_clock:
+            self._enqueue_scan(slot, sched, now)
 
-        Mirrors the retired ``Worker._maybe_scan`` — dedup on the queue's
-        ``UNIQUE(type, payload) WHERE status='pending'`` index means a scan
-        already pending is silently dropped.
-        """
+    def _enqueue_scan(self, slot: _Slot, sched: _SourceSchedule, now: float) -> None:
+        from rtfm.config import build_scan_payload
         try:
-            from rtfm.config import build_scan_payload, load_config
-            try:
-                cfg = load_config(slot.rtfm_dir.parent)
-            except Exception:
-                cfg = {}
-            sources = cfg.get("sources") or [
-                {"path": str(slot.rtfm_dir.parent),
-                 "corpus": cfg.get("corpus", "default")}
-            ]
-            for src in sources:
-                # ``build_scan_payload`` is lexical by contract — it never
-                # touches the filesystem. That matters most here: ``resolve()``
-                # stats every path component, and one source on an unreachable
-                # network mount would block this thread in uninterruptible I/O,
-                # freezing dispatch, reaping and scheduling for *every* project
-                # (observed: the whole fleet stalled on a 9p mount while twelve
-                # jobs sat finished and unreaped).
-                slot.queue.enqueue("scan", build_scan_payload(src, cfg))
+            payload = build_scan_payload(sched.source, sched.config)
+            slot.queue.enqueue("scan", payload)
+            sched.queued_at = now
         except Exception as exc:
             slot.log(f"scan enqueue error: {exc}")
+            sched.next_at = now + self._scan_interval
 
     # ── lifecycle helpers ────────────────────────────────────────────────
 
@@ -1300,6 +1471,8 @@ class Supervisor:
         self._pool.shutdown(wait=True)
         # Any job that completed during shutdown still needs its row closed.
         self._reap_finished()
+        if self._watcher is not None:
+            self._watcher.close()
         for slot in self._slots.values():
             slot.close()
         clear_supervisor_state()

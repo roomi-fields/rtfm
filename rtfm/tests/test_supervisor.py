@@ -82,7 +82,7 @@ def test_enqueue_scans_one_per_source(tmp_path: Path):
     try:
         _sync(sup)
         slot = _only_slot(sup)
-        sup._enqueue_scans(slot)
+        sup._enqueue_periodic()
 
         q = Queue(rtfm_dir / "library.db")
         try:
@@ -111,8 +111,10 @@ def test_enqueue_scans_dedup_on_repeat(tmp_path: Path):
     try:
         _sync(sup)
         slot = _only_slot(sup)
-        sup._enqueue_scans(slot)
-        sup._enqueue_scans(slot)  # dedup index drops the duplicate
+        sup._enqueue_periodic()
+        for sched in slot.sources.values():   # due again before it reported
+            sched.queued_at, sched.next_at = None, 0.0
+        sup._enqueue_periodic()  # dedup index drops the duplicate
         q = Queue(rtfm_dir / "library.db")
         try:
             scans = [j for j in q.list_pending(limit=10_000) if j.type == "scan"]
@@ -133,7 +135,7 @@ def test_periodic_reconcile_seeds_then_enqueues(tmp_path: Path):
         _sync(sup)
         slot = _only_slot(sup)
         # Suppress scans so we isolate reconcile.
-        slot.next_scan_at = time.monotonic() + 10_000
+        slot.first_scan_at = time.monotonic() + 10_000
 
         sup._enqueue_periodic()          # first pass: seeds the reconcile clock
         q = Queue(rtfm_dir / "library.db")
@@ -143,7 +145,6 @@ def test_periodic_reconcile_seeds_then_enqueues(tmp_path: Path):
             q.close()
 
         slot.next_reconcile_at = time.monotonic() - 1   # force expiry
-        slot.next_scan_at = time.monotonic() + 10_000
         sup._enqueue_periodic()
         q = Queue(rtfm_dir / "library.db")
         try:
@@ -221,12 +222,12 @@ def test_recover_slot_quarantines_and_reopens(tmp_path: Path):
     sup = _make_sup(_registry(tmp_path, [rtfm_dir]))
     try:
         slot = _Slot(rtfm_dir)
-        slot.next_scan_at = 1e18            # far future; recovery must reset it
+        slot.first_scan_at = 1e18           # far future; recovery must reset it
         sup._recover_slot(slot)
         assert list(rtfm_dir.glob("library.db.corrupt-*"))   # quarantined
         assert slot.queue is not None                        # fresh queue open
         assert slot.queue.peek() is None                     # empty, no more errors
-        assert slot.next_scan_at < 1e17                      # rebuild scheduled ASAP
+        assert slot.first_scan_at < 1e17                     # rebuild scheduled ASAP
     finally:
         sup._pool.shutdown(wait=False)
 
@@ -629,7 +630,10 @@ class TestSchedulingNeverTouchesSourceFilesystem:
 
         sup = Supervisor.__new__(Supervisor)
         sup._log = lambda msg: None
-        sup._enqueue_scans(slot)
+        sup._watcher = None
+        sup._scan_interval = 60.0
+        sup._refresh_sources(slot)
+        sup._enqueue_due_scans(slot, time.monotonic())
 
         head = slot.queue.peek()
         assert head is not None and head[2] == "scan"
@@ -1002,12 +1006,18 @@ class TestScanningDoesNotStarveTheWorkItFinds:
     def _supervisor(self, slot):
         import rtfm.core.supervisor as sup
 
+        import threading
+
         s = sup.Supervisor.__new__(sup.Supervisor)
         s._slots = {"p": slot}
         s._scan_interval = 60.0
         s._reconcile_interval = 3600.0
+        s._watcher = None
+        s._changes_lock = threading.Lock()
+        s._changes, s._watch_failures = {}, {}
         s.enqueued = []
-        s._enqueue_scans = lambda sl: s.enqueued.append(sl)
+        s._enqueue_scan = lambda sl, sched, now: (
+            s.enqueued.append(sl), setattr(sched, "queued_at", now))
         return s
 
     def test_a_large_backlog_pauses_the_periodic_scan(self, tmp_path):
@@ -1029,39 +1039,6 @@ class TestScanningDoesNotStarveTheWorkItFinds:
         assert supervisor.enqueued == [slot]
         slot.queue.close()
 
-    def test_no_new_round_while_the_last_one_is_queued(self, tmp_path):
-        """A round over many directories outlasts the interval. Re-enqueued
-        each minute, it kept a scan at the project's head for good, and the
-        embeddings and OCR ranked below it waited weeks."""
-        slot = self._slot_with_backlog(tmp_path, 3)
-        slot.queue.enqueue("scan", {"root": "/r", "corpus": "c"})
-        supervisor = self._supervisor(slot)
-        supervisor._enqueue_periodic()
-        assert supervisor.enqueued == []
-        slot.queue.close()
-
-    def test_the_next_round_waits_an_interval_after_the_last_ends(self, tmp_path):
-        """Timed from the last check, the gap was twelve seconds — taken by
-        housekeeping, so the embeddings still never started."""
-        slot = self._slot_with_backlog(tmp_path, 3)
-        slot.queue.enqueue("scan", {"root": "/r", "corpus": "c"})
-        supervisor = self._supervisor(slot)
-        supervisor._enqueue_periodic()            # round still queued
-        assert supervisor.enqueued == []
-
-        conn = slot.queue._get_conn()
-        conn.execute("DELETE FROM work_queue WHERE type = 'scan'")
-        conn.commit()
-        slot.next_scan_at = 0.0                   # the short recheck is due
-        supervisor._enqueue_periodic()            # sees the end: not yet
-        assert supervisor.enqueued == []
-        assert slot.next_scan_at >= time.monotonic() + 59
-
-        slot.next_scan_at = 0.0                   # a full interval later
-        supervisor._enqueue_periodic()
-        assert supervisor.enqueued == [slot]
-        slot.queue.close()
-
     def test_it_says_when_it_starts_again(self, tmp_path):
         import rtfm.core.supervisor as sup
 
@@ -1074,7 +1051,8 @@ class TestScanningDoesNotStarveTheWorkItFinds:
         conn = slot.queue._get_conn()
         conn.execute("DELETE FROM work_queue WHERE type = 'embed'")
         conn.commit()
-        slot.next_scan_at = 0.0
+        for sched in slot.sources.values():
+            sched.next_at = 0.0
         supervisor._enqueue_periodic()
 
         assert supervisor.enqueued == [slot]

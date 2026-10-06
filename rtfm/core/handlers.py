@@ -20,7 +20,7 @@ import hashlib
 import sqlite3
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from rtfm.core.library import Library
 from rtfm.core.queue import Queue, Job
@@ -121,7 +121,7 @@ def _compute_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def handle_scan(job: Job, worker: "JobContext") -> None:
+def handle_scan(job: Job, worker: "JobContext") -> Optional[int]:
     """P1 — scan one source root and fan out per-file work to the queue.
 
     Replaces the legacy inline ``sync()`` for the worker path: instead of
@@ -294,6 +294,9 @@ def handle_scan(job: Job, worker: "JobContext") -> None:
         f"scan [{corpus}] +{ingest_jobs} ~{moved + cross_moved} "
         f"-{remove_jobs} (skip_removed={skipped_removed})"
     )
+    # What the scan found, for the supervisor: a source looked at on a
+    # clock slows down while this stays at zero.
+    return ingest_jobs + moved + cross_moved + remove_jobs
 
 
 #: Beyond this a file is not damaged text, it is not text.

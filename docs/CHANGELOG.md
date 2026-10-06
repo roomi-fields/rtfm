@@ -7,6 +7,31 @@ description: >-
 
 # Changelog
 
+## [0.49.0] — 2026-10-06
+
+### Changed — sources are looked at when they change, not every minute
+
+The periodic scan could not know a directory was idle: it listed every file
+of every source every minute, so a project untouched for months cost as much
+as an active one, and one with 48 sources never got past its own scans — 53
+scanned PDFs waited five weeks behind them.
+
+- **Local sources are watched.** On Linux the kernel reports changes; a
+  source is scanned a few seconds after its activity settles, at most every
+  30 seconds, and otherwise once a day in case a notification was lost.
+  What the scan skips — dependencies, version-control stores, agent working
+  copies, what `.gitignore` and `.rtfmignore` exclude — is not watched and
+  triggers nothing.
+- **Network shares are looked at on a slowing clock.** A change made on the
+  other machine is never reported, so these are still scanned, but every
+  scan that finds nothing doubles the wait — one minute up to an hour — and
+  the first one that finds something brings it back to a minute. The same
+  applies to any source that cannot be watched (no inotify, watch budget
+  spent). `RTFM_NO_WATCH=1` turns watching off.
+- Each source keeps its own schedule, timed from the end of its last scan.
+  The project-wide rounds, and the round tracking added in 0.47.3–0.47.4,
+  are gone.
+
 ## [0.48.0] — 2026-10-06
 
 ### Fixed — a source taken out of the configuration stayed in the index

@@ -116,12 +116,12 @@ class TestAConnectionThatWentReadOnly:
         sup = _supervisor(tmp_path, [])
         slot = _slot(tmp_path)
         slot.scan_paused = True
-        slot.next_scan_at = time.monotonic() + 10_000
+        slot.first_scan_at = time.monotonic() + 10_000
         sup._note_queue_error(
             slot, sqlite3.OperationalError("unable to open database file"),
             "peek")
         assert not slot.scan_paused
-        assert slot.next_scan_at <= time.monotonic() + 0.5
+        assert slot.first_scan_at <= time.monotonic() + 0.5
 
 
 class TestAFailureThatKeepsFailing:
