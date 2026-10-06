@@ -476,6 +476,13 @@ class _Slot:
             remark_skipped_binaries(self.db_path, log=self.log)
         except Exception as exc:  # bookkeeping must never keep a project down
             log(f"{self.rtfm_dir.parent.name}: binary re-marking skipped: {exc}")
+        # A source taken out of the configuration left its files in the
+        # index for good. Every start takes them out.
+        try:
+            from rtfm.core.repair import forget_undeclared_sources
+            forget_undeclared_sources(self.db_path, log=self.log)
+        except Exception as exc:  # a repair must never keep a project down
+            log(f"{self.rtfm_dir.parent.name}: source retirement skipped: {exc}")
         self.queue = Queue(self.db_path)
         self.identity = _file_identity(self.db_path)
         # Reap zombies left by a previous supervisor/worker that died

@@ -942,7 +942,14 @@ def handle_reconcile(job: Job, worker: "JobContext") -> None:
         unchanged DB is pure overhead).
     """
     from rtfm.core.reconcile import reconcile
+    from rtfm.core.repair import forget_undeclared_sources
 
+    # A source removed while the project is open: taken out on this pass
+    # rather than at the next start.
+    try:
+        forget_undeclared_sources(worker.db_path, log=worker._log)
+    except Exception as exc:  # housekeeping must never fail a reconcile
+        worker._log(f"reconcile: source retirement skipped — {exc}")
     stats = reconcile(worker.db_path, log=worker._log)
     worker._log(
         f"reconcile: purged {stats['orphans_purged']} orphan(s), "

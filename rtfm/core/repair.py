@@ -183,3 +183,115 @@ def remark_skipped_binaries(
         return 0
     finally:
         conn.close()
+
+
+def _declared_roots(project_root: Path) -> dict[str, set[str]] | None:
+    """Corpus → the roots the configuration declares for it, or ``None``
+    when the configuration cannot be read with certainty.
+
+    The same sources the scan uses: ``sources`` when present, else the
+    project root under the configured corpus. Each root is kept both as
+    written and resolved, since a scan records the resolved form.
+    """
+    import json
+    import os
+
+    config_path = project_root / ".rtfm" / "config.json"
+    cfg: dict = {}
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(cfg, dict):
+            return None
+    sources = cfg.get("sources") or [
+        {"path": str(project_root), "corpus": cfg.get("corpus", "default")}]
+    declared: dict[str, set[str]] = {}
+    for src in sources:
+        if not isinstance(src, dict) or not src.get("path"):
+            return None
+        corpus = src.get("corpus") or cfg.get("corpus") or "default"
+        path = os.path.expanduser(str(src["path"]))
+        forms = {os.path.abspath(path)}
+        try:
+            forms.add(str(Path(path).resolve()))
+        except (OSError, RuntimeError):
+            pass
+        declared.setdefault(corpus, set()).update(forms)
+    return declared
+
+
+def find_undeclared_files(conn: sqlite3.Connection,
+                          declared: dict[str, set[str]]) -> list[tuple[str, str]]:
+    """``(filepath, corpus)`` of tracked files no declared source covers.
+
+    A tracked file only ever comes from scanning a declared source, so one
+    whose corpus — or whose root within that corpus — is no longer declared
+    belongs to a source that was removed. A file recorded without its root
+    is judged on its corpus alone.
+    """
+    out: list[tuple[str, str]] = []
+    for corpus, root, filepath in conn.execute(
+            "SELECT corpus, root_path, filepath FROM indexed_files"):
+        roots = declared.get(corpus)
+        if roots is None or (root is not None and root not in roots):
+            out.append((filepath, corpus))
+    return out
+
+
+def forget_undeclared_sources(
+    db_path: Path,
+    log: Callable[[str], None] | None = None,
+) -> int:
+    """Take out of the index what no declared source covers any more.
+
+    Removing a source changed the configuration and nothing else: the scan
+    stops looking at it, and what it had indexed stays — answering searches,
+    duplicating files under an old corpus name, for good. One project kept
+    four retired corpora, 597 files of which 359 a second time.
+
+    Not run when the configuration cannot be read: an unreadable file says
+    nothing about what is declared. Idempotent.
+    """
+    say = log or (lambda m: None)
+    db_path = Path(db_path)
+    declared = _declared_roots(db_path.parent.parent)
+    if not declared:
+        say("source retirement: configuration unreadable — left as it is")
+        return 0
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=60)
+    except sqlite3.Error as exc:
+        say(f"source retirement: cannot open the index ({exc})")
+        return 0
+    try:
+        if not _table_exists(conn, "indexed_files"):
+            return 0
+        gone = find_undeclared_files(conn, declared)
+        stale_roots = []
+        if _table_exists(conn, "sync_roots"):
+            stale_roots = [
+                (corpus, root) for corpus, root in conn.execute(
+                    "SELECT corpus, root_path FROM sync_roots").fetchall()
+                if corpus not in declared or (root and root not in declared[corpus])]
+            for corpus, root in stale_roots:
+                conn.execute("DELETE FROM sync_roots WHERE corpus = ? "
+                             "AND root_path IS ?", (corpus, root))
+            conn.commit()
+    finally:
+        conn.close()
+    if not gone:
+        return 0
+
+    from rtfm.core.library import Library
+    lib = Library(str(db_path))
+    try:
+        for filepath, corpus in gone:
+            lib.remove_file(filepath, corpus)
+    finally:
+        lib.close()
+    corpora = sorted({c for _, c in gone})
+    say(f"source retirement: {len(gone)} file(s) of sources no longer "
+        f"declared taken out ({', '.join(corpora)})")
+    return len(gone)

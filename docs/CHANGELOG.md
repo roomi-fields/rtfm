@@ -7,6 +7,18 @@ description: >-
 
 # Changelog
 
+## [0.48.0] — 2026-10-06
+
+### Fixed — a source taken out of the configuration stayed in the index
+
+`rtfm remove`, or editing the configuration, changed what is scanned and
+nothing else: what a retired source had indexed stayed, answering searches
+and duplicating files under an old corpus name. One project kept four
+retired corpora, 597 files of which 359 a second time. Files no declared
+source covers are now taken out when a project opens — so on upgrade, with
+nothing to run — at every hourly reconcile, and by `rtfm repair`. An
+unreadable configuration removes nothing.
+
 ## [0.47.4] — 2026-10-06
 
 ### Fixed — the pause between scan rounds was timed from the wrong moment
