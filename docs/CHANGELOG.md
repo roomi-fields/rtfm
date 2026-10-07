@@ -7,6 +7,33 @@ description: >-
 
 # Changelog
 
+## [0.50.0] — 2026-10-07
+
+### Changed — a binary nothing can read is neither indexed nor tracked
+
+A file no parser claims and whose content is binary used to be tracked —
+with an identity at first, then without one. Either way it cost a job every
+time it changed (a small database inside one project was read 240 times a
+day for nothing) and it sat in every check as a file with nothing behind
+it. The scan now leaves it out; one tracked before leaves the index when it
+changes, and every start takes out those recorded earlier (971 across one
+fleet: images, parquet, fonts, compiled libraries, MIDI). Binary formats
+that have a reader — PDF, spreadsheets, ebooks, SQLite — are not concerned.
+Coverage counts these files as skipped, not missing.
+
+### Fixed — the indexer held gigabytes it never gave back
+
+Each embedding job handed all its passages — up to 64 — to the model at
+once, and the model's runtime keeps the working memory of the largest batch
+it has seen. Twelve lanes share the model: the indexer reached 6 GB. The
+model now sees at most 8 passages at a time — about 50 MB per batch instead
+of 400, at the same speed or better.
+
+The memory ceiling that restarts the indexer was multiplied by the number of
+lanes, a leftover from one worker process per project: 18 GB on a 12-lane
+machine, so nothing noticed. It is now one ceiling for the one process
+(5 GB, never above 60 % of RAM).
+
 ## [0.49.3] — 2026-10-06
 
 ### Fixed — a project taken off the list went on being served

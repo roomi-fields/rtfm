@@ -2446,11 +2446,11 @@ def cmd_repair(args):
         sys.exit("repair: no .rtfm/ project root in the cwd chain.")
     rtfm_dir = rtfm_root / ".rtfm"
 
-    from rtfm.core.repair import forget_undeclared_sources, remark_skipped_binaries
+    from rtfm.core.repair import forget_tracked_binaries, forget_undeclared_sources
     retired = forget_undeclared_sources(rtfm_dir / "library.db", log=print)
     from rtfm.core.repair import requeue_unsplit_scans
     retired += requeue_unsplit_scans(rtfm_dir / "library.db", log=print)
-    marked = remark_skipped_binaries(rtfm_dir / "library.db", log=print) or retired
+    marked = forget_tracked_binaries(rtfm_dir / "library.db", log=print) or retired
     n = repair_shared_identities(rtfm_dir / "library.db", log=print)
     if not n:
         print("repair: nothing more to repair." if marked

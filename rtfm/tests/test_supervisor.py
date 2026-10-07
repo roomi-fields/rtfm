@@ -171,9 +171,15 @@ def test_should_recycle_on_version_and_rss(tmp_path: Path, monkeypatch):
         assert sup._should_recycle() is True          # version drift
 
         monkeypatch.setattr(sup_mod, "_read_installed_version", lambda: "1.0.0")
-        ceiling = sup_mod.WORKER_RSS_EXIT_MB * sup._max_concurrent
-        monkeypatch.setattr(sup_mod, "_read_rss_mb", lambda: float(ceiling + 1))
+        monkeypatch.setattr(sup_mod, "_read_rss_mb",
+                            lambda: float(sup_mod.WORKER_RSS_EXIT_MB + 1))
         assert sup._should_recycle() is True          # RSS over ceiling
+        # One process, one ceiling: not multiplied by the lanes (it sat at
+        # 18 GB on twelve lanes while the indexer held 6).
+        monkeypatch.setattr(sup_mod, "_read_rss_mb",
+                            lambda: float(sup_mod.WORKER_RSS_EXIT_MB * 2))
+        sup._max_concurrent = 12
+        assert sup._should_recycle() is True
     finally:
         sup._pool.shutdown(wait=False)
 

@@ -522,14 +522,13 @@ class _Slot:
             log(f"{self.rtfm_dir.parent.name}: {n} file(s) shared an "
                 f"identity — cleared, they re-enter on the next scan")
             rebuilt = True  # scan now rather than on the staggered tick
-        # Binaries indexed before skips were recorded look like files that
-        # produced nothing — the defect the audit exists to find. Marking
-        # them here keeps that check about real losses.
+        # A binary nothing can read is no longer tracked; those recorded
+        # before leave the index here.
         try:
-            from rtfm.core.repair import remark_skipped_binaries
-            remark_skipped_binaries(self.db_path, log=self.log)
+            from rtfm.core.repair import forget_tracked_binaries
+            forget_tracked_binaries(self.db_path, log=self.log)
         except Exception as exc:  # bookkeeping must never keep a project down
-            log(f"{self.rtfm_dir.parent.name}: binary re-marking skipped: {exc}")
+            log(f"{self.rtfm_dir.parent.name}: binary retirement skipped: {exc}")
         # Scanned books read whole timed out and stayed failed; the reader
         # now splits them, so they go back in the queue once.
         try:
@@ -1425,10 +1424,12 @@ class Supervisor:
             self._log(f"version changed ({self._our_version} → {cur}), exiting for restart")
             return True
         rss = _read_rss_mb()
-        # Scale the leak ceiling with the pool size, but never above ~60 % of
-        # physical RAM — at a core-count-sized pool the naive per-lane × lanes
-        # product can exceed total RAM and would never fire.
-        ceiling = WORKER_RSS_EXIT_MB * self._max_concurrent
+        # One ceiling for the one process. It used to be multiplied by the
+        # number of lanes — a leftover from one worker process per project —
+        # which put it at 18 GB on a 12-lane machine: the indexer sat at 6 GB
+        # and nothing noticed. Lanes share one model and one runtime; what
+        # they add is small. Still never above ~60 % of physical RAM.
+        ceiling = WORKER_RSS_EXIT_MB
         total = _read_mem_total_mb()
         if total > 0:
             ceiling = min(ceiling, 0.6 * total)

@@ -151,6 +151,16 @@ def measure(root: Path, db_path: Optional[Path] = None) -> Coverage:
                     tracked += 1
                     if row["has_content"]:
                         readable += 1
+            # A binary nothing can read is never tracked: not a gap either.
+            from rtfm.core.sniff import unreadable_binary
+            for rel in rels:
+                if (corpus, rel) in seen_paths:
+                    continue
+                try:
+                    if unreadable_binary(src_root / rel):
+                        skipped += 1
+                except OSError:
+                    continue
             entry.skipped = skipped
             entry.indexable -= skipped
             entry.readable = readable

@@ -143,6 +143,15 @@ def _embed_threads() -> Optional[int]:
     return None if n <= 0 else n
 
 
+#: Texts handed to the model at once. The inference runtime sizes its working
+#: memory on the largest batch it has seen and keeps it; every job sent all
+#: of its passages — up to 64 — in one batch, and with twelve lanes sharing
+#: the model the indexer held 4.3 GB it never gave back. Measured: 8 at a
+#: time costs ~50 MB per batch against ~400 MB for 64, at the same speed or
+#: better (11 vs 10.5 long passages a second, 27 vs 23 short ones).
+INFERENCE_BATCH_MAX = 8
+
+
 def get_model(model_name: str = DEFAULT_MODEL):
     """Get or load the FastEmbed text embedding model (cached in process)."""
     global _model, _model_name
@@ -213,7 +222,8 @@ def embed_texts(
     if is_query:
         texts = [_apply_query_prefix(t, model_name) for t in texts]
     model = get_model(model_name)
-    embeddings = list(model.embed(texts, batch_size=batch_size))
+    embeddings = list(model.embed(
+        texts, batch_size=max(1, min(batch_size, INFERENCE_BATCH_MAX))))
     arr = np.array(embeddings, dtype=np.float32)
     return _normalize(arr)
 

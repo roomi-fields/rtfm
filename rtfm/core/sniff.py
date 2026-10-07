@@ -33,6 +33,24 @@ def looks_binary(path: str | Path, probe: int = 8192) -> bool:
         return True
 
 
+def unreadable_binary(path: str | Path) -> bool:
+    """True for a file nothing in RTFM can read: no parser claims it, and
+    its content is binary.
+
+    Such a file is never indexed and never tracked. Tracked, it cost a job
+    every time it changed — a small database inside one project was read
+    240 times a day for nothing — and it sat in every check as a file with
+    nothing behind it. Formats that are binary but have a parser (PDF,
+    spreadsheets, ebooks, SQLite) are not concerned.
+    """
+    import rtfm.parsers  # noqa: F401 — every parser registered
+    from rtfm.parsers.base import ParserRegistry
+
+    if ParserRegistry.get_parser(Path(path)) is not None:
+        return False
+    return looks_binary(path)
+
+
 def detect_real_format(path: str | Path) -> Optional[str]:
     """Return a coarse real-format tag from the file's magic bytes:
 

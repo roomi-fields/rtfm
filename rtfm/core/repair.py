@@ -109,29 +109,28 @@ def repair_shared_identities(
     return done
 
 
-def find_unmarked_binaries(conn: sqlite3.Connection, roots_by_corpus: dict) -> list[int]:
-    """Tracked rows with an identity but no document, whose file is binary.
+def find_tracked_binaries(conn: sqlite3.Connection,
+                          roots_by_corpus: dict) -> list[tuple[str, str]]:
+    """``(filepath, corpus)`` of tracked files nothing can read.
 
-    Before refused binaries were recorded without an identity, they were
-    recorded like any other file — so to the audit they looked exactly like
-    a text file that silently produced nothing, the one defect it is there
-    to find. One project reported 670 of them: compiled libraries, CAD
-    drawings, PDFs still waiting for OCR. The real losses were buried.
+    A binary no parser claims used to be tracked — first with an identity,
+    which made it look like a text file that went silent, then without one.
+    Either way it cost a job on every change and sat in every check. It is
+    no longer tracked at all; these are the ones recorded before.
 
-    Only a file that is present and binary is marked. A missing file proves
-    nothing, and a mute *text* file is a genuine finding that must stay
-    visible.
+    Only a file that is present and binary counts: a missing file proves
+    nothing, and a mute *text* file is a genuine finding that stays.
     """
-    from rtfm.core.sniff import looks_binary
+    from rtfm.core.sniff import unreadable_binary
 
     if not _table_exists(conn, "indexed_files"):
         return []
-    marked: list[int] = []
-    for row_id, corpus, rel, root in conn.execute(
-            """SELECT i.id, i.corpus, i.filepath, i.root_path
+    found: list[tuple[str, str]] = []
+    for corpus, rel, root, slug in conn.execute(
+            """SELECT i.corpus, i.filepath, i.root_path, i.book_slug
                FROM indexed_files i
-               WHERE i.book_slug IS NOT NULL
-                 AND NOT EXISTS (SELECT 1 FROM books b
+               WHERE i.book_slug IS NULL
+                  OR NOT EXISTS (SELECT 1 FROM books b
                                  WHERE b.slug = i.book_slug
                                    AND b.corpus = i.corpus)""").fetchall():
         if not root:
@@ -141,23 +140,23 @@ def find_unmarked_binaries(conn: sqlite3.Connection, roots_by_corpus: dict) -> l
             continue
         path = Path(root) / rel
         try:
-            if path.is_file() and looks_binary(path):
-                marked.append(row_id)
+            if path.is_file() and unreadable_binary(path):
+                found.append((rel, corpus))
         except OSError:
             continue
-    return marked
+    return found
 
 
-def remark_skipped_binaries(
+def forget_tracked_binaries(
     db_path: Path,
     log: Callable[[str], None] | None = None,
 ) -> int:
-    """Give binaries tracked the old way the no-identity mark. Idempotent."""
+    """Take out of the index the binaries tracked before. Idempotent."""
     say = log or (lambda m: None)
     try:
         conn = sqlite3.connect(str(db_path), timeout=60)
     except sqlite3.Error as exc:
-        say(f"binary re-marking: cannot open the index ({exc})")
+        say(f"binary retirement: cannot open the index ({exc})")
         return 0
     try:
         roots: dict[str, set[str]] = {}
@@ -166,23 +165,24 @@ def remark_skipped_binaries(
                     "SELECT corpus, root_path FROM sync_roots").fetchall():
                 if root:
                     roots.setdefault(corpus, set()).add(root)
-        ids = find_unmarked_binaries(conn, roots)
-        if not ids:
-            return 0
-        for i in range(0, len(ids), 500):
-            batch = ids[i:i + 500]
-            conn.execute(
-                f"UPDATE indexed_files SET book_slug = NULL "
-                f"WHERE id IN ({','.join('?' * len(batch))})", batch)
-        conn.commit()
-        say(f"binary re-marking: {len(ids)} binary file(s) recorded as "
-            f"deliberately skipped — they no longer read as silent losses")
-        return len(ids)
+        found = find_tracked_binaries(conn, roots)
     except sqlite3.Error as exc:
-        say(f"binary re-marking: {exc}")
+        say(f"binary retirement: {exc}")
         return 0
     finally:
         conn.close()
+    if not found:
+        return 0
+    from rtfm.core.library import Library
+    lib = Library(str(db_path))
+    try:
+        for rel, corpus in found:
+            lib.remove_file(rel, corpus)
+    finally:
+        lib.close()
+    say(f"binary retirement: {len(found)} binary file(s) nothing can read "
+        f"taken out of the index")
+    return len(found)
 
 
 def _declared_roots(project_root: Path) -> dict[str, set[str]] | None:

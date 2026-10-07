@@ -1,15 +1,13 @@
-"""A binary the ingest refuses is not a file that went silent.
+"""A binary nothing can read is neither indexed nor tracked.
 
-The audit's most valuable check looks for files the scan has seen and
-recorded, with nothing readable behind them — the shape of every serious
-loss this index has had. Binaries broke it: the ingest refuses them, on
-purpose, but recorded them exactly like a text file that produced nothing.
-One project reported 670 "silent" files that were compiled libraries, CAD
-drawings and scans awaiting OCR, and the genuine losses were buried among
-them.
+Tracked, it cost a job every time it changed — a small database inside one
+project was read 240 times a day for nothing — and it sat in the audit as a
+file with nothing behind it, burying the genuine losses that check exists to
+find (one project reported 670 of them). It is now left out at the scan, and
+the ones recorded before are taken out on the next start.
 
-A refused binary is now recorded with no identity, and the rows written
-before that are re-marked on the spot.
+Formats that are binary but readable — PDF, spreadsheets, ebooks, SQLite —
+have a parser and are not concerned.
 """
 from __future__ import annotations
 
@@ -18,13 +16,16 @@ import sqlite3
 import pytest
 
 from rtfm.core.audit import check_mute_files
-from rtfm.core.repair import remark_skipped_binaries
+from rtfm.core.repair import forget_tracked_binaries
+from rtfm.core.sniff import unreadable_binary
 
 
-def _job(root, rel):
+def _job(root, rel, kind="ingest"):
     from rtfm.core.queue import Job
-    return Job(id=1, type="ingest", priority=10,
-               payload={"root": str(root), "corpus": "default", "filepath": rel},
+    payload = {"root": str(root), "corpus": "default"}
+    if kind == "ingest":
+        payload["filepath"] = rel
+    return Job(id=1, type=kind, priority=10, payload=payload,
                status="running", created_at="", started_at=None,
                finished_at=None, error=None, attempts=1)
 
@@ -40,33 +41,70 @@ class _Worker:
 
 @pytest.fixture
 def project(tmp_path):
+    from rtfm.core.library import Library
     root = tmp_path / "projet"
     (root / ".rtfm").mkdir(parents=True)
+    Library(str(root / ".rtfm" / "library.db")).close()
     (root / "moteur.blob").write_bytes(b"\x7fELF\x00\x00\x01" * 400)
     (root / "notes.md").write_text("# Notes\n\nDu texte lisible.\n" * 10,
                                    encoding="utf-8")
     return root
 
 
-def _slug(db, rel):
+def _tracked(db):
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
-        row = conn.execute("SELECT book_slug FROM indexed_files WHERE filepath = ?",
-                           (rel,)).fetchone()
-        return row
+        return {r[0] for r in conn.execute("SELECT filepath FROM indexed_files")}
     finally:
         conn.close()
 
 
-class TestRecordingIt:
+def _queued(db, kind):
+    from rtfm.core.queue import Queue
+    q = Queue(str(db))
+    try:
+        return [j.payload.get("filepath") for j in q.list_pending(limit=1000)
+                if j.type == kind]
+    finally:
+        q.close()
 
-    def test_the_worker_records_a_refused_binary_without_identity(self, project):
+
+def test_what_counts_as_unreadable(project, tmp_path):
+    assert unreadable_binary(project / "moteur.blob")
+    assert not unreadable_binary(project / "notes.md")
+    fake_pdf = tmp_path / "scan.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4\x00\x00binary body")
+    assert not unreadable_binary(fake_pdf), "a PDF has its reader"
+
+
+class TestTheScan:
+
+    def test_a_new_binary_is_not_offered(self, project):
+        from rtfm.core.handlers import handle_scan
+        db = project / ".rtfm" / "library.db"
+        handle_scan(_job(project, None, "scan"), _Worker(db))
+        assert _queued(db, "ingest") == ["notes.md"]
+
+    def test_a_tracked_binary_that_changes_leaves(self, project):
+        from rtfm.core.handlers import handle_scan
+        from rtfm.core.library import Library
+        db = project / ".rtfm" / "library.db"
+        lib = Library(str(db))
+        lib.update_indexed_file("moteur.blob", "ancien", "default", None,
+                                file_size=1, root_path=str(project))
+        lib.close()
+        handle_scan(_job(project, None, "scan"), _Worker(db))
+        assert _queued(db, "remove") == ["moteur.blob"]
+        assert "moteur.blob" not in _queued(db, "ingest")
+
+
+class TestTheIngest:
+
+    def test_a_binary_reaching_the_ingest_is_not_tracked(self, project):
         from rtfm.core.handlers import handle_ingest
         db = project / ".rtfm" / "library.db"
         handle_ingest(_job(project, "moteur.blob"), _Worker(db))
-        row = _slug(db, "moteur.blob")
-        assert row is not None, "it must still be tracked, or every scan re-offers it"
-        assert row[0] is None
+        assert _tracked(db) == set()
 
     def test_a_binary_is_not_reported_as_damaged_text(self, project):
         from rtfm.core.handlers import handle_ingest
@@ -75,7 +113,7 @@ class TestRecordingIt:
         handle_ingest(_job(project, "moteur.blob"), worker)
         assert not any("not valid text" in ln for ln in worker.lines)
 
-    def test_the_direct_sync_records_it_the_same_way(self, project):
+    def test_the_direct_sync_leaves_it_out_the_same_way(self, project):
         from rtfm.core.library import Library
         from rtfm.core.sync import sync
         db = project / ".rtfm" / "library.db"
@@ -85,15 +123,14 @@ class TestRecordingIt:
                           generate_embeddings=False)
         finally:
             lib.close()
-        assert _slug(db, "moteur.blob")[0] is None
-        assert "moteur.blob" not in result.empty_files, (
-            "a refused binary is not an empty file to warn about")
+        assert _tracked(db) == {"notes.md"}
+        assert "moteur.blob" not in result.empty_files
 
-    def test_a_text_file_keeps_its_identity(self, project):
+    def test_a_text_file_is_tracked_as_before(self, project):
         from rtfm.core.handlers import handle_ingest
         db = project / ".rtfm" / "library.db"
         handle_ingest(_job(project, "notes.md"), _Worker(db))
-        assert _slug(db, "notes.md")[0]
+        assert _tracked(db) == {"notes.md"}
 
 
 class TestWhatTheChecksSee:
@@ -120,40 +157,42 @@ class TestWhatTheChecksSee:
         assert cov.sources[0].skipped == 1
 
 
-class TestRowsWrittenTheOldWay:
+class TestRowsWrittenBefore:
 
     @pytest.fixture
     def legacy(self, project):
-        """Both files tracked with an identity and no document — how every
-        refused binary was recorded until now."""
+        """Tracked both ways binaries were recorded before: with an identity
+        and no document, and without one."""
         from rtfm.core.library import Library
         db = project / ".rtfm" / "library.db"
+        (project / "autre.bin").write_bytes(b"\x00\x01\x02" * 100)
         lib = Library(str(db))
         lib.set_sync_root("default", str(project))
-        for rel in ("moteur.blob", "notes.md"):
-            lib.update_indexed_file(rel, "h", "default", rel.replace(".", "-"),
+        for rel, slug in (("moteur.blob", "moteur-blob"), ("autre.bin", None),
+                          ("notes.md", "notes-md")):
+            lib.update_indexed_file(rel, "h", "default", slug,
                                     file_size=(project / rel).stat().st_size,
                                     root_path=str(project))
         lib.close()
         return db
 
-    def test_a_present_binary_is_re_marked(self, project, legacy):
-        assert remark_skipped_binaries(legacy) == 1
-        assert _slug(legacy, "moteur.blob")[0] is None
+    def test_present_binaries_leave(self, project, legacy):
+        assert forget_tracked_binaries(legacy) == 2
+        assert _tracked(legacy) == {"notes.md"}
 
     def test_a_mute_text_file_stays_visible(self, project, legacy):
         """That one is a genuine loss — the reason the check exists."""
-        remark_skipped_binaries(legacy)
-        assert _slug(legacy, "notes.md")[0] == "notes-md"
+        forget_tracked_binaries(legacy)
+        assert "notes.md" in _tracked(legacy)
 
     def test_a_missing_file_is_left_alone(self, project, legacy):
         (project / "moteur.blob").unlink()
-        assert remark_skipped_binaries(legacy) == 0
-        assert _slug(legacy, "moteur.blob")[0] == "moteur-blob"
+        assert forget_tracked_binaries(legacy) == 1
+        assert "moteur.blob" in _tracked(legacy)
 
     def test_a_second_pass_finds_nothing(self, project, legacy):
-        remark_skipped_binaries(legacy)
-        assert remark_skipped_binaries(legacy) == 0
+        forget_tracked_binaries(legacy)
+        assert forget_tracked_binaries(legacy) == 0
 
     def test_a_row_without_its_directory_uses_the_corpus_one(self, project):
         from rtfm.core.library import Library
@@ -163,4 +202,4 @@ class TestRowsWrittenTheOldWay:
         lib.update_indexed_file("moteur.blob", "h", "default", "moteur-blob",
                                 file_size=(project / "moteur.blob").stat().st_size)
         lib.close()
-        assert remark_skipped_binaries(db) == 1
+        assert forget_tracked_binaries(db) == 1

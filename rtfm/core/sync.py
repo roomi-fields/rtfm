@@ -1231,12 +1231,16 @@ def sync(
                 fpath, corpus=corpus, parser=ingest_parser,
                 metadata={"book_slug": book_slug, "source_file": rel},
             )
+            # A binary nothing can read is neither indexed nor tracked —
+            # see handle_ingest.
+            if stats.get("skipped") == "binary":
+                library.remove_file(rel, corpus)
+                continue
             library.update_indexed_file(
                 filepath=rel,
                 file_hash=file_hash,
                 corpus=corpus,
-                # No identity for a refused binary — see handle_ingest.
-                book_slug=None if stats.get("skipped") == "binary" else book_slug,
+                book_slug=book_slug,
                 file_size=fpath.stat().st_size,
                 root_path=str(root),
             )

@@ -2077,11 +2077,12 @@ class Library:
         if not to_embed:
             return {"embedded": 0, "skipped": skipped}
 
-        # Run fastembed in one shot — the caller is expected to slice
-        # ``chunk_ids`` into reasonable batches (32-128) before calling.
+        # The model sees them a few at a time (``INFERENCE_BATCH_MAX``):
+        # its working memory follows the largest batch and is never handed
+        # back.
         texts = [c for _, c in to_embed]
         ids = [i for i, _ in to_embed]
-        embeddings = embed_texts(texts, model_name, batch_size=len(texts))
+        embeddings = embed_texts(texts, model_name)
         # The passages were there when they were read; they may not be now.
         # A re-index of the same file while the model was running replaces
         # every one of them, and their replacements carry their own job. An

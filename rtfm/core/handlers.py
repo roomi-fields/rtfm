@@ -268,17 +268,29 @@ def handle_scan(job: Job, worker: "JobContext") -> Optional[int]:
                 inserted, _ = queue.enqueue_many("remove", payloads)
                 remove_jobs = inserted
 
-        # Additions + modifications → ``ingest`` jobs.
+        # Additions + modifications → ``ingest`` jobs. A file nothing can
+        # read is not offered: it is never indexed nor tracked, and one
+        # tracked from before leaves the index.
+        from rtfm.core.sniff import unreadable_binary
         ingest_jobs = 0
         ingest_payloads: list[dict] = []
+        binaries_out: list[dict] = []
+        modified = set(diff.modified)
         for fpath in diff.added + diff.modified:
             try:
                 rel = str(fpath.relative_to(root))
             except ValueError:
                 rel = str(fpath)
+            if unreadable_binary(fpath):
+                if fpath in modified:
+                    binaries_out.append({"filepath": rel, "corpus": corpus})
+                continue
             ingest_payloads.append({
                 "root": str(root), "corpus": corpus, "filepath": rel,
             })
+        if binaries_out:
+            inserted, _ = queue.enqueue_many("remove", binaries_out)
+            remove_jobs += inserted
         if ingest_payloads:
             inserted, _ = queue.enqueue_many("ingest", ingest_payloads)
             ingest_jobs = inserted
@@ -485,14 +497,18 @@ def handle_ingest(job: Job, worker: "JobContext") -> None:
                     f"re-queued")
                 return
             raise
-        # A binary the ingest refused is recorded with no identity: seen,
-        # deliberately empty. Recorded with one, it is indistinguishable
-        # from a text file that silently produced nothing.
+        # A binary nothing can read is neither indexed nor tracked; if an
+        # earlier text version was, it leaves the index.
+        if stats.get("skipped") == "binary":
+            lib.remove_file(rel, corpus)
+            worker._log(f"ingest [{corpus}] {rel}: binary, nothing to read — "
+                        f"not indexed")
+            return
         lib.update_indexed_file(
             filepath=rel,
             file_hash=file_hash,
             corpus=corpus,
-            book_slug=None if stats.get("skipped") == "binary" else book_slug,
+            book_slug=book_slug,
             file_size=abs_path.stat().st_size,
             root_path=str(root),
         )
