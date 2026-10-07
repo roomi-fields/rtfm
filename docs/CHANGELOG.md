@@ -7,7 +7,10 @@ description: >-
 
 # Changelog
 
-## [0.50.0] — 2026-10-07
+## [0.50.1] — 2026-10-07
+
+0.50.0 was tagged but never published: a new test needed a library the
+test machine does not install. Same content as below.
 
 ### Changed — a binary nothing can read is neither indexed nor tracked
 

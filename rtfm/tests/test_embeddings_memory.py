@@ -7,12 +7,13 @@ the model, and the indexer held 4.3 GB it never gave back.
 from __future__ import annotations
 
 
-import numpy as np
+import pytest
 
 from rtfm.core import embeddings
 
 
 def test_no_batch_larger_than_the_cap_reaches_the_model(monkeypatch):
+    np = pytest.importorskip("numpy")
     seen = []
 
     class FakeModel:
