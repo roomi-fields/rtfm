@@ -43,19 +43,45 @@ class _Recorder:
         return ok
 
 
+def _budget_left() -> bool:
+    """The kernel's watch budget is per user and shared with every editor
+    and tool on the machine; when they have spent it there is nothing to
+    test here (the supervisor then falls back to a clock, tested below)."""
+    import ctypes
+    import errno
+    import tempfile
+    from rtfm.core.watch import IN_CLOEXEC, WATCH_MASK, _Libc
+    libc = _Libc().lib
+    fd = libc.inotify_init1(IN_CLOEXEC)
+    if fd < 0:
+        return False
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            wd = libc.inotify_add_watch(fd, d.encode(), WATCH_MASK)
+            return not (wd < 0 and ctypes.get_errno() == errno.ENOSPC)
+    finally:
+        os.close(fd)
+
+
 @pytest.fixture
 def watcher():
     from rtfm.core.watch import TreeWatcher
+    if not _budget_left():
+        pytest.skip("the system's watch budget is spent by other programs")
     rec = _Recorder()
     w = TreeWatcher(rec.on_changed, rec.on_failed)
     yield w, rec
     w.close()
 
 
-def _settle(w, n_dirs, timeout=5.0):
+def _settle(w, n_dirs, timeout=5.0, rec=None):
     deadline = time.monotonic() + timeout
     while w.watched_directories() < n_dirs and time.monotonic() < deadline:
+        if rec is not None and any("budget" in r for _, r in rec.failed):
+            break
         time.sleep(0.02)
+    if rec is not None and any("budget" in r for _, r in rec.failed):
+        pytest.skip("the system's watch budget is spent by other programs")
 
 
 EXCLUDED = frozenset({".git", "node_modules"})
@@ -66,7 +92,7 @@ def test_a_written_file_reports_its_source(watcher, tmp_path):
     w, rec = watcher
     (tmp_path / "docs").mkdir()
     w.watch("src", str(tmp_path), EXCLUDED)
-    _settle(w, 2)
+    _settle(w, 2, rec=rec)
     (tmp_path / "docs" / "note.md").write_text("x")
     assert rec.wait() and set(rec.changed) == {"src"}
 
@@ -78,7 +104,7 @@ def test_what_the_scan_skips_reports_nothing(watcher, tmp_path):
     (tmp_path / ".gitignore").write_text("build/\n*.log\n")
     (tmp_path / "build").mkdir()
     w.watch("src", str(tmp_path), EXCLUDED)
-    _settle(w, 1)
+    _settle(w, 1, rec=rec)
     assert w.watched_directories() == 1, "skipped directories must not be watched"
     (tmp_path / "trace.log").write_text("x")
     (tmp_path / "base.db-wal").write_text("x")
@@ -89,10 +115,10 @@ def test_what_the_scan_skips_reports_nothing(watcher, tmp_path):
 def test_a_new_directory_is_watched_too(watcher, tmp_path):
     w, rec = watcher
     w.watch("src", str(tmp_path), EXCLUDED)
-    _settle(w, 1)
+    _settle(w, 1, rec=rec)
     (tmp_path / "nouveau").mkdir()
     assert rec.wait()
-    _settle(w, 2)
+    _settle(w, 2, rec=rec)
     rec.changed.clear()
     (tmp_path / "nouveau" / "a.md").write_text("x")
     assert rec.wait() and set(rec.changed) == {"src"}
@@ -103,7 +129,7 @@ def test_a_directory_shared_by_two_sources_reports_both(watcher, tmp_path):
     w, rec = watcher
     w.watch("projet-a", str(tmp_path), EXCLUDED)
     w.watch("projet-b", str(tmp_path), EXCLUDED)
-    _settle(w, 1)
+    _settle(w, 1, rec=rec)
     time.sleep(0.1)
     (tmp_path / "a.md").write_text("x")
     assert rec.wait()
@@ -115,7 +141,7 @@ def test_a_directory_shared_by_two_sources_reports_both(watcher, tmp_path):
 def test_an_unwatched_source_is_silent(watcher, tmp_path):
     w, rec = watcher
     w.watch("src", str(tmp_path), EXCLUDED)
-    _settle(w, 1)
+    _settle(w, 1, rec=rec)
     w.unwatch("src")
     deadline = time.monotonic() + 5
     while w.watched_directories() and time.monotonic() < deadline:

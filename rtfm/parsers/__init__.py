@@ -16,6 +16,8 @@ from rtfm.parsers import jupyter
 from rtfm.parsers import csv_parser
 from rtfm.parsers import fb2  # stdlib XML — no extra dep
 from rtfm.parsers import djvu  # subprocess to djvutxt (system binary) — no Python dep
+from rtfm.parsers import midi  # stdlib only — no extra dep
+from rtfm.parsers import audio  # tags via mutagen; fails per file when absent
 from rtfm.parsers import plaintext  # catch-all — must be last
 
 # PDF parser (optional dependency: pdftext)

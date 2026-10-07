@@ -7,6 +7,30 @@ description: >-
 
 # Changelog
 
+## [0.51.0] — 2026-10-07
+
+### Added — MIDI files and audio files are read
+
+Until now both were skipped as binaries nothing could read.
+
+- **MIDI** (`.mid`, `.midi`, `.kar`, `.rmi`), with nothing to install: the
+  piece's title, format, duration, tempo and its changes, time signature,
+  key, copyright, markers, General MIDI instruments by channel (channel 10
+  as percussion), note count and range; then for each track its name,
+  instrument, programs, notes, range, when it plays, its texts and — in
+  karaoke files — its lyrics. Tracks whose declared length is wrong are read
+  to their end-of-track event; a file cut short is read up to the cut and
+  says so.
+- **Audio** (MP3, FLAC, OGG, Opus, M4A, WAV, AIFF, WMA, APE, WavPack…), with
+  the `audio` extra (`pip install rtfm-ai[audio]`, plugin:
+  `rtfm-install-extras audio` — mutagen, pure Python): title, artist,
+  album, composer, conductor, genre, date, track, label, BPM, ISRC,
+  comments, lyrics (a passage of their own), and the stream — duration,
+  sample rate, bit depth, channels, bitrate. ID3 tags inside WAV and AIFF
+  are read too. The sound itself is not analysed or transcribed.
+
+`rtfm status` lists the audio extra.
+
 ## [0.50.1] — 2026-10-07
 
 0.50.0 was tagged but never published: a new test needed a library the

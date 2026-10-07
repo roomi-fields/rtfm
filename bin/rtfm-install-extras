@@ -3,7 +3,7 @@
 # ${CLAUDE_PLUGIN_DATA}/extras/venv/. Avoids polluting the user's
 # system Python and bypasses PEP 668 because venv ≠ system site.
 #
-# Usage: rtfm-install-extras embeddings|pdf|pdf-full|epub|office|mobi|ocr|all
+# Usage: rtfm-install-extras embeddings|pdf|pdf-full|epub|office|mobi|ocr|xlsx|audio|all
 #
 #   embeddings  — FastEmbed ONNX (~85 MB), semantic + hybrid search.
 #   pdf         — pdftext only (~50 MB), fast text extraction from most PDFs.
@@ -16,6 +16,8 @@
 #                 scanned PDFs. Needs the tesseract binary on the host
 #                 (apt install tesseract-ocr tesseract-ocr-<lang>).
 #   xlsx        — openpyxl (~1 MB), XLSX spreadsheets.
+#   audio       — mutagen (~1 MB), tags of MP3/FLAC/OGG/M4A/WAV/AIFF...
+#                 (MIDI files need nothing.)
 #   all         — everything above except pdf-full and the CPU torch tail.
 #                 (~130 MB total.)
 
@@ -99,8 +101,12 @@ case "$EXTRA" in
         echo "Installing XLSX extras (openpyxl, ~1 MB) ..."
         "$PIP" install --quiet --upgrade openpyxl
         ;;
+    audio)
+        echo "Installing audio extras (mutagen, ~1 MB) ..."
+        "$PIP" install --quiet --upgrade mutagen
+        ;;
     all)
-        echo "Installing everything except pdf-full (embeddings + pdf + epub + office + mobi + ocr + xlsx, ~130 MB) ..."
+        echo "Installing everything except pdf-full (embeddings + pdf + epub + office + mobi + ocr + xlsx + audio, ~130 MB) ..."
         echo "  For marker-pdf (heavy, ~1.5 GB with CPU torch), run 'pdf-full' separately."
         "$PIP" install --quiet --upgrade \
             fastembed pdftext \
@@ -108,10 +114,11 @@ case "$EXTRA" in
             python-docx odfpy striprtf \
             mobi \
             pytesseract pypdfium2 Pillow \
-            openpyxl
+            openpyxl \
+            mutagen
         ;;
     *)
-        echo "Unknown extra: $EXTRA (expected: embeddings, pdf, pdf-full, epub, office, mobi, ocr, xlsx, all)" >&2
+        echo "Unknown extra: $EXTRA (expected: embeddings, pdf, pdf-full, epub, office, mobi, ocr, xlsx, audio, all)" >&2
         exit 1
         ;;
 esac

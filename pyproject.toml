@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rtfm-ai"
-version = "0.50.1"
+version = "0.51.0"
 description = "RTFM — The open retrieval layer for AI agents. Indexes code, docs, legal, research, data. Extensible parser system. Serves surgical context via MCP."
 readme = "README.md"
 license = "MIT"
@@ -60,6 +60,10 @@ epub = [
 mobi = [
     "mobi>=0.3.3",
     "beautifulsoup4>=4.12",
+]
+audio = [
+    # Tags and stream facts of audio files (MIDI needs nothing).
+    "mutagen>=1.47",
 ]
 office = [
     "python-docx>=1.0",

@@ -73,8 +73,8 @@ def test_ingest_text_fallback_for_unknown_extension(tmp_path):
 def test_ingest_skips_binary_without_failing(tmp_path):
     """A binary file selected by an index-all source is skipped cleanly —
     zero chunks, no raised error (which would fail the queue job)."""
-    f = tmp_path / "song.mid"
-    f.write_bytes(b"MThd\x00\x00\x00\x06\x00\x01\x00\x00")
+    f = tmp_path / "firmware.bin"   # no parser claims it
+    f.write_bytes(b"\x7fELF\x00\x00\x00\x06\x00\x01\x00\x00")
     lib = Library(str(tmp_path / "lib.db"))
     try:
         stats = lib.ingest(f, corpus="t")

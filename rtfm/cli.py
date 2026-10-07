@@ -1609,6 +1609,7 @@ def cmd_status(args):
         ("odt",        _check("odf"),       ".odt documents",     "rtfm-ai[office]"),
         ("rtf",        _check("striprtf"),  ".rtf documents",     "rtfm-ai[office]"),
         ("djvu",       _check_bin("djvutxt"), ".djvu (system djvutxt)", "djvulibre (apt/brew)"),
+        ("audio",      _check("mutagen"),   "audio tags (.mp3/.flac/.wav…)", "rtfm-ai[audio]"),
     ]
     print("\nOptional extras:")
     for name, installed, purpose, pkg in extras:

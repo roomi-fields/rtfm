@@ -272,7 +272,7 @@ RTFM works anywhere your project isn't just code:
 - **Knowledge graph** — wikilinks + Python imports resolved as graph edges, hub detection, centrality ranking
 
 ### Multi-format indexing
-- **22 parsers built-in** — Markdown, Python (AST), LaTeX, YAML, JSON, TOML, Shell, PDF, XML, HTML, SQLite, Jupyter, CSV/TSV, XLSX, EPUB, MOBI/AZW, FB2, DJVU, DOCX, ODT, RTF, plain text
+- **24 parsers built-in** — Markdown, Python (AST), LaTeX, YAML, JSON, TOML, Shell, PDF, XML, HTML, SQLite, Jupyter, CSV/TSV, XLSX, EPUB, MOBI/AZW, FB2, DJVU, DOCX, ODT, RTF, MIDI, audio tags (MP3/FLAC/OGG/M4A/WAV/AIFF…), plain text
 - **Extensible** — add any format in ~50 lines of Python
 - **Auto-sync hooks** — index stays fresh every prompt, zero manual work
 - **Incremental** — only re-indexes what changed
