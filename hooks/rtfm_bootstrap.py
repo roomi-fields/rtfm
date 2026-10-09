@@ -152,6 +152,17 @@ def main() -> None:
         )
         return
 
+    # An agent's git worktree is not a project of its own: it is served
+    # from the main tree's index, read-only, and nothing is written here —
+    # no index, no CLAUDE.md section, no settings, no enrolment.
+    from rtfm.core.placement import worktree_main_root
+    main_tree = worktree_main_root(project_root)
+    if main_tree is not None:
+        sys.stderr.write(
+            f"[rtfm-bootstrap] git worktree of {main_tree}: searching its "
+            f"index read-only, writing nothing here\n")
+        return
+
     db_path = project_root / ".rtfm" / "library.db"
     if not db_path.exists():
         from rtfm.core.placement import refusal_to_index

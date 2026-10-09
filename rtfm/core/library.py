@@ -235,13 +235,21 @@ class Library:
             print(r.content, r.source, r.page)
     """
 
-    def __init__(self, db_path: str | Path, create: bool = True):
+    def __init__(self, db_path: str | Path, create: bool = True,
+                 read_only: bool = False,
+                 seen_from: "tuple[str, str] | None" = None):
         """
         Initialize or open a library.
 
         Args:
             db_path: Path to the SQLite database file
             create: If True, create the database if it doesn't exist
+            read_only: Never write, even where the files would allow it.
+            seen_from: ``(main_tree, copy)`` when the index of a main git
+                tree is served to a session working in a linked copy:
+                paths under the main tree are shown under the copy, so the
+                agent reads and edits its own files, and paths given from
+                the copy are looked up under the main tree.
         """
         self.db_path = Path(db_path)
 
@@ -255,7 +263,8 @@ class Library:
         #: read-only mount, which is how a shared index is published to
         #: other processes. Every write method still exists and still
         #: raises; nothing here silently drops a write.
-        self.read_only = not self._writable()
+        self.read_only = read_only or not self._writable()
+        self._seen_from = seen_from
         self._init_db()
         self._load_mappings()
 
@@ -2674,7 +2683,29 @@ class Library:
                 "ORDER BY updated_at DESC",
                 (corpus,),
             ).fetchall()
-        return [r["root_path"] for r in rows]
+        return [self.to_copy(r["root_path"]) for r in rows]
+
+    def to_copy(self, path: str) -> str:
+        """*path* under the main tree, shown under the copy it is seen from."""
+        if not self._seen_from or not path:
+            return path
+        main, copy = self._seen_from
+        if path == main:
+            return copy
+        if path.startswith(main.rstrip("/") + "/"):
+            return copy.rstrip("/") + path[len(main.rstrip("/")):]
+        return path
+
+    def from_copy(self, path: str) -> str:
+        """*path* given from the copy, as the main tree's index records it."""
+        if not self._seen_from or not path:
+            return path
+        main, copy = self._seen_from
+        if path == copy:
+            return main
+        if path.startswith(copy.rstrip("/") + "/"):
+            return main.rstrip("/") + path[len(copy.rstrip("/")):]
+        return path
 
     def sync(
         self,

@@ -67,6 +67,12 @@ def main() -> None:
     if not rtfm_dir.exists():
         return
 
+    # A git worktree is served read-only from its main tree: nothing to
+    # index or enrol from here.
+    from rtfm.core.placement import worktree_main_root
+    if worktree_main_root(project_root) is not None:
+        return
+
     db_path = rtfm_dir / "library.db"
     if not db_path.exists():
         return

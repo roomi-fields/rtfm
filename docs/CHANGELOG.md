@@ -7,6 +7,38 @@ description: >-
 
 # Changelog
 
+## [0.52.0] — 2026-10-09
+
+### Changed — an agent's git worktree is served from the main tree's index
+
+Agents work in their own copy of a repository (`git worktree add`), often in
+a sandbox where everything outside the copy is read-only. Started there,
+RTFM took the copy for a new project: it built a full second index inside
+it (about 200 MB on one repository), added its section to the copy's
+CLAUDE.md, wrote `.claude/settings.local.json` and enrolled the copy with
+the shared indexer — dirtying a tree that must hold only the agent's work,
+and blocking the fast-forward that brings that work back.
+
+A linked worktree is now recognised from the files git leaves (no git
+command run), and:
+
+- the session start writes nothing in the copy — no index, no CLAUDE.md
+  section, no settings, no enrolment; the edit hooks do nothing there;
+- search is answered from the main tree's index, opened read-only, and
+  works when that index, `~/.rtfm` and the main `.git` are read-only;
+- results point into the copy, so the agent reads and edits its own files;
+  reading a file goes to the copy's version, so the agent sees its edits;
+- nothing is queued into the main index from the copy.
+
+The main index does not hold the agent's edits: a search finds passages as
+they are in the main tree, and reading the file shows the copy's version.
+
+### Fixed — the server's log created `.rtfm/` wherever a session opened
+
+The log line written at server start created the index directory when it
+did not exist, in any directory a session was opened in. It now writes only
+into an index directory that already exists.
+
 ## [0.51.0] — 2026-10-07
 
 ### Added — MIDI files and audio files are read

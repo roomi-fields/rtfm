@@ -24,6 +24,17 @@ def main() -> None:
     rtfm_dir = Path(proj) / ".rtfm"
     if not rtfm_dir.exists():
         return
+    # A git worktree's own .rtfm/ (left behind, or tracked by the repo) is
+    # not an index this session feeds: the copy is served read-only.
+    plugin_root = str(Path(__file__).resolve().parent.parent)
+    if plugin_root not in sys.path:
+        sys.path.insert(0, plugin_root)
+    try:
+        from rtfm.core.placement import worktree_main_root
+        if worktree_main_root(proj) is not None:
+            return
+    except Exception:
+        return
 
     try:
         payload = json.loads(sys.stdin.read())

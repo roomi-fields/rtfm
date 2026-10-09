@@ -185,6 +185,8 @@ def _catch_up_before_empty_answer() -> bool:
         if budget <= 0 or not freshness.indexer_is_running():
             return False
         lib = _get_library()
+        if lib.read_only:
+            return False    # a reader — a git worktree's session — queues nothing
         project_root = Path(lib.db_path).resolve().parent.parent
         t0 = time.time()
         caught_up = freshness.catch_up(str(lib.db_path), str(project_root), budget)
@@ -461,6 +463,9 @@ def _get_library(project: str | None = None):
     if not db_path:
         from rtfm.config import resolve_db
         db_path = resolve_db()
+    seen_from = _worktree_view(db_path)
+    if seen_from is not None:
+        db_path = str(Path(seen_from[0]) / ".rtfm" / "library.db")
 
     identity = _db_identity(db_path)
     if _library is not None and identity != _library_identity:
@@ -472,9 +477,18 @@ def _get_library(project: str | None = None):
 
     if _library is None:
         try:
-            _library = Library(db_path, create=False)
+            if seen_from is not None:
+                _library = Library(db_path, create=False, read_only=True,
+                                   seen_from=seen_from)
+            else:
+                _library = Library(db_path, create=False)
             _library_identity = identity
         except FileNotFoundError:
+            if seen_from is not None:
+                raise NoIndexHere(
+                    f"This session works in a git worktree of {seen_from[0]}, "
+                    f"which has no RTFM index. Nothing is indexed in a "
+                    f"worktree; use your own file tools.") from None
             raise NoIndexHere(
                 f"No RTFM index for this directory (looked for {db_path}). "
                 f"RTFM indexes a project only once you ask it to: run "
@@ -482,6 +496,26 @@ def _get_library(project: str | None = None):
                 f"Use your own file tools in the meantime."
             ) from None
     return _library
+
+
+def _worktree_view(db_path: str) -> "tuple[str, str] | None":
+    """``(main_tree, copy)`` when this session works in a linked git
+    worktree and the index it would use is the copy's own (relative, or
+    inside the copy). An index named explicitly elsewhere is respected."""
+    from rtfm.core.placement import worktree_copy_root, worktree_main_root
+
+    here = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    copy = worktree_copy_root(here)
+    if copy is None:
+        return None
+    target = Path(db_path)
+    if target.is_absolute():
+        try:
+            target.resolve().relative_to(copy)
+        except ValueError:
+            return None
+    main = worktree_main_root(copy)
+    return (str(main), str(copy)) if main is not None else None
 
 
 #: Indexes of *other* projects, opened on demand and kept for the session.
@@ -1124,7 +1158,7 @@ def rtfm_expand(
     count = _coerce_int(count, 1)
 
     # Resolve path → book (strict matching, no fuzzy)
-    book_row = resolve_book_by_path(conn, source)
+    book_row = resolve_book_by_path(conn, lib.from_copy(source))
     if not book_row:
         return f"File not found in RTFM index: {source}\nTip: use rtfm_search to find indexed files."
 
@@ -1145,7 +1179,7 @@ def rtfm_expand(
     if repaired:
         # The book row may have been rebuilt — resolve it again before
         # reading chunks, or we would read the rows we just replaced.
-        book_row = resolve_book_by_path(conn, source) or book_row
+        book_row = resolve_book_by_path(conn, lib.from_copy(source)) or book_row
         book_slug = book_row["slug"]
         book_title = book_row["title"]
 
@@ -1341,7 +1375,7 @@ def rtfm_graph(
     book_slug = source
     book_row = conn.execute("SELECT slug FROM books WHERE slug = ?", (source,)).fetchone()
     if not book_row:
-        book_row = resolve_book_by_path(conn, source)
+        book_row = resolve_book_by_path(conn, lib.from_copy(source))
         if book_row:
             book_slug = book_row["slug"]
         else:
@@ -1405,7 +1439,7 @@ def rtfm_history(
     book_slug = source
     book_row = conn.execute("SELECT slug FROM books WHERE slug = ?", (source,)).fetchone()
     if not book_row:
-        book_row = resolve_book_by_path(conn, source)
+        book_row = resolve_book_by_path(conn, lib.from_copy(source))
         if book_row:
             book_slug = book_row["slug"]
         else:

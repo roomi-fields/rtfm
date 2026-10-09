@@ -40,9 +40,11 @@ def log(category: str, message: str) -> None:
     try:
         if _log_file is None:
             path = _get_log_path()
-            if path is None:
+            # Only into an index directory that already exists: creating
+            # one is how a session opened in any directory — an agent's
+            # git worktree among them — found a ``.rtfm/`` left behind.
+            if path is None or not path.parent.is_dir():
                 return
-            path.parent.mkdir(parents=True, exist_ok=True)
             _log_file = open(path, "a", encoding="utf-8", buffering=1)  # line-buffered
 
         ts = time.strftime("%H:%M:%S")

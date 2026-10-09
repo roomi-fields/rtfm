@@ -31,6 +31,62 @@ WALK_DEPTH = 3
 WALK_BUDGET = 5000
 
 
+def worktree_main_root(path: Path | str) -> Path | None:
+    """The main working tree, when *path* lies in a linked git worktree.
+
+    Agents work in their own copy of a repository (``git worktree add``),
+    often in a sandbox where everything outside the copy is read-only. Such
+    a copy is not a project of its own: started there, RTFM used to build a
+    full second index inside it (200 MB on one repository), add its section
+    to the copy's CLAUDE.md and write its settings — dirtying a tree that
+    must hold only the agent's work. The copy is served from the main
+    tree's index instead, read-only.
+
+    Read from the files git leaves, without running git: a linked worktree
+    has a ``.git`` *file* pointing at ``<main>/.git/worktrees/<name>``,
+    which holds a ``commondir`` file leading back to the main ``.git``. A
+    submodule also has a ``.git`` file, but no ``commondir``.
+    """
+    here = Path(path).resolve()
+    for d in (here, *here.parents):
+        marker = d / ".git"
+        try:
+            if marker.is_dir():
+                return None                     # a main tree, or a plain repo
+            if not marker.is_file():
+                continue
+            text = marker.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        if not text.startswith("gitdir:"):
+            return None
+        gitdir = Path(text[len("gitdir:"):].strip())
+        gitdir = gitdir if gitdir.is_absolute() else d / gitdir
+        try:
+            common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        except OSError:
+            return None                         # a submodule
+        common_dir = Path(common)
+        common_dir = (common_dir if common_dir.is_absolute()
+                      else gitdir / common_dir).resolve()
+        if common_dir.name != ".git":
+            return None                         # a bare repository: no tree
+        return common_dir.parent
+    return None
+
+
+def worktree_copy_root(path: Path | str) -> Path | None:
+    """The top of the linked worktree *path* lies in (where its ``.git``
+    file is), or ``None``."""
+    here = Path(path).resolve()
+    for d in (here, *here.parents):
+        if (d / ".git").is_dir():
+            return None
+        if (d / ".git").is_file():
+            return d if worktree_main_root(d) is not None else None
+    return None
+
+
 def refusal_to_index(root: Path | str) -> str | None:
     """Why *root* must not get an index of its own, or ``None`` if it may.
 
