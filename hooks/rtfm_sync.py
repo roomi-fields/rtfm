@@ -27,8 +27,16 @@ def main() -> None:
     proj = os.environ.get("CLAUDE_PROJECT_DIR")
     if not proj:
         return
-    tmp = Path(proj) / ".rtfm" / "touched_files.tmp"
-    if not tmp.exists() or tmp.stat().st_size == 0:
+    rtfm_dir = Path(proj) / ".rtfm"
+    if not rtfm_dir.is_dir():
+        return
+    # The queue, or lines a drain cut short left behind.
+    tmp = rtfm_dir / "touched_files.tmp"
+    try:
+        has_queue = tmp.exists() and tmp.stat().st_size > 0
+    except OSError:
+        has_queue = False
+    if not has_queue and not any(rtfm_dir.glob("touched_files.*.draining")):
         return
     # Delegate to the Stop-hook drain — same code path, same semantics.
     try:

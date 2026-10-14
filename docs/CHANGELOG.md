@@ -7,6 +7,33 @@ description: >-
 
 # Changelog
 
+## [0.53.0] — 2026-10-14
+
+### Changed — the sync hooks run in the background
+
+The prompt hook and the end-of-turn hook held the session while they
+indexed what the agent had edited. Measured on one machine over a day, the
+prompt hook reached its 10-second limit 25 times out of 25, the end-of-turn
+hook took up to 34 seconds. Both now run in the background (Claude Code
+`async` hooks, 120-second limit there); the hook that only notes an edited
+path stays in line.
+
+- The index can lag a few seconds behind an edit.
+- Two drains no longer run at once: the second finds the drain lock held
+  and leaves; what it would have taken waits for the next one.
+- A drain takes the edit list whole by renaming it, so a path noted while
+  it runs lands in a fresh list and is not lost.
+- A drain cut short (the session closed) leaves what it took behind; the
+  next drain, from either hook, takes it up.
+
+### Fixed — the extras stopped loading after a Python upgrade
+
+The extras venv (`rtfm-install-extras`) is tied to the Python it was built
+on. After the system moved from Python 3.12 to 3.14, it still started but
+found none of its packages: no semantic search, no PDF, office or audio
+reading. Running `rtfm-install-extras` now rebuilds a venv built on another
+Python version, and lists what was installed in it before.
+
 ## [0.52.0] — 2026-10-09
 
 ### Changed — an agent's git worktree is served from the main tree's index

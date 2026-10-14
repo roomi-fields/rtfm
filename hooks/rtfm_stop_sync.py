@@ -58,7 +58,62 @@ def _load_sources(rtfm_dir: Path, project_root: Path) -> tuple[list[dict], str]:
     return sources, default_corpus
 
 
+#: A drain takes the queue whole by renaming it to one of these, so lines
+#: the edit hook appends meanwhile land in a fresh queue and are not lost.
+#: One left behind is a drain that was cut short — the next one takes it.
+CLAIMED_GLOB = "touched_files.*.draining"
+
+
+def pending(rtfm_dir: Path) -> bool:
+    """Whether anything waits to be drained: the queue, or a cut drain's."""
+    tmp = rtfm_dir / "touched_files.tmp"
+    try:
+        if tmp.exists() and tmp.stat().st_size > 0:
+            return True
+    except OSError:
+        pass
+    return any(rtfm_dir.glob(CLAIMED_GLOB))
+
+
+def _claim(rtfm_dir: Path) -> tuple[set[str], list[Path]]:
+    """Take the queue and whatever a cut drain left. Call under the lock."""
+    claimed = list(rtfm_dir.glob(CLAIMED_GLOB))
+    tmp = rtfm_dir / "touched_files.tmp"
+    if tmp.exists():
+        mine = rtfm_dir / f"touched_files.{os.getpid()}.draining"
+        try:
+            os.replace(tmp, mine)
+            claimed.append(mine)
+        except OSError:
+            pass
+    touched: set[str] = set()
+    for path in claimed:
+        try:
+            touched |= {ln.strip() for ln in
+                        path.read_text(encoding="utf-8").splitlines() if ln.strip()}
+        except OSError:
+            continue
+    return touched, claimed
+
+
+def _release(claimed: list[Path]) -> None:
+    for path in claimed:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 def main() -> None:
+    """Drain the edit queue, once at a time.
+
+    The hook runs in the background since 0.53.0 — it used to hold every
+    prompt and every end of turn, up to its time limit when several sessions
+    fed the same queue. Two drains can now overlap: the second finds the
+    lock held and leaves at once; what it would have taken stays queued for
+    the next. A drain cut short (the session closed) leaves its claimed
+    lines behind, and the next drain takes them.
+    """
     project_root = _project_root()
     if not project_root:
         return
@@ -77,17 +132,29 @@ def main() -> None:
     if not db_path.exists():
         return
 
-    tmp = rtfm_dir / "touched_files.tmp"
-    if not tmp.exists() or tmp.stat().st_size == 0:
+    if not pending(rtfm_dir):
         return
 
+    from rtfm.core.portable import open_lock_file, try_lock_exclusive, unlock
     try:
-        touched = {ln.strip() for ln in tmp.read_text(encoding="utf-8").splitlines()
-                   if ln.strip()}
-    except Exception:
+        fd = open_lock_file(rtfm_dir / "drain.lock")
+    except OSError:
         return
+    try:
+        if not try_lock_exclusive(fd):
+            return              # another drain is running; it or the next takes the rest
+        try:
+            _drain(project_root, rtfm_dir, db_path)
+        finally:
+            unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def _drain(project_root: Path, rtfm_dir: Path, db_path: Path) -> None:
+    touched, claimed = _claim(rtfm_dir)
     if not touched:
-        tmp.unlink(missing_ok=True)
+        _release(claimed)
         return
 
     sources, default_corpus = _load_sources(rtfm_dir, project_root)
@@ -125,7 +192,7 @@ def main() -> None:
 
     if not by_source:
         _log(project_root, f"stop-sync skipped: {len(touched)} file(s) outside any source")
-        tmp.unlink(missing_ok=True)
+        _release(claimed)
         return
 
     _log(
@@ -156,9 +223,9 @@ def main() -> None:
         elapsed = time.time() - t0
         _log(project_root,
              f"stop-sync done +{total_added} ~{total_modified} time={elapsed:.2f}s")
-        # Clear the queue only after a successful sync — if we crashed
-        # mid-flight, the next turn will retry the same files.
-        tmp.unlink(missing_ok=True)
+        # Released only after a successful sync — cut or crashed, the
+        # claimed lines stay behind and the next drain retries them.
+        _release(claimed)
         # A project fed only by this hook, and never enrolled, is never
         # scanned: it holds what agents edited and nothing else. Enrol it
         # (registration only — never start a worker from plugin code).
