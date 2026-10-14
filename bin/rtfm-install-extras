@@ -46,6 +46,22 @@ if [ -z "$BASE_PY" ]; then
     exit 1
 fi
 
+# A venv built on another Python (the system's moved, e.g. 3.12 -> 3.14)
+# still starts, but finds none of its packages: rebuild it. Packages asked
+# for by name before are listed so they can be reinstalled.
+if [ -f "$VENV/pyvenv.cfg" ]; then
+    WANT=$("$BASE_PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+    HAVE=$(sed -n 's/^version *= *\([0-9]*\.[0-9]*\).*/\1/p' "$VENV/pyvenv.cfg")
+    if [ -n "$HAVE" ] && [ "$HAVE" != "$WANT" ]; then
+        BEFORE=$(for d in "$VENV"/lib/python*/site-packages/*.dist-info; do
+                     [ -f "$d/REQUESTED" ] && basename "$d" | sed 's/-[0-9].*//'
+                 done | tr '\n' ' ')
+        echo "Extras venv was built on Python $HAVE, now $WANT: rebuilding it."
+        [ -n "$BEFORE" ] && echo "  Installed before: $BEFORE"
+        rm -rf "$VENV"
+    fi
+fi
+
 if [ ! -d "$VENV" ]; then
     echo "Creating extras venv at $VENV ..."
     "$BASE_PY" -m venv "$VENV" || {
