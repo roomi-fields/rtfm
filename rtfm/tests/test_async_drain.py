@@ -121,12 +121,14 @@ def test_a_drain_cut_short_is_taken_up_by_the_next(depot, monkeypatch):
     def cut(*a, **k):
         raise KeyboardInterrupt("session closed")
 
+    real_sync = sync_mod.sync
     monkeypatch.setattr(sync_mod, "sync", cut)
     with pytest.raises(KeyboardInterrupt):
         hook.main()
     assert list((depot / ".rtfm").glob("touched_files.*.draining"))
-    monkeypatch.undo()
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(depot))
+    # Restore only sync: undoing everything would also drop the fake home,
+    # and the hook would enrol this test depot in the user's real registry.
+    monkeypatch.setattr(sync_mod, "sync", real_sync)
     _hook("rtfm_stop_sync").main()
     assert _indexed(depot) == {"a.md"}
     assert not list((depot / ".rtfm").glob("touched_files.*.draining"))
