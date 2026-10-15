@@ -120,19 +120,12 @@ class _Source:
     """What is known about one watched source: where it is and what it skips."""
 
     def __init__(self, root: str, exclude_dirs: frozenset, honor_gitignore: bool):
-        from rtfm.core.sync import _load_gitignore_spec, _load_rtfmignore_spec
+        from rtfm.core.sync import IgnoreRules
         self.root = root
         self.exclude_dirs = exclude_dirs
         self.honor_gitignore = honor_gitignore
-        self.gitignore = _load_gitignore_spec(Path(root)) if honor_gitignore else None
-        self.rtfmignore = _load_rtfmignore_spec(Path(root))
+        self.rules = IgnoreRules(Path(root), honor_gitignore)
         self.wds: set[int] = set()
-
-    def reload_ignores(self) -> None:
-        from rtfm.core.sync import _load_gitignore_spec, _load_rtfmignore_spec
-        self.gitignore = (_load_gitignore_spec(Path(self.root))
-                          if self.honor_gitignore else None)
-        self.rtfmignore = _load_rtfmignore_spec(Path(self.root))
 
     def ignores(self, rel: str, is_dir: bool) -> bool:
         """True for a path whose change the scan would not act on."""
@@ -142,11 +135,7 @@ class _Source:
             return True
         if not is_dir and rel.endswith(TRANSIENT_SUFFIXES):
             return True
-        probe = rel + "/" if is_dir else rel
-        for spec in (self.gitignore, self.rtfmignore):
-            if spec is not None and spec.match_file(probe):
-                return True
-        return False
+        return self.rules.ignored(rel, is_dir)
 
 
 class TreeWatcher:
@@ -338,8 +327,12 @@ class TreeWatcher:
                         rewatch.add(key)
                     continue
                 rel = os.path.relpath(os.path.join(here, name), src.root)
-                if name in (".gitignore", ".rtfmignore") and here == src.root:
-                    src.reload_ignores()
+                # An ignore file changed: what is watched and what the scan
+                # keeps may both differ now. Rewatch (it rereads the rules)
+                # and scan — the scan takes out what is now left out.
+                if name == ".gitignore" or (name == ".rtfmignore"
+                                            and here == src.root):
+                    rewatch.add(key)
                     hit.add(key)
                     continue
                 if src.ignores(rel, is_dir):

@@ -7,6 +7,29 @@ description: >-
 
 # Changelog
 
+## [0.54.0] — 2026-10-15
+
+### Changed — every `.gitignore` of a source counts
+
+Only the root `.gitignore` was read. A tool that keeps its own `.gitignore`
+in its directory — a ticket tracker beside its database, a build cache —
+had its internals indexed anyway: on one project, files rewritten at every
+ticket operation were re-indexed hundreds of times a day. Each `.gitignore`
+now applies below its directory, a deeper one overriding a shallower one,
+and nothing is brought back from inside an ignored directory, as in git.
+The scan and the change watcher no longer enter a directory a rule leaves
+out. A `.gitignore` that changes anywhere in the tree triggers a scan.
+
+### Fixed — a file a new ignore rule leaves out leaves the index
+
+A file indexed before a rule appeared stayed in the index for good: the
+scan stopped offering it, and the removal was held back because the file
+was still on disk. A build cache that git was told to ignore kept 1,678
+files searchable that way. A file an ignore rule now leaves out is taken
+out at the next scan, present or not. The removal checks the rule again
+before acting, so a rule taken back in between keeps the file; an ignore
+file that cannot be read adds no rule, so a mount gone dark removes nothing.
+
 ## [0.53.0] — 2026-10-14
 
 ### Changed — the sync hooks run in the background

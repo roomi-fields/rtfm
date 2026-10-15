@@ -157,8 +157,8 @@ def handle_scan(job: Job, worker: "JobContext") -> Optional[int]:
         }
     """
     from rtfm.core.sync import (
-        _path_to_slug, _sibling_roots, build_disk_check, compute_diff,
-        confirm_removals, scan_directory,
+        IgnoreRules, _path_to_slug, _sibling_roots, build_disk_check,
+        compute_diff, confirm_removals, scan_directory,
     )
 
     payload = job.payload or {}
@@ -258,12 +258,18 @@ def handle_scan(job: Job, worker: "JobContext") -> Optional[int]:
     skipped_removed = 0
     try:
         if diff.removed:
+            rules = IgnoreRules(root, honor_gitignore)
             confirmed, kept = confirm_removals(
                 root, list(diff.removed), force=force_remove,
-                sibling_roots=sibling_roots)
+                sibling_roots=sibling_roots, rules=rules)
             skipped_removed = len(kept)
             if confirmed:
-                payloads = [{"filepath": rel, "corpus": corpus}
+                # A file that an ignore rule now leaves out says so, for the
+                # removal's last look: it is still on disk, and must go.
+                payloads = [{"filepath": rel, "corpus": corpus,
+                             **({"ignored_under": str(root),
+                                 "honor_gitignore": honor_gitignore}
+                                if rules.ignored(rel) else {})}
                             for rel in confirmed]
                 inserted, _ = queue.enqueue_many("remove", payloads)
                 remove_jobs = inserted
@@ -946,9 +952,16 @@ def handle_remove(job: Job, worker: "JobContext") -> None:
         # the removal, and the removal is refused because the file is there.
         # Three projects carried a database's shared-memory sidecar through
         # every pass that way.
-        from rtfm.core.sync import is_excluded_by_rule
+        #
+        # Likewise a file an ignore rule now leaves out — checked again
+        # here, since the rule may have been taken back since the scan.
+        from rtfm.core.sync import IgnoreRules, is_excluded_by_rule
         by_rule = is_excluded_by_rule(rel)
-        if not by_rule:
+        ignored_under = payload.get("ignored_under")
+        by_ignore = bool(ignored_under) and not by_rule and IgnoreRules(
+            Path(ignored_under), bool(payload.get("honor_gitignore", True))
+        ).ignored(rel)
+        if not (by_rule or by_ignore):
             for root in lib.list_sync_roots(corpus):
                 try:
                     if (Path(root) / rel).exists():
@@ -961,7 +974,8 @@ def handle_remove(job: Job, worker: "JobContext") -> None:
                     return
 
         removed = lib.remove_file(rel, corpus)
-        why = " (excluded by rule)" if by_rule else ""
+        why = (" (excluded by rule)" if by_rule
+               else " (now ignored)" if by_ignore else "")
         if removed:
             worker._log(f"remove [{corpus}] {rel}{why}")
         else:

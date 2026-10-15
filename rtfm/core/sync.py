@@ -106,8 +106,11 @@ def _under_excluded_subpath(parts: "tuple[str, ...]") -> bool:
 TRANSIENT_SUFFIXES: tuple[str, ...] = ("-wal", "-shm", "-journal")
 
 
-def _load_pathspec(path: Path):
+def _load_pathspec(path: Path, gitignore: bool = False):
     """Load a gitwildmatch PathSpec from *path*, or return None.
+
+    *gitignore* reads it with git's own semantics (a ``!`` line can bring
+    back a file a previous line left out).
 
     Silent no-op when the file is missing, ``pathspec`` isn't installed,
     or the file is unreadable — the scan proceeds without that filter.
@@ -120,21 +123,79 @@ def _load_pathspec(path: Path):
         return None
     try:
         with open(path, encoding="utf-8", errors="ignore") as f:
+            if gitignore:
+                return pathspec.GitIgnoreSpec.from_lines(f)
             return pathspec.PathSpec.from_lines("gitwildmatch", f)
     except Exception:
         return None
 
 
-def _load_gitignore_spec(root: Path):
-    """Return a PathSpec matcher for the root-level .gitignore, or None.
+class IgnoreRules:
+    """What a source's ignore files leave out: ``.gitignore`` at the root
+    *and in every subdirectory* (when *honor_gitignore*), and the root
+    ``.rtfmignore`` (always).
 
-    Honoring .gitignore means the user's already-declared "ignored
-    artifacts" (build outputs, caches, generated files) don't need to be
-    redeclared as RTFM excludes. Nested .gitignore files in subdirs are
-    not walked — root-level only — which covers the vast majority of
-    real-world setups while keeping the scan simple.
+    Only the root ``.gitignore`` used to be read. A tool that keeps its
+    own ``.gitignore`` in its directory — a ticket tracker's database, a
+    build cache — had its internals indexed anyway: on one project, files
+    rewritten at every ticket operation were re-indexed hundreds of times
+    a day. Each ``.gitignore`` applies to the paths below its directory,
+    and a deeper one overrides a shallower one, as git does.
+
+    A file is read once, on the first path below its directory; call
+    :meth:`forget` when one changes. An unreadable or missing file adds
+    no rule — never one that would leave something out.
     """
-    return _load_pathspec(root / ".gitignore")
+
+    def __init__(self, root: Path, honor_gitignore: bool = True):
+        self.root = Path(root)
+        self.honor_gitignore = honor_gitignore
+        self._git: dict[str, object] = {}
+        self._rtfm = _load_rtfmignore_spec(self.root)
+
+    def forget(self) -> None:
+        """Drop what was read, so the next question rereads the files."""
+        self._git.clear()
+        self._rtfm = _load_rtfmignore_spec(self.root)
+
+    def _gitignore(self, rel_dir: str):
+        if rel_dir not in self._git:
+            self._git[rel_dir] = _load_pathspec(
+                self.root / rel_dir / ".gitignore", gitignore=True)
+        return self._git[rel_dir]
+
+    def ignored(self, rel: str, is_dir: bool = False) -> bool:
+        rel = rel.replace("\\", "/").strip("/")
+        if not rel or rel == ".":
+            return False
+        probe = rel + "/" if is_dir else rel
+        if self._rtfm is not None and self._rtfm.match_file(probe):
+            return True
+        if not self.honor_gitignore:
+            return False
+        parts = rel.split("/")
+        # Git does not look inside an ignored directory: a path is out as
+        # soon as one of its directories is, whatever deeper files say.
+        for depth in range(1, len(parts)):
+            if self._decide("/".join(parts[:depth]), True):
+                return True
+        return self._decide(rel, is_dir)
+
+    def _decide(self, rel: str, is_dir: bool) -> bool:
+        """The verdict of the deepest ``.gitignore`` that has one."""
+        parts = rel.split("/")
+        verdict = None
+        for depth in range(len(parts)):
+            spec = self._gitignore("/".join(parts[:depth]))
+            if spec is None:
+                continue
+            sub = "/".join(parts[depth:]) + ("/" if is_dir else "")
+            check = getattr(spec, "check_file", None)   # pathspec >= 0.12
+            include = (check(sub).include if check is not None
+                       else (True if spec.match_file(sub) else None))
+            if include is not None:
+                verdict = include
+        return bool(verdict)
 
 
 def _load_rtfmignore_spec(root: Path):
@@ -332,9 +393,8 @@ def is_excluded_by_rule(rel: str,
     """True when this path can never be indexed, whatever is on disk.
 
     The built-in rules only — an excluded directory, a transient database
-    sidecar. Not ``.gitignore``/``.rtfmignore``, which the user edits and
-    which a dark mount can make unreadable; absence of evidence there must
-    stay non-evidence.
+    sidecar. The ignore files are :class:`IgnoreRules`, which depend on the
+    source they are read from.
     """
     parts = Path(rel).parts
     if any(part in (exclude_dirs or DEFAULT_EXCLUDE_DIRS) for part in parts):
@@ -347,6 +407,7 @@ def is_excluded_by_rule(rel: str,
 def confirm_removals(
     root: Path, removed: list[str], force: bool = False,
     sibling_roots: "Sequence[Path] | None" = None,
+    rules: "IgnoreRules | None" = None,
 ) -> tuple[list[str], list[str]]:
     """Partition scan-detected removals into ``(confirmed, kept)``.
 
@@ -361,6 +422,12 @@ def confirm_removals(
     pass and re-indexed it on the next — a permanent churn that ran to half a
     million removal jobs on one project. A file that is present under any
     sibling is not deleted.
+
+    A file the ignore *rules* now leave out comes out too, present or not:
+    a rule added after it was indexed is a decision (a build cache of 1,678
+    files stayed searchable that way). Only a rule actually read counts —
+    an ignore file that cannot be read adds none, so a dark mount still
+    removes nothing.
     """
     if force:
         return list(removed), []
@@ -374,7 +441,7 @@ def confirm_removals(
         # leave — the scan stops offering it, and the removal is then held
         # back precisely because the file is present. Three projects were
         # carrying a database's shared-memory sidecar that way.
-        if is_excluded_by_rule(rel):
+        if is_excluded_by_rule(rel) or (rules is not None and rules.ignored(rel)):
             confirmed.append(rel)
             continue
         verdicts = [_absence_is_proven(r, rel) for r in roots]
@@ -533,7 +600,8 @@ def _matches_pattern(name: str, rel: str, pattern: str) -> bool:
     return fnmatch.fnmatch(name, pattern)
 
 
-def _walk(root: Path, exclude_dirs: "set[str]") -> list[Path]:
+def _walk(root: Path, exclude_dirs: "set[str]",
+          rules: "IgnoreRules | None" = None) -> list[Path]:
     """Every entry below *root*, sorted, never entering an excluded directory.
 
     The scan used to list everything and drop excluded paths afterwards, so
@@ -541,6 +609,7 @@ def _walk(root: Path, exclude_dirs: "set[str]") -> list[Path]:
     pass. On one project that was 164,043 entries visited for 7,480 kept —
     six seconds a minute, on each of forty projects scanned every minute.
     Pruning at the directory keeps the pass proportional to what is indexed.
+    A directory the ignore *rules* leave out is not entered either.
     """
     import os
 
@@ -548,7 +617,9 @@ def _walk(root: Path, exclude_dirs: "set[str]") -> list[Path]:
     for here, dirs, names in os.walk(root):
         rel_here = Path(here).relative_to(root).parts
         dirs[:] = [d for d in dirs if d not in exclude_dirs
-                   and not _under_excluded_subpath((*rel_here, d))]
+                   and not _under_excluded_subpath((*rel_here, d))
+                   and not (rules is not None
+                            and rules.ignored("/".join((*rel_here, d)), True))]
         # A name on the list is excluded as a file too: a submodule's
         # ``.git`` is a one-line file pointing at its repository.
         out.extend(Path(here) / n for n in names if n not in exclude_dirs)
@@ -582,8 +653,8 @@ def scan_directory(
        OR it matches an *include* pattern. ``*``/``**``/``.*`` in *extensions*
        forces index-all explicitly.
     3. *exclude* patterns (prefix/suffix/glob) — rejected when matched.
-    4. ``.gitignore`` at *root* (when *honor_gitignore*) then ``.rtfmignore``
-       (always) — same syntax as ``.gitignore``.
+    4. :class:`IgnoreRules` — every ``.gitignore`` of the tree (when
+       *honor_gitignore*) and the root ``.rtfmignore`` (always).
 
     *include* / *exclude* patterns follow :func:`_matches_pattern`
     (``*.bps`` suffix, ``-gr.*`` prefix, ``fixtures/*`` path glob).
@@ -601,11 +672,10 @@ def scan_directory(
     # No suffix allow-list and no include patterns → index every file.
     has_restrictor = bool(exts) or bool(include)
 
-    gi_spec = _load_gitignore_spec(root) if honor_gitignore else None
-    ri_spec = _load_rtfmignore_spec(root)  # always applied when present
+    rules = IgnoreRules(root, honor_gitignore)
 
     files: list[Path] = []
-    for item in _walk(root, exclude_dirs):
+    for item in _walk(root, exclude_dirs, rules):
         if not item.is_file():
             continue
         if item.name.endswith(TRANSIENT_SUFFIXES):
@@ -624,10 +694,7 @@ def scan_directory(
         # Explicit exclusions (prefix/suffix/glob).
         if exclude and any(_matches_pattern(item.name, rel, p) for p in exclude):
             continue
-        # Ignore files.
-        if gi_spec is not None and gi_spec.match_file(rel):
-            continue
-        if ri_spec is not None and ri_spec.match_file(rel):
+        if rules.ignored(rel):
             continue
         files.append(item)
     return files
@@ -1313,7 +1380,8 @@ def sync(
     else:
         confirmed, kept = confirm_removals(
             root, list(diff.removed), force=force_remove,
-            sibling_roots=_sibling_roots(library, corpus, root))
+            sibling_roots=_sibling_roots(library, corpus, root),
+            rules=IgnoreRules(root, honor_gitignore))
         if kept:
             msg = (f"kept {len(kept)} unconfirmed removal(s) in corpus "
                    f"'{corpus}' (file present or location unreadable)")

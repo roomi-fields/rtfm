@@ -348,3 +348,26 @@ def test_the_scan_says_what_it_found(tmp_path):
               status="running", created_at="", started_at=None,
               finished_at=None, error=None, attempts=1)
     assert handle_scan(job, JobContext(str(db), lambda m: None)) == 1
+
+
+@linux_only
+def test_a_directory_a_nested_gitignore_leaves_out_is_not_watched(watcher, tmp_path):
+    w, rec = watcher
+    (tmp_path / "outil" / "base").mkdir(parents=True)
+    (tmp_path / "outil" / ".gitignore").write_text("base/\n")
+    w.watch("src", str(tmp_path), EXCLUDED)
+    _settle(w, 2, rec=rec)
+    assert w.watched_directories() == 2
+    (tmp_path / "outil" / "base" / "x.md").write_text("x")
+    assert not rec.wait(timeout=0.5)
+
+
+@linux_only
+def test_a_nested_gitignore_that_changes_reports_its_source(watcher, tmp_path):
+    """The scan that follows takes out what the new rule leaves out."""
+    w, rec = watcher
+    (tmp_path / "outil").mkdir()
+    w.watch("src", str(tmp_path), EXCLUDED)
+    _settle(w, 2, rec=rec)
+    (tmp_path / "outil" / ".gitignore").write_text("cache/\n")
+    assert rec.wait() and set(rec.changed) == {"src"}
