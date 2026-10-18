@@ -281,7 +281,7 @@ RTFM works anywhere your project isn't just code:
 - **Native Claude Code plugin** — `/plugin install rtfm@roomi-fields/rtfm`, auto-init per project
 - **Pure-Python MCP server** — 0 external deps, no `mcp` SDK / `pydantic` / native binaries
 - **Cross-platform** — Linux, macOS, Windows, WSL (only requires Python ≥ 3.10 on PATH)
-- **13 MCP tools** — search, context, expand, graph, history, sync, tags, ...
+- **14 MCP tools** — search, context, expand, graph, history, sync, tags, ...
 - **Manual install fallback** — `pip install rtfm-ai` for Cursor, Codex, Claude Desktop chat, any other MCP client
 - **CLI + Python API** — scriptable for pipelines
 - **Non-invasive** — doesn't touch your code, doesn't replace your editor
@@ -370,6 +370,7 @@ See [JSON schema mappings](docs/json-mappings.md) for the full reference, and [R
 | `rtfm_remove`     | Remove a file from the index                          |
 | `rtfm_graph`      | Show dependency graph for a source (imports, links)   |
 | `rtfm_history`    | File version history and memory snapshots             |
+| `rtfm_coverage`   | What the index holds against what is on disk          |
 
 ---
 

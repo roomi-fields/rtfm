@@ -1,9 +1,9 @@
 ---
-title: RTFM Parsers Guide — 15 built-in formats and how to add your own
+title: RTFM Parsers Guide — 24 built-in formats and how to add your own
 description: >-
-  Complete reference for RTFM's 15 built-in parsers (Markdown, Python AST,
+  Complete reference for RTFM's 24 built-in parsers (Markdown, Python AST,
   LaTeX, YAML, JSON, TOML, PDF, XML, HTML, SQLite, Jupyter, CSV, XLSX,
-  Shell, plain text). How to write a custom parser in ~50 lines.
+  EPUB, MOBI, FB2, DJVU, DOCX, ODT, RTF, MIDI, audio, Shell, plain text). How to write a custom parser in ~50 lines.
 ---
 
 # Parsers Guide
@@ -82,13 +82,13 @@ class MyParser(BaseParser):
 
 ### BOFiP HTML (`rtfm/parsers/html_bofip.py`)
 
-- **Extensions**: `.html`
+- **Extensions**: `.html`, `.htm`
 - **Strategy**: French tax doctrine paragraphs
 
 ### SQLite (`rtfm/parsers/sqlite_parser.py`)
 
 - **Extensions**: `.sqlite`, `.sqlite3`, `.db`
-- **Strategy**: Read-only URI connection. Emits an overview chunk (tables, views, indexes, triggers + row counts), then per-table schema + sample chunks. Views and triggers as separate chunks. FTS5 shadow tables filtered.
+- **Strategy**: Read-only URI connection. Emits an overview chunk (tables, views, indexes, triggers + row counts), then per table a schema chunk and data chunks covering **every row**, streamed so a huge table never loads at once. Views and triggers as separate chunks. BLOB columns keep a `<blob NB>` placeholder. FTS5 shadow tables filtered.
 - **Edges**: Foreign keys → `EdgeCandidate(relation_type="fk")`
 - **`.db` guard**: validated by SQLite magic bytes (`SQLite format 3\x00`) to avoid false positives on unrelated `.db` files
 
@@ -100,17 +100,69 @@ class MyParser(BaseParser):
 ### CSV / TSV (`rtfm/parsers/csv_parser.py`)
 
 - **Extensions**: `.csv`, `.tsv`
-- **Strategy**: Sniff dialect (delimiter), emit overview chunk (column names + lightweight type inference: int/float/bool/text + row count) and sample chunk (first N rows formatted as a table). Big files are not fully read into memory.
+- **Strategy**: Sniff dialect (delimiter), emit an overview chunk (column names + type inference: int/float/bool/text + row count), then data chunks covering **every row**, each repeating the header so a matched value keeps its column. Streamed: memory stays bounded on million-row files.
 
 ### XLSX (`rtfm/parsers/xlsx.py`)
 
 - **Extensions**: `.xlsx`
-- **Strategy**: Per-workbook overview + per-sheet schema + per-sheet sample. Uses `read_only=True` so massive workbooks don't load fully in memory.
+- **Strategy**: Per-workbook overview + per-sheet schema + data chunks covering **every row** of each sheet (header repeated per chunk). Uses `read_only=True` so massive workbooks don't load fully in memory.
 - **Optional dependency**: `pip install rtfm-ai[xlsx]` (openpyxl)
+
+### EPUB (`rtfm/parsers/epub.py`)
+
+- **Extensions**: `.epub`
+- **Strategy**: Each spine item (chapter) is stripped of its XHTML markup and chunked by paragraph. Title and author read from the OPF metadata.
+- **Optional dependency**: `pip install rtfm-ai[epub]` (ebooklib + beautifulsoup4)
+
+### MOBI / AZW (`rtfm/parsers/mobi_parser.py`)
+
+- **Extensions**: `.mobi`, `.azw`, `.azw3`
+- **Strategy**: The book is unpacked to HTML, stripped, then chunked by paragraph. DRM-protected files are refused with a clear error; DRM is never bypassed.
+- **Optional dependency**: `pip install rtfm-ai[mobi]` (mobi + beautifulsoup4)
+
+### FictionBook (`rtfm/parsers/fb2.py`)
+
+- **Extensions**: `.fb2`
+- **Strategy**: Each `<section>` is a unit, headed by its `<title>` when present. Standard library only.
+
+### DJVU (`rtfm/parsers/djvu.py`)
+
+- **Extensions**: `.djvu`, `.djv`
+- **Strategy**: Text layer read page by page through the `djvutxt` command, chunked like PDF pages.
+- **System dependency**: `djvulibre-bin` (`apt install djvulibre-bin`)
+
+### DOCX (`rtfm/parsers/docx.py`)
+
+- **Extensions**: `.docx`
+- **Strategy**: Paragraphs in document order; Heading 1/2/3 styles start a new section. Tables flattened to `cell | cell | …`.
+- **Optional dependency**: `pip install rtfm-ai[office]` (python-docx)
+
+### ODT (`rtfm/parsers/odt.py`)
+
+- **Extensions**: `.odt`
+- **Strategy**: Headings start sections according to their outline level. Tables flattened to `cell | cell`.
+- **Optional dependency**: `pip install rtfm-ai[office]` (odfpy)
+
+### RTF (`rtfm/parsers/rtf.py`)
+
+- **Extensions**: `.rtf`
+- **Strategy**: Markup stripped to plain text, chunked on paragraph boundaries (RTF has no standard hierarchy).
+- **Optional dependency**: `pip install rtfm-ai[office]` (striprtf)
+
+### MIDI (`rtfm/parsers/midi.py`)
+
+- **Extensions**: `.mid`, `.midi`, `.kar`, `.rmi`
+- **Strategy**: One overview chunk (title, tempo, metre, key, duration, instruments per channel) and one chunk per track that carries anything: its range, markers and, in karaoke files, its lyrics. Standard library only; damaged tracks are read up to the damage.
+
+### Audio (`rtfm/parsers/audio.py`)
+
+- **Extensions**: `.mp3`, `.flac`, `.ogg`, `.oga`, `.opus`, `.m4a`, `.m4b`, `.aac`, `.wav`, `.aif`, `.aiff`, `.aifc`, `.wma`, `.ape`, `.wv`, `.mpc`, `.dsf`, `.tta`
+- **Strategy**: One chunk of tags (title, artist, album, composer, genre, year, comments) and stream facts (duration, sample rate, channels, bit rate), plus one for the lyrics when present. Speech is not transcribed.
+- **Optional dependency**: `pip install rtfm-ai[audio]` (mutagen)
 
 ### Plain text (`rtfm/parsers/plaintext.py`)
 
-- **Extensions**: `.js`, `.ts`, `.rs`, `.go`, `.java`, `.c`, `.cpp`, `.rb`, `.php`, `.css`, `.cfg`, `.txt` (also acts as fallback for `.toml` when `tomllib`/`tomli` is unavailable)
+- **Extensions**: `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.mts`, `.cts`, `.tsx`, `.rs`, `.go`, `.java`, `.kt`, `.scala`, `.swift`, `.c`, `.h`, `.cpp`, `.hpp`, `.rb`, `.php`, `.pl`, `.lua`, `.r`, `.sql`, `.css`, `.cfg`, `.txt` (also acts as fallback for `.toml` when `tomllib`/`tomli` is unavailable)
 - **Strategy**: Line-boundary chunks (~500 chars)
 
 ## Writing a Custom Parser

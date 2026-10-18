@@ -30,8 +30,8 @@ mcp = FastMCP("rtfm")
 
 # ── Tool profile (token footprint) ───────────────────────────────────────
 # RTFM_MCP_PROFILE controls which tools are exposed to the agent at runtime.
-#   "runtime" (default) : 6 retrieval tools — minimal context footprint
-#   "admin" / "all"     : all 13 tools (incl. sync, ingest, remove, tags…)
+#   "runtime" (default) : 8 retrieval tools — minimal context footprint
+#   "admin" / "all"     : all 14 tools (incl. sync, ingest, remove, tags…)
 # Admin operations (sync, ingest, …) are also available via CLI and the
 # Python API (used by hooks), so excluding them from MCP doesn't break them.
 

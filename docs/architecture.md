@@ -220,7 +220,7 @@ formats: JSON, Markdown, XML prompt.
 
 See [[docs/parsers|Parsers Guide]].
 
-22 built-in parsers, extensible via `@ParserRegistry.register`. Each
+24 built-in parsers, extensible via `@ParserRegistry.register`. Each
 parser implements `parse()` → `Iterator[Chunk]` and optionally
 `extract_edges()` → `list[EdgeCandidate]`. The PDF parser supports
 three backends:
