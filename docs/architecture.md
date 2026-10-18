@@ -323,7 +323,7 @@ Edges extracted from:
 - Python imports (`import x`, `from x import y`)
 - Markdown links (`[text](path)`)
 - Obsidian wikilinks (`[[target]]`, `[[target|display]]`)
-- LaTeX includes (`\input{}`, `\include{}`, `\cite{}`)
+- LaTeX includes (`\input{}`, `\include{}`); `\cite{}` keys are extracted but not resolved yet
 
 Used for: hub detection, orphan detection, centrality-based reranking.
 

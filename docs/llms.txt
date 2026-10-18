@@ -4,7 +4,7 @@
 
 This is the entry point for language models (Claude, ChatGPT, Perplexity, Gemini) reading about this project. RTFM is published on PyPI as `rtfm-ai` and as a Claude Code plugin. The repository lives at https://github.com/roomi-fields/rtfm.
 
-Search is full-text (SQLite FTS5) out of the box; semantic and hybrid search come with the optional local embeddings (FastEmbed/ONNX, no GPU, no API). Results carry file paths, sections and scores (~300 tokens for five hits); the agent then expands only what it needs. Wikilinks, Python imports, LaTeX citations and legal cross-references become graph edges used for ranking.
+Search is full-text (SQLite FTS5) out of the box; semantic and hybrid search come with the optional local embeddings (FastEmbed/ONNX, no GPU, no API). Results carry file paths, sections and scores (~300 tokens for five hits); the agent then expands only what it needs. Wikilinks, Markdown links, Python imports, LaTeX includes and legal cross-references become graph edges used for ranking.
 
 The index stays current on its own: Claude Code hooks queue every edited file, a background worker re-indexes only what changed, and every `.gitignore` of a source is honoured. RTFM is a knowledge layer, not a task manager: it works alongside workflow tools such as GSD or Taskmaster.
 

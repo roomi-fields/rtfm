@@ -47,7 +47,7 @@ class MyParser(BaseParser):
 
 - **Extensions**: `.tex`, `.latex`
 - **Strategy**: Split by `\section`, `\chapter`, `\subsection`
-- **Edges**: `\input{}`, `\include{}` → "include"; `\cite{}` → "cite"
+- **Edges**: `\input{}`, `\include{}` → "include". `\cite{}` keys are extracted, but not yet resolved into graph edges (no bibliography parser)
 
 ### YAML (`rtfm/parsers/yaml_parser.py`)
 

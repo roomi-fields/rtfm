@@ -3196,7 +3196,7 @@ def main():
     p_memory.add_argument("--no-embeddings", action="store_true", help="Skip embedding generation")
     p_memory.add_argument("--verbose", "-v", action="store_true", help="Show per-file progress")
     p_memory.add_argument("--install-hook", action="store_true",
-                          help="Install a global Claude Code Stop hook that auto-snapshots memory files")
+                          help="Install a global Claude Code SessionEnd hook that auto-snapshots memory files")
     p_memory.set_defaults(func=cmd_memory)
 
     # audit — the invariants RTFM checks about itself.

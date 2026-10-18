@@ -59,7 +59,7 @@ RTFM lifts that ceiling by moving the index into SQLite FTS5 and the graph into 
 To my knowledge, RTFM is the only open-source, multi-domain retrieval layer that combines:
 - 24 built-in format parsers (code, docs, tabular, notebooks, databases), extensible in ~50 lines each
 - FTS5 out of the box, optional local embeddings (FastEmbed/ONNX), hybrid mode
-- Graph-based ranking from wikilinks, Python imports, LaTeX cites, legal cross-refs
+- Graph-based ranking from wikilinks, Python imports, LaTeX includes, legal cross-refs
 - Progressive disclosure — metadata first (~300 tokens for 5 results), content on demand
 - Obsidian vault mode with auto-generated navigation files (index, graph, hubs, orphans)
 - MCP native — Claude Code, Cursor, Codex, any MCP client
