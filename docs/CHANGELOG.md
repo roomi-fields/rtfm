@@ -7,6 +7,30 @@ description: >-
 
 # Changelog
 
+## [0.55.0] — 2026-10-18
+
+### Changed — the memory hook runs in the background, quietly, once at a time
+
+The global end-of-session hook (`rtfm memory --install-hook`) ran in every
+session, agents' sandboxes included, where RTFM's Python is out of sight:
+each of those session ends reported "not found". It also held the end of
+every session while it read all projects' memory (about 5 s here). It now
+runs in the background, says nothing when RTFM cannot be reached, and runs
+one pass at a time — several sessions ending together start one pass.
+Rerun `rtfm memory --install-hook` to get the new entry.
+
+### Fixed — a memory directory shared by a link was indexed twice
+
+A project whose memory directory is a link to another project's had the
+same files indexed under both names; they fought over one entry and every
+pass ended in "UNIQUE constraint failed". Each directory is now indexed
+once, under the project that holds it, and the duplicate is taken out.
+
+### Fixed — installing a hook rewrote accented text in Claude Code settings
+
+Writing `settings.json` turned every non-ASCII character of the user's
+other settings into `\u` escapes. It is now written as it was read.
+
 ## [0.54.0] — 2026-10-15
 
 ### Changed — every `.gitignore` of a source counts

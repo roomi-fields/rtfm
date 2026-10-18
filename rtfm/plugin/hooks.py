@@ -85,59 +85,23 @@ except Exception:
 
 
 MEMORY_HOOK_SCRIPT = r'''#!/usr/bin/env python3
-"""RTFM global memory hook — versioned snapshot of Claude memory files on session stop.
+"""RTFM global memory hook — indexes Claude memory files at session end.
 
-Runs after every Claude Code session. Discovers ~/.claude/projects/*/memory/
-and re-syncs into ~/.rtfm/memory.db with unlimited version history (no prune).
-
-Fast: only the project whose memory just changed actually re-indexes.
+Logic lives in rtfm.plugin.memory_hook. Silent, one pass at a time.
 """
-import sys, time
-from pathlib import Path
-
-def main():
-    db_path = Path.home() / ".rtfm" / "memory.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    projects_root = Path.home() / ".claude" / "projects"
-    if not projects_root.exists():
-        return
-
-    memory_dirs = sorted(p for p in projects_root.glob("*/memory") if p.is_dir())
-    if not memory_dirs:
-        return
-
-    try:
-        from rtfm.core.library import Library
-        from rtfm.core.sync import sync
-
-        lib = Library(str(db_path))
-        for mem_dir in memory_dirs:
-            project_slug = mem_dir.parent.name.strip("-") or "root"
-            corpus = f"claude-memory/{project_slug}"
-            sync(
-                library=lib,
-                root=mem_dir,
-                corpus=corpus,
-                extensions={".md", ".txt"},
-                generate_embeddings=False,
-                retain_history=None,
-            )
-        lib.close()
-    except Exception:
-        pass  # silent — hook is best-effort
-
-
-if __name__ == "__main__":
-    main()
+try:
+    from rtfm.plugin.memory_hook import run_hook
+    run_hook()
+except Exception:
+    pass  # best-effort
 '''
 
 
 def install_memory_hook() -> str:
-    """Install a global SessionStop hook that snapshots Claude memory files.
+    """Install a global SessionEnd hook that snapshots Claude memory files.
 
     Writes the hook script to ~/.claude/hooks/rtfm_memory_sync.py and
-    registers it under ~/.claude/settings.json Stop event.
+    registers it under ~/.claude/settings.json SessionEnd event.
 
     Returns:
         "installed" on success.
@@ -174,17 +138,22 @@ def install_memory_hook() -> str:
             del hooks[evt]
 
     session_end = hooks.get("SessionEnd", [])
+    # In the background, so it never holds the end of a session; silent
+    # where RTFM's Python cannot be reached — an agent's sandbox, where
+    # every session end used to report "not found".
     session_end.append({
         "hooks": [{
             "type": "command",
-            "command": f"{sys.executable} {hook_path}",
-            "timeout": 30,
+            "command": f'"{sys.executable}" "{hook_path}" 2>/dev/null || true',
+            "async": True,
+            "timeout": 120,
         }],
     })
     hooks["SessionEnd"] = session_end
     settings["hooks"] = hooks
 
-    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    settings_path.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n",
+                             encoding="utf-8")
     return "installed"
 
 
@@ -358,7 +327,7 @@ def install_hook(project_root: str | Path, corpus: str = "default") -> str:
 
     settings["hooks"] = hooks
     settings_path.write_text(
-        json.dumps(settings, indent=2) + "\n",
+        json.dumps(settings, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
 

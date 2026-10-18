@@ -2358,8 +2358,6 @@ def cmd_memory(args):
     therefore no worker daemon to drain a queue. The queue-based path
     used by every other CLI command would have nowhere to enqueue to.
     """
-    from rtfm.core import sync as _sync_module
-    sync = _sync_module.sync
 
     if args.install_hook:
         from rtfm.plugin.hooks import install_memory_hook
@@ -2381,10 +2379,7 @@ def cmd_memory(args):
         print(f"No Claude projects directory found at {projects_root}")
         sys.exit(1)
 
-    memory_dirs = sorted(p for p in projects_root.glob("*/memory") if p.is_dir())
-    if not memory_dirs:
-        print(f"No memory/ directories under {projects_root}")
-        sys.exit(1)
+    from rtfm.plugin.memory_hook import sync_memories
 
     symbols = {"add": "+", "update": "~", "remove": "-", "error": "!"}
 
@@ -2393,33 +2388,25 @@ def cmd_memory(args):
         if filepath:
             print(f"  {sym} {filepath}  ({detail})")
 
+    results = sync_memories(
+        lib, projects_root, generate_embeddings=not args.no_embeddings,
+        on_project=lambda corpus, d: print(f"Syncing [{corpus}] {d} ..."),
+        on_progress=_progress if args.verbose else None)
+    if not results:
+        print(f"No memory/ directories under {projects_root}")
+        sys.exit(1)
+
     total_added = total_modified = total_unchanged = 0
-    for mem_dir in memory_dirs:
-        # project slug = directory name of the parent (e.g. "-mnt-d-Claude-RTFM")
-        project_slug = mem_dir.parent.name.strip("-") or "root"
-        corpus = f"claude-memory/{project_slug}"
-        print(f"Syncing [{corpus}] {mem_dir} ...")
-
-        result = sync(
-            library=lib,
-            root=mem_dir,
-            corpus=corpus,
-            extensions={".md", ".txt"},
-            generate_embeddings=not args.no_embeddings,
-            on_progress=_progress if args.verbose else None,
-            retain_history=None,  # unlimited history for memory files
-        )
-
+    for _corpus, _dir, result in results:
         total_added += result.added
         total_modified += result.modified
         total_unchanged += result.unchanged
         print(f"  +{result.added} ~{result.modified} ={result.unchanged}")
-        if result.errors:
-            for e in result.errors:
-                print(f"  ! {e}")
+        for e in result.errors:
+            print(f"  ! {e}")
 
     print(
-        f"\nDone. {len(memory_dirs)} projects indexed | "
+        f"\nDone. {len(results)} projects indexed | "
         f"+{total_added} added, ~{total_modified} modified, ={total_unchanged} unchanged"
     )
     print("History: unlimited (every change versioned)")
