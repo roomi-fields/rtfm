@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from datetime import date
 from pathlib import Path
 
 from mkdocs.exceptions import PluginError
@@ -34,8 +35,10 @@ REQUIRED = ("@type", "headline", "description", "url", "dateModified",
 FILLED = ("robots.txt", "llms.txt")
 # Built pages that are not documentation.
 EXEMPT = {"404.html"}
+# Generated listing pages of the blog: no source, no description of their own.
+EXEMPT_UNDER = ("blog/page/",)
 
-_LD = re.compile(r'<script type="application/ld\+json">(.*?)</script>', re.S)
+_LD = re.compile(r'<script type="application/ld\+json">(.*?)</script>', re.DOTALL)
 
 
 def _git_date(src: Path, first: bool = False) -> str | None:
@@ -54,7 +57,7 @@ def _git_date(src: Path, first: bool = False) -> str | None:
 
 def _version() -> str:
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    return re.search(r'^version = "([^"]+)"', text, re.M).group(1)
+    return re.search(r'^version = "([^"]+)"', text, re.MULTILINE).group(1)
 
 
 def _site_nodes(site: str, description: str) -> list[dict]:
@@ -90,7 +93,8 @@ def _site_nodes(site: str, description: str) -> list[dict]:
 
 def on_page_content(content, page, config, files):
     src = Path(config["docs_dir"]) / page.file.src_path
-    modified = _git_date(src)
+    # A page not committed yet is being written today.
+    modified = _git_date(src) or date.today().isoformat()
     page.meta["_modified"] = modified
     page.meta["_published"] = _git_date(src, first=True)
     if modified:
@@ -99,17 +103,26 @@ def on_page_content(content, page, config, files):
     return content
 
 
+def _post_date(page) -> str | None:
+    """A blog post's own publication date, from its front matter."""
+    created = getattr(getattr(getattr(page, "config", None), "date", None), "created", None)
+    return created.strftime("%Y-%m-%d") if created else None
+
+
 def on_post_page(output, page, config):
     site = config["site_url"]
+    is_post = page.file.src_path.startswith("blog/posts/")
     node = {
-        "@type": page.meta.get("schema_type", "TechArticle"),
+        "@type": page.meta.get("schema_type", "BlogPosting" if is_post else "TechArticle"),
         "@id": f"{page.canonical_url}#page",
         "headline": page.meta.get("title") or page.title,
         "description": " ".join(str(page.meta.get("description", "")).split()),
         "url": page.canonical_url,
         "inLanguage": "en",
-        "dateModified": page.meta.get("_modified"),
-        "datePublished": page.meta.get("_published"),
+        "dateModified": page.meta.get("_modified") or _post_date(page),
+        "datePublished": _post_date(page) or page.meta.get("_published"),
+        "author": ({"@type": "Person", "name": "Romain Peyrichou",
+                    "url": "https://github.com/roomi-fields"} if is_post else None),
         "publisher": {"@id": ORG},
         "isPartOf": {"@id": f"{site}#website"},
         "about": {"@id": f"{site}#software"},
@@ -136,7 +149,7 @@ def on_post_build(config):
     checked = 0
     for page in sorted(site_dir.rglob("*.html")):
         rel = page.relative_to(site_dir).as_posix()
-        if rel in EXEMPT:
+        if rel in EXEMPT or rel.startswith(EXEMPT_UNDER):
             continue
         text = page.read_text(encoding="utf-8")
         if 'http-equiv="refresh"' in text:

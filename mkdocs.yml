@@ -110,6 +110,12 @@ markdown_extensions:
 plugins:
   - search:
       lang: en
+  - blog:
+      blog_dir: blog
+      post_url_format: "{slug}"
+      post_excerpt: required
+      archive: false
+      categories: false
   - social:
       cards_layout_options:
         background_color: "#000000"
@@ -145,4 +151,6 @@ nav:
       - FeatureBench: benchmarks/featurebench.md
       - Paper plan: benchmarks/benchmark_paper.md
       - Results summary: benchmarks/benchmark_results.md
+  - Blog:
+      - blog/index.md
   - Changelog: CHANGELOG.md

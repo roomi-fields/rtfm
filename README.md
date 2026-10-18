@@ -9,6 +9,8 @@
 
 Index everything in your project — code, docs, PDFs, legal texts, research, data — and your agent finds the right context instantly. No hallucinations. No cloud. No API costs.
 
+**Fewer calls per search:** one query returns ranked hits across code, docs and PDFs — a few hundred tokens of pointers — instead of a chain of grep, glob and whole-file reads.
+
 **`Free · Local · Open Source · MIT`**
 
 <br>
