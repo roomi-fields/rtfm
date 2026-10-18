@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.roomi-fields.com/rtfm-mapping-v1.json",
   "title": "RTFM JSON Schema Mapping (rtfm-mapping-v1)",
-  "description": "Declarative mapping consumed by the RTFM open retrieval layer. Drop a file conforming to this schema in .rtfm/mappings/ and any JSON document matching match.schema_url or match.discriminator is extracted into typed chunks at sync time. Full reference: https://roomi-fields.github.io/rtfm/json-mappings/",
+  "description": "Declarative mapping consumed by the RTFM open retrieval layer. Drop a file conforming to this schema in .rtfm/mappings/ and any JSON document matching match.schema_url or match.discriminator is extracted into typed chunks at sync time. Full reference: https://rtfm.roomi-fields.com/json-mappings/",
   "type": "object",
   "required": ["name", "match", "chunks"],
   "additionalProperties": false,

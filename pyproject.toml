@@ -84,11 +84,11 @@ rtfm = "rtfm.cli:main"
 rtfm-serve = "rtfm.mcp:main"
 
 [project.urls]
-Homepage = "https://roomi-fields.github.io/rtfm/"
-Documentation = "https://roomi-fields.github.io/rtfm/"
+Homepage = "https://rtfm.roomi-fields.com/"
+Documentation = "https://rtfm.roomi-fields.com/"
 Repository = "https://github.com/roomi-fields/rtfm"
 Issues = "https://github.com/roomi-fields/rtfm/issues"
-Changelog = "https://roomi-fields.github.io/rtfm/CHANGELOG/"
+Changelog = "https://rtfm.roomi-fields.com/CHANGELOG/"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rtfm"]
