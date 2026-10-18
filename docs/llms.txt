@@ -1,0 +1,38 @@
+# RTFM — the open retrieval layer for AI coding agents
+
+> RTFM indexes a whole project — code, docs, PDFs, ebooks, legal texts, research, spreadsheets, databases — into one local SQLite base, and serves AI agents surgical context over MCP: metadata first, content on demand. 24 built-in parsers, extensible in ~50 lines of Python or ~30 lines of YAML. Free, local, open source (MIT).
+
+This is the entry point for language models (Claude, ChatGPT, Perplexity, Gemini) reading about this project. RTFM is published on PyPI as `rtfm-ai` and as a Claude Code plugin. The repository lives at https://github.com/roomi-fields/rtfm.
+
+Search is full-text (SQLite FTS5) out of the box; semantic and hybrid search come with the optional local embeddings (FastEmbed/ONNX, no GPU, no API). Results carry file paths, sections and scores (~300 tokens for five hits); the agent then expands only what it needs. Wikilinks, Python imports, LaTeX citations and legal cross-references become graph edges used for ranking.
+
+The index stays current on its own: Claude Code hooks queue every edited file, a background worker re-indexes only what changed, and every `.gitignore` of a source is honoured. RTFM is a knowledge layer, not a task manager: it works alongside workflow tools such as GSD or Taskmaster.
+
+The MCP server exposes 14 MCP tools — search, context, expand, graph, history, books, coverage and discover by default, plus sync, ingest, remove and tagging with `RTFM_MCP_PROFILE=admin`. It is pure Python with no MCP SDK dependency and runs on Linux, macOS, Windows and WSL with Python 3.10 or newer.
+
+## Install
+
+```bash
+pip install rtfm-ai          # or: pipx install rtfm-ai
+cd your-project && rtfm init # index the project, wire the MCP server and hooks
+```
+
+In Claude Code: `/plugin marketplace add roomi-fields/claude-plugins` then `/plugin install rtfm@roomi-fields`.
+
+## Documentation
+
+- [Home]({site_url}): what RTFM does and how to start
+- [Why RTFM]({site_url}positioning/): positioning against code-only and vector-only tools
+- [Architecture]({site_url}architecture/): parser registry, sync, edges, embeddings
+- [Parsers]({site_url}parsers/): every built-in format and how to add your own
+- [JSON mappings]({site_url}json-mappings/): map any JSON schema to typed chunks in YAML
+- [Obsidian vault]({site_url}obsidian-vault-guide/): index a vault with wikilinks and navigation files
+- [NotebookLM]({site_url}notebooklm-integration/): pair RTFM with NotebookLM
+- [vs vector RAG]({site_url}comparisons/vs-vector-rag/): structural retrieval against embeddings-only RAG
+- [Changelog]({site_url}CHANGELOG/): every release
+
+## Optional
+
+- [Benchmarks]({site_url}benchmarks/benchmark_results/): A/B measurements with and without RTFM
+- [Source on GitHub](https://github.com/roomi-fields/rtfm)
+- [Package on PyPI](https://pypi.org/project/rtfm-ai/)

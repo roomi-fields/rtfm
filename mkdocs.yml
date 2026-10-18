@@ -12,6 +12,10 @@ copyright: MIT — built by roomi-fields. Source on GitHub.
 
 docs_dir: docs
 
+# Per-page structured data and dates, checked after the build.
+hooks:
+  - scripts/mkdocs_pages.py
+
 theme:
   name: material
   language: en

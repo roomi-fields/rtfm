@@ -1,3 +1,10 @@
+---
+title: A/B test — writing one article with and without RTFM
+schema_type: Report
+description: >-
+  Report on two Claude Code sessions given the same writing task in a research project, one with RTFM and one without: tokens, cost, duration and tool calls compared. A single run in one context, not reproduced.
+---
+
 # A/B Test: Writing B10 with vs without RTFM
 
 ## Date: 2026-02-21

@@ -1,3 +1,9 @@
+---
+title: Incident — scheduler starvation in the shared supervisor (July 2026)
+description: >-
+  Post-mortem, in French, of a July 2026 incident where RTFM's shared worker supervisor starved some projects of indexing: timeline, cause and fixes.
+---
+
 # Incident — famine d'ordonnancement du superviseur mutualisé
 
 **Date** : 27–29 juillet 2026

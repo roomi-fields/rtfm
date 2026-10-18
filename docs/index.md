@@ -1,5 +1,6 @@
 ---
 title: RTFM — The open retrieval layer for AI coding agents
+schema_type: WebPage
 description: >-
   Open-source MCP retrieval server. Index code, docs, legal text,
   research, and data into one local SQLite knowledge base. Serve
@@ -37,7 +38,7 @@ Python or ~30 lines of YAML.
 
     ---
 
-    Use 15 built-in parsers, or extend with declarative
+    Use 24 built-in parsers, or extend with declarative
     [JSON schema mappings](json-mappings.md) — no code required.
 
 - :material-graph-outline: **Multi-domain**
@@ -127,7 +128,7 @@ rtfm init
   parser registry, sync, edges, embeddings.
 
 - :material-format-list-bulleted: **[Built-in parsers](parsers.md)** — All
-  15 formats with parsing strategies and chunk semantics.
+  24 formats with parsing strategies and chunk semantics.
 
 - :material-code-json: **[JSON schema mappings](json-mappings.md)** — Map
   any JSON schema to typed chunks with declarative YAML.
@@ -146,32 +147,3 @@ rtfm init
 
 </div>
 
-<script type="application/ld+json">
-{
-  "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  "name": "RTFM",
-  "alternateName": "rtfm-ai",
-  "description": "The open retrieval layer for AI coding agents. Indexes code, documentation, legal text, research papers, and data into a local SQLite knowledge base. Serves surgical context to Claude Code, Cursor, Codex, and other MCP clients.",
-  "url": "https://roomi-fields.github.io/rtfm/",
-  "applicationCategory": "DeveloperApplication",
-  "applicationSubCategory": "Retrieval, Search, Indexing, MCP",
-  "operatingSystem": "Linux, macOS, Windows",
-  "softwareVersion": "0.7.2",
-  "license": "https://opensource.org/licenses/MIT",
-  "offers": {
-    "@type": "Offer",
-    "price": "0",
-    "priceCurrency": "USD"
-  },
-  "downloadUrl": "https://pypi.org/project/rtfm-ai/",
-  "codeRepository": "https://github.com/roomi-fields/rtfm",
-  "programmingLanguage": "Python",
-  "author": {
-    "@type": "Person",
-    "name": "roomi-fields",
-    "url": "https://github.com/roomi-fields"
-  },
-  "keywords": "MCP, retrieval, RAG, FTS5, SQLite, embeddings, AI agent, Claude Code, Cursor, indexing, knowledge base, search, open source, multi-domain"
-}
-</script>

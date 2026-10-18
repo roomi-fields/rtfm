@@ -1,3 +1,10 @@
+---
+title: FeatureBench integration notes
+schema_type: Report
+description: >-
+  Working notes on running FeatureBench coding tasks with and without RTFM: setup, how Claude Code runs inside the harness, discovery mode, and what the first runs showed.
+---
+
 # FeatureBench Integration Notes
 
 ## Setup

@@ -1,3 +1,10 @@
+---
+title: Benchmark paper plan — four conditions
+schema_type: Report
+description: >-
+  Plan of a study measuring RTFM's effect on Claude Code across real FeatureBench tasks under four conditions: standard prompt, discovery prompt, RTFM full-text, RTFM with embeddings.
+---
+
 # Benchmark Paper Plan
 
 ## Objective

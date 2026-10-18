@@ -1,3 +1,10 @@
+---
+title: RTFM benchmark results
+schema_type: Report
+description: >-
+  Report of the RTFM measurements to date: the study design, one real writing task, the FeatureBench four-condition study, a model comparison, findings and their limits.
+---
+
 # RTFM Benchmark Results — Complete Analysis
 
 **Date**: 2026-03-02
