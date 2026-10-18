@@ -31,6 +31,20 @@ In Claude Code: `/plugin marketplace add roomi-fields/claude-plugins` then `/plu
 - [vs vector RAG]({site_url}comparisons/vs-vector-rag/): structural retrieval against embeddings-only RAG
 - [Changelog]({site_url}CHANGELOG/): every release
 
+## Articles
+
+- [Where Your Agent's Tokens Go When It Searches — and How to Spend Fewer]({site_url}blog/agent-search-token-usage/)
+- ["Claude Code for Your Thesis: One Index for Papers, LaTeX and Notes"]({site_url}blog/claude-code-for-thesis/)
+- ["Claude Code Memory Is Per-Repo. Here's How to Search It Across All Your Projects"]({site_url}blog/claude-code-memory-across-projects/)
+- ["A Zero-Infrastructure Alternative to claude-context: One SQLite File"]({site_url}blog/claude-context-alternative/)
+- ["Your CLAUDE.md Is Too Long: Let the Agent Search Your Docs Instead"]({site_url}blog/claude-md-too-long/)
+- ["Context7 for Your Own Docs: Indexing Private Documentation Locally"]({site_url}blog/context7-for-private-docs/)
+- [Grep Is Fine for Code. It Struggles with Everything Else in Your Repo]({site_url}blog/grep-is-fine-for-code/)
+- ["You Don't Need a Vector Database: Local RAG for Coding Agents with SQLite FTS5"]({site_url}blog/local-rag-without-vector-database/)
+- [Make Your Obsidian Vault Searchable by Claude Code — No API Key, No Plugin]({site_url}blog/obsidian-vault-claude-code/)
+- [Search Your Ebook Library from Claude Code (EPUB, MOBI, FB2, DJVU)]({site_url}blog/search-ebook-library-claude-code/)
+- [How to Make Claude Code Search Your PDFs (Locally, Without a Vector DB)]({site_url}blog/search-pdfs-with-claude-code/)
+
 ## Optional
 
 - [Benchmarks]({site_url}benchmarks/benchmark_results/): A/B measurements with and without RTFM
