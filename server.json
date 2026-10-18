@@ -2,7 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.roomi-fields/rtfm",
   "title": "RTFM",
-  "description": "The open retrieval layer for AI agents — index code, docs, data. Search via MCP.",
+  "description": "Local retrieval for AI agents: index code, docs, PDFs, data in SQLite; 24 parsers, served via MCP.",
+  "websiteUrl": "https://rtfm.roomi-fields.com/",
   "repository": {
     "url": "https://github.com/roomi-fields/rtfm",
     "source": "github"

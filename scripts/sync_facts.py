@@ -106,6 +106,9 @@ TARGETS: dict[str, list[tuple[str, str]]] = {
     "docs/PUBLISH_MCP_DIRECTORIES.md": [
         (r"\d+ built-in parsers", f"{P} built-in parsers"),
     ],
+    "server.json": [
+        (r"in SQLite; \d+ parsers, served via MCP", f"in SQLite; {P} parsers, served via MCP"),
+    ],
     "rtfm/mcp.py": [
         (r'"runtime" \(default\) : \d+ retrieval tools', f'"runtime" (default) : {R} retrieval tools'),
         (r'"admin" / "all"     : all \d+ tools', f'"admin" / "all"     : all {T} tools'),
