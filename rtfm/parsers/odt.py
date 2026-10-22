@@ -197,7 +197,7 @@ class ODTParser(BaseParser):
         try:
             _require_odf()
             from odf.opendocument import load
-            from odf.meta import Title, Creator
+            from odf.dc import Title, Creator
             doc = load(str(path))
             if doc.meta:
                 titles = doc.meta.getElementsByType(Title)
