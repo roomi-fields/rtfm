@@ -7,6 +7,15 @@ description: >-
 
 # Changelog
 
+## [0.55.1] — 2026-10-22
+
+### Fixed — OpenDocument files lost their title and author
+
+Every `.odt` file was indexed under its file name, with no author: the
+title and author were looked up in the wrong part of the OpenDocument
+library, and the failure was silent. They are now read from the
+document's own metadata. Run `rtfm reindex --ext .odt` in a project to pick them up.
+
 ## [0.55.0] — 2026-10-18
 
 ### Changed — the memory hook runs in the background, quietly, once at a time
