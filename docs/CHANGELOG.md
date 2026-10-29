@@ -7,6 +7,18 @@ description: >-
 
 # Changelog
 
+## [0.55.2] — 2026-10-29
+
+### Fixed — the full-text index never gave back the space of deleted text
+
+The full-text index records each deletion as a new entry and reclaims the
+space only when it merges its segments. On files rewritten every few
+minutes those merges fell behind for good: one project held 1.69 GB of
+index for 48 MB of text. Searches stayed correct; the disk never got the
+space back. The periodic housekeeping pass now compacts the index when it
+holds more than two rows per passage, then rebuilds the file. No action
+needed: it runs on its own after the upgrade.
+
 ## [0.55.1] — 2026-10-22
 
 ### Fixed — OpenDocument files lost their title and author
