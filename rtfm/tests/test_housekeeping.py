@@ -360,3 +360,63 @@ class TestAskingForTheSpaceBack:
         self._reconcile(db)
         assert self._vacuums(db) == 0, (
             "a rebuild costs more than the space a handful of rows returns")
+
+
+class TestFullTextCompaction:
+    """The full-text index records a deletion as a new entry and drops the
+    pair only when segments merge. On files rewritten every few minutes the
+    merges fell behind for good: one project held 1.69 GB of index for
+    48 MB of text, another 384 MB for 2 MB. The content stayed correct; the
+    space was never handed back."""
+
+    def _churned(self, tmp_path, monkeypatch, rounds=60):
+        import rtfm.core.handlers as handlers
+        from rtfm.core.library import Library
+        monkeypatch.setattr(handlers, "FTS_ROWS_FLOOR", 0)
+        db = tmp_path / "library.db"
+        Library(str(db))
+        conn = sqlite3.connect(db, isolation_level=None)
+        # Stands for the merge backlog the field showed: no merging at all.
+        conn.execute("INSERT INTO chunks_fts(chunks_fts, rank) "
+                     "VALUES('automerge', 0)")
+        conn.execute("INSERT INTO books (slug, title) VALUES ('log', 'Log')")
+        for r in range(rounds):
+            conn.execute("BEGIN")
+            conn.execute("DELETE FROM chunks")
+            conn.executemany(
+                "INSERT INTO chunks (chunk_id, book_id, content) VALUES (?,1,?)",
+                [(f"c{r}-{i}", f"tick {r} price {i} spread") for i in range(5)])
+            conn.execute("COMMIT")
+        return db, conn
+
+    def _rows(self, conn):
+        return conn.execute("SELECT COUNT(*) FROM chunks_fts_data").fetchone()[0]
+
+    def test_a_backlog_is_merged_and_search_still_answers(self, tmp_path,
+                                                          monkeypatch):
+        from rtfm.core.handlers import _compact_fulltext
+        db, conn = self._churned(tmp_path, monkeypatch)
+        before = self._rows(conn)
+        assert _compact_fulltext(conn, _Worker(db))
+        assert self._rows(conn) < before / 5
+        conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')")
+        hits = conn.execute("SELECT COUNT(*) FROM chunks_fts "
+                            "WHERE chunks_fts MATCH 'spread'").fetchone()[0]
+        assert hits == 5
+
+    def test_a_healthy_index_is_left_alone(self, tmp_path, monkeypatch):
+        from rtfm.core.handlers import _compact_fulltext
+        db, conn = self._churned(tmp_path, monkeypatch, rounds=1)
+        before = self._rows(conn)
+        assert not _compact_fulltext(conn, _Worker(db))
+        assert self._rows(conn) == before
+
+    def test_reconcile_compacts_then_asks_for_the_space_back(self, tmp_path,
+                                                             monkeypatch):
+        db, conn = self._churned(tmp_path, monkeypatch)
+        conn.close()
+        Queue(db).close()
+        helper = TestAskingForTheSpaceBack()
+        worker = helper._reconcile(db)
+        assert any("full-text index compacted" in line for line in worker.lines)
+        assert helper._vacuums(db) == 1

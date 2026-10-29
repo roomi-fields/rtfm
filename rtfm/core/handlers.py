@@ -783,6 +783,36 @@ VACUUM_AFTER_ROWS_FREED = 10_000
 #: high-water mark left by work that is long finished.
 WAL_TRUNCATE_ABOVE_BYTES = 64 * 1024 * 1024
 
+#: The full-text index records a deletion as a new entry, not by removing the
+#: old one; the space comes back only when segments are merged, and on files
+#: rewritten every few minutes the merges fell behind for good. One project
+#: held 1.69 GB of index for 48 MB of text — 415 000 rows for 13 700
+#: passages — with every search still correct. A healthy index stays under
+#: one row per passage; above two, it is compacted.
+FTS_ROWS_PER_CHUNK_MAX = 2
+#: Small indexes are left alone: compacting them returns nothing worth it.
+FTS_ROWS_FLOOR = 10_000
+
+
+def _compact_fulltext(conn, worker: "JobContext") -> bool:
+    """Merge the full-text index when deletions have piled up in it.
+
+    Returns True when it ran, so the caller can have the file rebuilt and
+    the space handed back to the disk.
+    """
+    try:
+        rows = conn.execute("SELECT COUNT(*) FROM chunks_fts_data").fetchone()[0]
+        chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    except sqlite3.Error:
+        return False
+    if rows < max(FTS_ROWS_FLOOR, FTS_ROWS_PER_CHUNK_MAX * chunks):
+        return False
+    conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')")
+    after = conn.execute("SELECT COUNT(*) FROM chunks_fts_data").fetchone()[0]
+    worker._log(f"full-text index compacted — {rows:,} → {after:,} rows "
+                f"for {chunks:,} passages")
+    return True
+
 
 def _forget_old_jobs(conn, worker: "JobContext") -> int:
     """Drop finished jobs older than :data:`JOB_HISTORY_DAYS`.
@@ -900,6 +930,7 @@ def handle_vacuum(job: Job, worker: "JobContext") -> None:
     try:
         conn.execute("PRAGMA busy_timeout = 60000")
         forgotten = _forget_old_jobs(conn, worker)
+        _compact_fulltext(conn, worker)
         # Hand the write-ahead file's space back before rebuilding. It is
         # not a log and holds no history: after a checkpoint its content is
         # already in the database, and what remains is a high-water mark
@@ -1021,6 +1052,7 @@ def handle_reconcile(job: Job, worker: "JobContext") -> None:
     # are cheap and both are about the *record* of the work, never the work.
     import sqlite3
     forgotten = dropped = 0
+    compacted = False
     conn = sqlite3.connect(str(worker.db_path), isolation_level=None, timeout=60)
     try:
         conn.execute("PRAGMA busy_timeout = 60000")
@@ -1029,6 +1061,7 @@ def handle_reconcile(job: Job, worker: "JobContext") -> None:
             worker._log(f"reconcile: forgot {forgotten} finished job(s) — "
                         f"kept the last {JOB_HISTORY_MAX:,} and nothing older "
                         f"than {JOB_HISTORY_DAYS} days")
+        compacted = _compact_fulltext(conn, worker)
         dropped, freed = _forget_unwanted_history(conn, worker)
         if dropped:
             worker._log(f"reconcile: dropped {dropped} snapshot(s) of files "
@@ -1053,7 +1086,7 @@ def handle_reconcile(job: Job, worker: "JobContext") -> None:
     # and wrong for what housekeeping frees — one index sat at 4.36 GB of
     # which 3.30 GB was space it had already released and would never use.
     # So a pass that frees a lot asks for the file to be rebuilt.
-    freed_a_lot = forgotten >= VACUUM_AFTER_ROWS_FREED or dropped > 0
+    freed_a_lot = forgotten >= VACUUM_AFTER_ROWS_FREED or dropped > 0 or compacted
     if (job.payload.get("vacuum") and stats["orphans_purged"] > 0) or freed_a_lot:
         queue = Queue(str(worker.db_path))
         try:
