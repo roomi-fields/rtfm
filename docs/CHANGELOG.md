@@ -7,6 +7,20 @@ description: >-
 
 # Changelog
 
+## [0.55.3] — 2026-10-30
+
+### Fixed — the embedding model was kept in the temporary directory
+
+RTFM never told FastEmbed where to keep the model, so it went to the
+system's temporary directory, which a reboot empties and a container
+recreate drops. The ~85 MB model was downloaded again each time, and an
+embed job that ran after the wipe failed with an ONNX "no such file"
+naming neither the cache nor a fix. The model now lives in
+`FASTEMBED_CACHE_PATH`, else `~/.cache/fastembed`, and a missing model
+says which directory to check. In a container, point
+`FASTEMBED_CACHE_PATH` at a mounted volume (#7). The model is downloaded
+once more after the upgrade, into its new home.
+
 ## [0.55.2] — 2026-10-29
 
 ### Fixed — the full-text index never gave back the space of deleted text
