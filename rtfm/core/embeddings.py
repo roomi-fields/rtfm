@@ -86,11 +86,22 @@ def resolve_model(name_or_alias: str) -> ModelInfo:
     return ModelInfo(hf_name=name_or_alias, dim=-1, size_mb=-1, languages="unknown")
 
 
+def model_cache_dir() -> Path:
+    """Where the embedding model is kept: ``FASTEMBED_CACHE_PATH``, else
+    ``~/.cache/fastembed``.
+
+    Left to itself FastEmbed uses the system's temporary directory, which a
+    reboot empties and a container recreate drops: the model was downloaded
+    again each time, and an embed job that ran after the wipe failed with an
+    ONNX "no such file" that never named the cache.
+    """
+    return Path(os.environ.get("FASTEMBED_CACHE_PATH")
+                or (Path.home() / ".cache" / "fastembed"))
+
+
 def is_model_cached(hf_name: str) -> bool:
     """Check if a FastEmbed ONNX model has already been downloaded locally."""
-    cache_root = Path(
-        os.environ.get("FASTEMBED_CACHE_PATH") or (Path.home() / ".cache" / "fastembed")
-    )
+    cache_root = model_cache_dir()
     if not cache_root.exists():
         return False
     model_id = hf_name.replace("/", "--")
@@ -114,7 +125,7 @@ def warn_if_heavy(name_or_alias: str, non_interactive: bool = False) -> bool:
     print(
         f"\n  ⚠️  First-time download: {info.hf_name}\n"
         f"     Size: ~{info.size_mb} MB  |  Languages: {info.languages}\n"
-        f"     Cache: ~/.cache/fastembed/ (reused on future runs)\n",
+        f"     Cache: {model_cache_dir()} (reused on future runs)\n",
         file=sys.stderr,
     )
     if non_interactive or not sys.stdin.isatty():
@@ -160,14 +171,26 @@ def get_model(model_name: str = DEFAULT_MODEL):
     if _model is None or _model_name != hf_name:
         try:
             from fastembed import TextEmbedding
-            _model = TextEmbedding(model_name=hf_name, threads=_embed_threads())
-            _model_name = hf_name
         except ImportError:
             raise ImportError(
                 "\n\n  ❌ Semantic search requires the embeddings extra.\n"
                 "     Install with:  pip install rtfm-ai[embeddings]\n"
                 "     (~85 MB ONNX model, no GPU needed)\n"
             )
+        cache = model_cache_dir()
+        try:
+            _model = TextEmbedding(model_name=hf_name, cache_dir=str(cache),
+                                   threads=_embed_threads())
+        except Exception as exc:
+            if "NO_SUCHFILE" in str(exc) or "NoSuchFile" in type(exc).__name__:
+                raise RuntimeError(
+                    f"embedding model {hf_name} is missing from {cache} — the "
+                    f"directory was emptied after the download. Set "
+                    f"FASTEMBED_CACHE_PATH to a directory that persists "
+                    f"(in a container: a mounted volume), then retry."
+                ) from exc
+            raise
+        _model_name = hf_name
 
     return _model
 

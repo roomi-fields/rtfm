@@ -211,6 +211,11 @@ FastEmbed (ONNX, no GPU). Cosine similarity over chunk embeddings.
 (`paraphrase-multilingual-MiniLM-L12-v2`) for back-compat with DBs
 written by older RTFM versions.
 
+The model (~85 MB) is downloaded once into `~/.cache/fastembed`, or into
+`FASTEMBED_CACHE_PATH` when it is set. In a container, point that variable
+at a mounted volume — the index's own `.rtfm/` works — so the model shares
+the lifetime of the index it serves instead of vanishing on every recreate.
+
 ### `rtfm/core/models.py` — Data models
 
 `Chunk`, `SearchResult`, `SearchResults`, `EdgeCandidate`. Export
