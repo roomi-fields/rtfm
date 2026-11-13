@@ -155,6 +155,36 @@ class TestEPUBParser:
         assert meta.get("title") == "Sample EPUB"
         assert meta.get("author") == "Test Author"
 
+    def test_body_text_in_divs_is_not_lost(self):
+        """Many publishers wrap body text in <div>, not <p>. The reader used
+        to keep only a fixed list of tags, so those books indexed as almost
+        nothing — one 169 000-word title came through as 21 000 characters."""
+        from rtfm.parsers.epub import _html_to_text
+        html = (
+            "<html><body>"
+            "<h2>A heading</h2>"
+            "<div>Intro sentence sitting directly in a container, "
+            "outside any paragraph tag.</div>"
+            "<div><div>Nested div holding the real body text of the "
+            "chapter, which is where this book keeps everything.</div></div>"
+            "</body></html>"
+        ).encode()
+        text = _html_to_text(html)
+        assert "Intro sentence sitting directly in a container" in text
+        assert "Nested div holding the real body text" in text
+        # Nested blocks must not duplicate their text.
+        assert text.count("real body text") == 1
+        # Blocks stay separated so the chunker sees paragraphs.
+        assert "\n\n" in text
+
+    def test_soft_hyphens_are_stripped(self):
+        """Justified print breaks words with soft hyphens; left in, they stop
+        the indexed word from ever matching the word a reader types."""
+        from rtfm.parsers.epub import _html_to_text
+        text = _html_to_text("<p>phy­sique de l’infor­mation</p>".encode())
+        assert "physique" in text
+        assert "­" not in text
+
 
 class TestMOBIParser:
     """MOBI cannot easily be constructed in code — we test what we can without

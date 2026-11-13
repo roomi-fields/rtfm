@@ -7,6 +7,7 @@ strip the XHTML markup of each chapter. Each spine item becomes a chunked
 Install: pip install rtfm-ai[epub]
 """
 
+import re
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -80,26 +81,57 @@ def _tolerant_text_iter(path: Path):
         zf.close()
 
 
-def _html_to_text(html_bytes: bytes) -> str:
+# Block-level tags, after which a paragraph break is inserted. ``div`` and
+# ``section`` matter: many publishers wrap body text in them rather than in
+# ``<p>``. Leaving them out dropped almost every such book — one 169 000-word
+# title indexed as 21 000 characters, its text sitting in divs the reader
+# never looked at.
+_BLOCK_TAGS = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "pre",
+               "blockquote", "div", "section", "article", "tr", "td",
+               "figcaption", "caption", "dd", "dt"]
+
+
+def _soup(html_bytes: bytes):
+    """Parse EPUB content bytes. XML content documents are UTF-8 (or UTF-16
+    with a BOM) by the spec, and many omit the declaration — left to guess,
+    the HTML parser mis-decodes accented text into mojibake, so we decode
+    before handing it over rather than let it sniff.
+    """
     from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html_bytes, "html.parser")
+    if html_bytes[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        html = html_bytes.decode("utf-16", "replace")
+    else:
+        html = html_bytes.decode("utf-8", "replace")
+    return BeautifulSoup(html, "html.parser")
+
+
+def _html_to_text(html_bytes: bytes) -> str:
+    soup = _soup(html_bytes)
     for tag in soup(["script", "style"]):
         tag.decompose()
-    # collapse runs of whitespace inside each block, separate blocks with \n\n
-    blocks = []
-    for el in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "pre", "blockquote"]):
-        text = el.get_text(" ", strip=True)
-        if text:
-            blocks.append(text)
-    if blocks:
-        return "\n\n".join(blocks)
-    # fallback: full text
-    return soup.get_text("\n", strip=True)
+    # A <br> is a line break within a block.
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+    # Mark the end of every block so paragraph structure survives flattening.
+    # Flattening the whole document in reading order (rather than collecting a
+    # fixed set of tags) keeps the text that lives in containers and the text
+    # between them, which the tag-list approach silently lost.
+    for el in soup.find_all(_BLOCK_TAGS):
+        el.insert_after("\n\n")
+    text = soup.get_text(" ")
+    # Soft hyphens split words for justified print and must not reach the
+    # index — "phy­sique" would never match "physique"; non-breaking spaces
+    # become ordinary ones.
+    text = text.replace("­", "").replace(" ", " ")
+    # Collapse spaces within a line; keep one blank line between blocks.
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _chapter_title(html_bytes: bytes) -> str:
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html_bytes, "html.parser")
+    soup = _soup(html_bytes)
     for tag in ("h1", "h2", "h3", "title"):
         el = soup.find(tag)
         if el:
