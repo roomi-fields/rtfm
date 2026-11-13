@@ -339,7 +339,10 @@ def cmd_check(args):
         absolute; the absolute path is normalised against each known
         sync root before lookup).
       - positional ``<identifier>``: substring fallback (matches slug
-        or filename, case-insensitive). For quick human lookups.
+        or filename, case-insensitive; a path's last segment is matched
+        on its own, so a corpus-relative path still finds the book even
+        though filenames are stored relative to the corpus root). For
+        quick human lookups.
 
     Optional ``--corpus`` scopes the match. Exit code: 0 = every match
     is fully searchable + embedded, 1 = some match is incomplete,
@@ -386,8 +389,14 @@ def cmd_check(args):
         params.extend(sorted(candidates))
         echoed = f"path={path!r}"
     else:
-        where.append("(slug LIKE ? OR LOWER(filename) LIKE ?)")
-        params.extend([f"%{ident}%", f"%{ident.lower()}%"])
+        # Substring over slug and filename, plus the last path segment on its
+        # own: a stored filename is relative to its corpus root, so a path the
+        # caller copies from disk ("corpus/ifs/Livres VO/foo.pdf") carries a
+        # prefix the stored name lacks and the full-string match misses it.
+        base = ident.rstrip("/").rsplit("/", 1)[-1]
+        where.append("(slug LIKE ? OR LOWER(filename) LIKE ? "
+                     "OR LOWER(filename) LIKE ?)")
+        params.extend([f"%{ident}%", f"%{ident.lower()}%", f"%{base.lower()}%"])
         echoed = f"ident={ident!r}"
     if corpus:
         where.append("corpus = ?")
@@ -2844,7 +2853,11 @@ def main():
         parents=[db_parent],
     )
     p_check.add_argument("identifier", nargs="?",
-                         help="Substring fallback (matches slug or filename)")
+                         help="Substring match on slug or filename; a path's "
+                              "last segment is matched too, so a corpus-"
+                              "relative path works. Filenames are stored "
+                              "relative to the corpus root — use --slug for an "
+                              "exact, move-proof lookup.")
     p_check.add_argument("--slug", help="Exact match on books.slug (stable across moves)")
     p_check.add_argument("--path", help="Match a file path (absolute or relative)")
     p_check.add_argument("--corpus", "-c", help="Scope to a corpus")
