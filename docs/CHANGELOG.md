@@ -7,6 +7,36 @@ description: >-
 
 # Changelog
 
+## [1.0.0] — 2026-11-13
+
+First stable release. RTFM has indexed code, docs, PDFs, ebooks and data
+across dozens of projects for months; the CLI and the MCP tool interface
+are now considered stable, and breaking changes to them will come with a
+major version. What ships in this release:
+
+### Added — manage a corpus's exclude/include patterns from the CLI
+
+`rtfm sources exclude add/remove <corpus> <pattern>` (and the `include`
+form) change what a corpus indexes without hand-editing config.json. The
+rest of the source is left untouched and the command points at the
+`rtfm sync` that applies the change.
+
+### Fixed — EPUB books were indexed as little more than their headings
+
+Body text wrapped in `<div>` or `<section>` rather than `<p>` was dropped:
+one 169 000-word title came through as 21 000 characters. The reader now
+flattens the whole document in reading order, strips the soft hyphens that
+justified print leaves inside words (so "phy­sique" matches "physique"),
+and decodes content as UTF-8/UTF-16 instead of guessing — which had turned
+accented French into mojibake on files with no encoding declaration. Run
+`rtfm reindex --ext .epub` to re-read books already indexed.
+
+### Fixed — `rtfm check` missed a book given its corpus-relative path
+
+Filenames are stored relative to the corpus root, so a path copied from
+the tree carried a prefix the stored name lacked and matched nothing. The
+path's last segment is now matched on its own.
+
 ## [0.55.3] — 2026-10-30
 
 ### Fixed — the embedding model was kept in the temporary directory
