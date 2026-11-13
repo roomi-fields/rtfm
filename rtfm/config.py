@@ -306,6 +306,53 @@ def list_sources(project_root: Path) -> list[dict]:
     return config.get("sources", [])
 
 
+def edit_source_patterns(
+    project_root: Path,
+    corpus: str,
+    field: str,
+    add: list[str] | tuple[str, ...] = (),
+    remove: list[str] | tuple[str, ...] = (),
+) -> tuple[list[str], list[str]]:
+    """Add or drop ``include``/``exclude`` patterns on one source.
+
+    The sanctioned way to change what a corpus indexes: hand-editing
+    ``config.json`` is what the project rules forbid, and nothing else
+    exposed these lists. Writes through :func:`save_config`, so the file
+    stays canonically formatted.
+
+    Returns ``(before, after)`` — the pattern list as it was and as it is
+    now. Raises ``KeyError(corpus)`` when no source carries that corpus,
+    and ``ValueError`` for an unknown field.
+    """
+    if field not in ("include", "exclude"):
+        raise ValueError(f"field must be 'include' or 'exclude', got {field!r}")
+
+    config = load_config(project_root)
+    for src in config.get("sources") or []:
+        if isinstance(src, dict) and src.get("corpus") == corpus:
+            target = src
+            break
+    else:
+        raise KeyError(corpus)
+
+    before = list(target.get(field) or [])
+    patterns = list(before)
+    for pat in add:
+        if pat not in patterns:
+            patterns.append(pat)
+    remove_set = set(remove)
+    patterns = [p for p in patterns if p not in remove_set]
+
+    if patterns == before:
+        return before, patterns
+    if patterns:
+        target[field] = patterns
+    else:
+        target.pop(field, None)
+    save_config(project_root, config)
+    return before, patterns
+
+
 def remove_source(
     project_root: Path,
     path: str | None = None,

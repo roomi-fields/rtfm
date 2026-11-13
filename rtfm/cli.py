@@ -2231,6 +2231,49 @@ def cmd_sources(args):
               f"are fixed, `rtfm sync` skips them.")
 
 
+def cmd_sources_patterns(args):
+    """Add or remove an include/exclude pattern on a source, from the CLI.
+
+    Changing what a corpus indexes meant hand-editing config.json, which the
+    project rules forbid. This writes the change through the config helpers
+    instead, and points at the sync that makes it take effect.
+    """
+    from rtfm.config import edit_source_patterns, find_rtfm_root, list_sources
+
+    root = find_rtfm_root()
+    if not root:
+        print("No .rtfm/ found. Run 'rtfm init' first.")
+        sys.exit(1)
+
+    field = args.field          # "include" | "exclude"
+    op = args.op                # "add" | "remove"
+    patterns = args.patterns
+    add = patterns if op == "add" else []
+    remove = patterns if op == "remove" else []
+
+    try:
+        before, after = edit_source_patterns(root, args.corpus, field,
+                                             add=add, remove=remove)
+    except KeyError:
+        known = sorted({s.get("corpus", "default") for s in list_sources(root)})
+        sys.exit(f"sources {field}: no source with corpus {args.corpus!r}. "
+                 f"Known corpora: {', '.join(known) or 'none'}.")
+
+    if after == before:
+        noun = "already present" if op == "add" else "not set"
+        print(f"No change: {', '.join(patterns)} {noun} on [{args.corpus}].")
+        return
+
+    print(f"[{args.corpus}] {field} is now: {', '.join(after) or '(none)'}")
+    # The config is the intent; the index only catches up on a sync.
+    if field == "exclude" and op == "remove":
+        print("Newly eligible files are indexed on the next `rtfm sync`.")
+    elif field == "exclude" and op == "add":
+        print("Now-excluded files are dropped on the next `rtfm sync`.")
+    else:
+        print("Run `rtfm sync` for this to take effect.")
+
+
 def cmd_serve(args):
     """Start the RTFM MCP server."""
     db = resolve_db(args.db)
@@ -3161,9 +3204,19 @@ def main():
              "alone, every source in the corpus.")
     p_remove.set_defaults(func=cmd_remove_source)
 
-    # sources (list registered sources)
-    p_sources = subparsers.add_parser("sources", help="List registered sources")
+    # sources (list, or edit a source's include/exclude patterns)
+    p_sources = subparsers.add_parser(
+        "sources", help="List sources, or edit their include/exclude patterns")
     p_sources.set_defaults(func=cmd_sources)
+    sources_sub = p_sources.add_subparsers(dest="sources_cmd")
+    for _field in ("exclude", "include"):
+        p_field = sources_sub.add_parser(
+            _field, help=f"Add or remove {_field} patterns on a corpus")
+        p_field.add_argument("op", choices=["add", "remove"])
+        p_field.add_argument("corpus", help="Corpus to edit")
+        p_field.add_argument("patterns", nargs="+",
+                             help="Glob pattern(s), e.g. '*Mosaic Mind*'")
+        p_field.set_defaults(func=cmd_sources_patterns, field=_field)
 
     # graph
     p_graph = subparsers.add_parser("graph", help="Show dependency graph for a source", parents=[db_parent])

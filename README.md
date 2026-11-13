@@ -390,7 +390,9 @@ rtfm sync . --force                    # Force re-index
 
 # Source management
 rtfm add /path/to/docs --corpus docs --extensions md,pdf
-rtfm sources
+rtfm sources                                   # List registered sources
+rtfm sources exclude add docs '*draft*'        # Skip matching files
+rtfm sources exclude remove docs '*draft*'     # Stop skipping them
 
 # Obsidian vault
 rtfm vault                             # Initialize for cwd vault
