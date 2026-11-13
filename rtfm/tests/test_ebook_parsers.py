@@ -159,6 +159,7 @@ class TestEPUBParser:
         """Many publishers wrap body text in <div>, not <p>. The reader used
         to keep only a fixed list of tags, so those books indexed as almost
         nothing — one 169 000-word title came through as 21 000 characters."""
+        pytest.importorskip("bs4")
         from rtfm.parsers.epub import _html_to_text
         html = (
             "<html><body>"
@@ -180,6 +181,7 @@ class TestEPUBParser:
     def test_soft_hyphens_are_stripped(self):
         """Justified print breaks words with soft hyphens; left in, they stop
         the indexed word from ever matching the word a reader types."""
+        pytest.importorskip("bs4")
         from rtfm.parsers.epub import _html_to_text
         text = _html_to_text("<p>phy­sique de l’infor­mation</p>".encode())
         assert "physique" in text
