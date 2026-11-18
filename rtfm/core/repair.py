@@ -15,6 +15,7 @@ index that was never affected.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Callable
@@ -222,22 +223,45 @@ def _declared_roots(project_root: Path) -> dict[str, set[str]] | None:
     return declared
 
 
-def find_undeclared_files(conn: sqlite3.Connection,
-                          declared: dict[str, set[str]]) -> list[tuple[str, str]]:
-    """``(filepath, corpus)`` of tracked files no declared source covers.
+def find_undeclared_files(
+    conn: sqlite3.Connection,
+    declared: dict[str, set[str]],
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, str]]]:
+    """Sort the tracked files no declared root names into two lists.
 
-    A tracked file only ever comes from scanning a declared source, so one
-    whose corpus — or whose root within that corpus — is no longer declared
-    belongs to a source that was removed. A file recorded without its root
-    is judged on its corpus alone.
+    Returns ``(gone, rehomed)``:
+
+    * ``gone`` — ``(filepath, corpus)`` of files no declared source covers.
+      A tracked file only ever comes from scanning a declared source, so one
+      whose corpus — or whose root within that corpus — is no longer
+      declared belongs to a source that was removed. A file recorded
+      without its root is judged on its corpus alone.
+    * ``rehomed`` — ``(filepath, corpus, root)`` of files whose recorded
+      root is not declared but which sit, right now, under a declared root
+      of their own corpus. The source was not removed; its *path* changed.
+      The scan records the resolved directory, so a source reached through
+      a link that later became a real directory — a machine migration does
+      exactly that — no longer matches the string on record. Retiring those
+      emptied whole projects (1 413 files in one of them) only for the next
+      scan to index every one of them again.
     """
-    out: list[tuple[str, str]] = []
+    gone: list[tuple[str, str]] = []
+    rehomed: list[tuple[str, str, str]] = []
     for corpus, root, filepath in conn.execute(
             "SELECT corpus, root_path, filepath FROM indexed_files"):
         roots = declared.get(corpus)
-        if roots is None or (root is not None and root not in roots):
-            out.append((filepath, corpus))
-    return out
+        if roots is None:
+            gone.append((filepath, corpus))
+            continue
+        if root is None or root in roots:
+            continue
+        home = next((r for r in sorted(roots)
+                     if os.path.isfile(os.path.join(r, filepath))), None)
+        if home is None:
+            gone.append((filepath, corpus))
+        else:
+            rehomed.append((filepath, corpus, home))
+    return gone, rehomed
 
 
 def forget_undeclared_sources(
@@ -268,7 +292,15 @@ def forget_undeclared_sources(
     try:
         if not _table_exists(conn, "indexed_files"):
             return 0
-        gone = find_undeclared_files(conn, declared)
+        gone, rehomed = find_undeclared_files(conn, declared)
+        if rehomed:
+            conn.executemany(
+                "UPDATE indexed_files SET root_path = ? "
+                "WHERE filepath = ? AND corpus = ?",
+                [(root, filepath, corpus) for filepath, corpus, root in rehomed])
+            conn.commit()
+            say(f"source retirement: {len(rehomed)} file(s) whose source "
+                f"directory moved kept, now recorded under the declared path")
         stale_roots = []
         if _table_exists(conn, "sync_roots"):
             stale_roots = [

@@ -78,6 +78,27 @@ def test_a_declared_path_through_a_link_is_kept(project, tmp_path):
     assert forget_undeclared_sources(project / ".rtfm" / "library.db") == 0
 
 
+def test_a_source_whose_path_changed_is_kept_and_rehomed(project, tmp_path):
+    """Migration: the old machine reached the project through a link to
+    another disk, so the index recorded that disk's path. On the new machine
+    the project is a real directory — same files, different recorded root.
+    Retiring them emptied whole projects only for the next scan to index
+    every file again."""
+    (project / "notes" / "a.md").write_text("contenu", encoding="utf-8")
+    _config(project, [{"path": str(project / "notes"), "corpus": "notes"}])
+    old_disk = tmp_path / "ssd" / "pc2" / "notes"  # gone with the old machine
+    _track(project, "a.md", "notes", old_disk)
+    _track(project, "parti.md", "notes", old_disk)  # not on disk any more
+
+    assert forget_undeclared_sources(project / ".rtfm" / "library.db") == 1
+    assert _tracked(project) == [("notes", "a.md")]
+    conn = sqlite3.connect(project / ".rtfm" / "library.db")
+    (root,) = conn.execute(
+        "SELECT root_path FROM indexed_files WHERE filepath = 'a.md'").fetchone()
+    conn.close()
+    assert root == str(project / "notes")
+
+
 def test_without_a_configuration_the_project_itself_is_the_source(project):
     _track(project, "README.md", "default", project)
     _track(project, "vieux.md", "docs", project / "docs")
