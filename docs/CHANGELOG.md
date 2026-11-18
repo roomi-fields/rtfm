@@ -7,6 +7,21 @@ description: >-
 
 # Changelog
 
+## [1.0.1] — 2026-11-18
+
+### Fixed — a source whose path changed is no longer emptied at startup
+
+The startup cleanup that retires sources taken out of the configuration
+compared each file's recorded directory with the declared ones as text.
+The scan records the resolved directory, so a project reached through a
+link to another disk kept that disk's path on record. After a machine
+migration turned the link into a real directory, nothing matched and
+whole projects were taken out of the index — 1 413 files in one of them —
+only for the next scan to index every file again. A file that still sits
+under a declared directory of its own corpus now keeps its index and is
+recorded under the declared path; only files no declared directory holds
+are retired.
+
 ## [1.0.0] — 2026-11-13
 
 First stable release. RTFM has indexed code, docs, PDFs, ebooks and data
