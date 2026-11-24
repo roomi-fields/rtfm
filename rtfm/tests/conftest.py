@@ -40,6 +40,10 @@ def never_touch_the_real_fleet(monkeypatch, tmp_path_factory):
         "rtfm.cli_worker.ensure_supervisor_running",
         lambda *a, **k: None,
     )
+    # Every test builds its projects under the system temporary directory,
+    # which the real rule refuses as a project. Tests of that rule set the
+    # temporary roots themselves (test_temporary_dirs.py).
+    monkeypatch.setattr("rtfm.core.placement.temp_roots", lambda: ())
 
 
 @pytest.fixture

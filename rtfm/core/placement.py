@@ -19,6 +19,7 @@ It lives here, and every path that creates a project index asks it first.
 """
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 #: Directories never walked when looking for projects nested below: they
@@ -29,6 +30,36 @@ NEVER_WALK = frozenset({
 })
 WALK_DEPTH = 3
 WALK_BUDGET = 5000
+
+
+def temp_roots() -> tuple[Path, ...]:
+    """The system's temporary directories: ``$TMPDIR`` (or its platform
+    default) and, on Unix, ``/tmp`` and ``/var/tmp``."""
+    roots = {Path(tempfile.gettempdir())}
+    roots.update(Path(p) for p in ("/tmp", "/var/tmp") if Path(p).is_dir())
+    out = []
+    for r in roots:
+        try:
+            out.append(r.resolve())
+        except (OSError, RuntimeError):
+            continue
+    return tuple(out)
+
+
+def is_temporary(path: Path | str) -> bool:
+    """Whether *path* lies inside a temporary directory.
+
+    Nothing durable lives there: the system clears it, and agent sessions
+    use it for scratch work. A session started in such a directory once got
+    it indexed and enrolled — 494 scratch files, 59 488 passages to embed —
+    and the burst slowed every project on the machine for an hour. A
+    temporary directory is never a project.
+    """
+    try:
+        p = Path(path).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return any(p == r or r in p.parents for r in temp_roots())
 
 
 def worktree_main_root(path: Path | str) -> Path | None:
@@ -107,6 +138,8 @@ def refusal_to_index(root: Path | str) -> str | None:
 
     if root == Path(root.anchor):
         return "the root of the filesystem is not a project"
+    if is_temporary(root):
+        return "a temporary directory is not a project"
     try:
         home = Path.home().resolve()
     except (OSError, RuntimeError):

@@ -163,6 +163,15 @@ def main() -> None:
             f"index read-only, writing nothing here\n")
         return
 
+    # A temporary directory is never a project — not even one an older
+    # version already indexed: nothing is created, enrolled or written.
+    from rtfm.core.placement import is_temporary
+    if is_temporary(project_root):
+        sys.stderr.write(
+            f"[rtfm-bootstrap] not indexing {project_root}: "
+            f"a temporary directory is not a project\n")
+        return
+
     db_path = project_root / ".rtfm" / "library.db"
     if not db_path.exists():
         from rtfm.core.placement import refusal_to_index

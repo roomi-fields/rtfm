@@ -97,6 +97,9 @@ def register(rtfm_dir: Path | str) -> bool:
     over this — but it no longer hides the outcome either: the silence of
     the old version is exactly how a project went unserved for a week.
     """
+    from rtfm.core.placement import is_temporary
+    if is_temporary(rtfm_dir):
+        return False  # never a project — see placement.is_temporary
     try:
         path = str(Path(rtfm_dir).resolve())
         if path in load():

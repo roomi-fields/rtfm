@@ -732,7 +732,11 @@ class Supervisor:
             # serving what was, rather than dropping every project.
             return
 
-        wanted = {p for p in projects if Path(p).is_dir()}
+        # A temporary directory is never served, even when an older version
+        # enrolled it: those are let go here (see placement.is_temporary).
+        from rtfm.core.placement import is_temporary
+        wanted = {p for p in projects
+                  if Path(p).is_dir() and not is_temporary(p)}
         self._wanted = wanted
         for path in sorted(wanted):
             if path in self._slots or path in self._opening:
