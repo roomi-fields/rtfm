@@ -7,6 +7,24 @@ description: >-
 
 # Changelog
 
+## [1.0.3] — 2026-11-24
+
+### Fixed — adding a source never takes the project out of the index
+
+Without declared sources the project directory is the source. Adding a
+first one (`rtfm add`) replaced it, and the next start took the whole
+project out of the index. `rtfm add` now declares the project directory
+first, visibly; a project that wants only its added folders removes it
+with `rtfm remove`.
+
+### Fixed — a mass removal is never automatic
+
+At start and on reconcile, files under no declared source are taken out of
+the index. When that is half the index or more (100 files at least), the
+pass now logs it and leaves the index as it is. An explicit removal still
+acts: `rtfm remove` takes out what it removed right away, and
+`rtfm repair --force` confirms a held-back one.
+
 ## [1.0.2] — 2026-11-24
 
 ### Fixed — RTFM keeps to a quarter of the machine
