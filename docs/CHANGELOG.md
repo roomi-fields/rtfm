@@ -7,6 +7,27 @@ description: >-
 
 # Changelog
 
+## [1.0.2] — 2026-11-24
+
+### Fixed — RTFM keeps to a quarter of the machine
+
+The indexer ran as many jobs at once as the machine had hardware threads,
+relying on its low priority to stay out of the way. Low priority does not
+stop a job from sharing a core with its hyperthread sibling, heating the
+processor until it slows down for everyone, or contending for memory: on a
+32-thread machine one burst of embedding filled all 32 lanes for an hour
+and the projects' own services stopped answering. The default is now a
+quarter of the threads (8 of 32); `max_concurrent_indexers` in
+`~/.rtfm/config.json` and `RTFM_MAX_CONCURRENT_INDEXERS` still override it.
+
+### Fixed — a temporary directory is never a project
+
+A session started in an agent's scratch directory under `/tmp` got it
+indexed and enrolled — 59 488 passages to embed. A directory inside the
+system's temporary directories (`$TMPDIR`, `/tmp`, `/var/tmp`) now gets no
+index and is never enrolled, and the worker lets go of any that an older
+version enrolled.
+
 ## [1.0.1] — 2026-11-18
 
 ### Fixed — a source whose path changed is no longer emptied at startup
