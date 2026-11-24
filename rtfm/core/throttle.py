@@ -79,12 +79,18 @@ def apply_thread_caps() -> None:
 # ── Global concurrency semaphore ────────────────────────────────────────
 
 _SLOT_DIR = Path.home() / ".rtfm" / "slots"
-#: Default number of projects the supervisor services concurrently. One core
-#: per lane (each job is thread-capped to 1 via :func:`thread_cap_env`), so
-#: defaulting to the core count lets background indexing use all otherwise-idle
-#: CPU while ``nice 19`` + ``ionice`` keep it out of the way of interactive
-#: work. Override per machine via ``~/.rtfm/config.json`` or the env var.
-_DEFAULT_MAX_CONCURRENT = os.cpu_count() or 4
+#: Default number of jobs the supervisor runs at once: a quarter of the
+#: machine's hardware threads. One core per lane (each job is thread-capped to
+#: 1 via :func:`thread_cap_env`). It used to be the whole thread count, on the
+#: idea that ``nice 19`` + ``ionice`` would keep idle-CPU indexing out of the
+#: way. They do not: a niced job still shares its core with its hyperthread
+#: sibling, heats a quietly-cooled processor until it slows down for
+#: everyone, and contends for memory. On a 32-thread machine a burst of
+#: embedding filled all 32 lanes for an hour and the projects' own services
+#: stopped answering. RTFM must never slow the work it serves, so it keeps to
+#: a small, fixed share. Override per machine via ``~/.rtfm/config.json`` or
+#: the env var.
+_DEFAULT_MAX_CONCURRENT = max(1, (os.cpu_count() or 4) // 4)
 _ACQUIRE_POLL_SECONDS = 0.5
 
 #: Machine-local RTFM config, read for a durable concurrency setting that

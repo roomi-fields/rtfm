@@ -208,3 +208,17 @@ def test_max_concurrent_precedence_env_over_config_over_default(tmp_path, monkey
     # Env var overrides everything (one-off escape hatch).
     monkeypatch.setenv("RTFM_MAX_CONCURRENT_INDEXERS", "5")
     assert throttle._max_concurrent() == 5
+
+
+def test_the_default_keeps_to_a_quarter_of_the_machine(monkeypatch):
+    """RTFM must never slow the projects it serves. Taking every hardware
+    thread, relying on nice to stay out of the way, made a 32-thread machine
+    unresponsive during one embedding burst."""
+    import importlib
+    import os
+    for cpus, expected in ((32, 8), (12, 3), (4, 1), (2, 1)):
+        monkeypatch.setattr(os, "cpu_count", lambda c=cpus: c)
+        importlib.reload(throttle)
+        assert throttle._DEFAULT_MAX_CONCURRENT == expected
+    monkeypatch.undo()
+    importlib.reload(throttle)
