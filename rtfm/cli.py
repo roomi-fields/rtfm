@@ -2146,6 +2146,18 @@ def cmd_add(args):
     exc = [p.strip() for p in args.exclude.split(",") if p.strip()] \
         if getattr(args, "exclude", None) else None
     no_git = bool(getattr(args, "no_gitignore", False))
+    # Adding never takes anything away. Without declared sources the project
+    # directory is the source; the first one declared would replace it, and
+    # the next start would take the whole project out of the index — it
+    # nearly did to a project given a shared folder of reference norms. So
+    # the project directory is declared first, in plain sight; a project that
+    # wants only its added folders removes it (`rtfm remove`).
+    from rtfm.config import load_config
+    cfg = load_config(root)
+    if not cfg.get("sources") and Path(args.path).resolve() != root.resolve():
+        own = cfg.get("corpus") or "default"
+        add_source(root, str(root), corpus=own)
+        print(f"Kept the project itself as a source: [{own}] {root.resolve()}")
     result = add_source(root, args.path, corpus=args.corpus, extensions=ext,
                         include=inc, exclude=exc,
                         honor_gitignore=False if no_git else None)
@@ -2195,6 +2207,12 @@ def cmd_remove_source(args):
     if corpus:
         scope.append(f"corpus [{corpus}]")
     print(f"Removed {n} source(s): {', '.join(scope)}")
+    # An explicit removal: what it indexed leaves now, however much it is —
+    # the automatic passes hold a large retirement back.
+    from rtfm.core.repair import forget_undeclared_sources
+    db = root / ".rtfm" / "library.db"
+    if db.exists():
+        forget_undeclared_sources(db, log=print, allow_mass=True)
 
 
 def cmd_sources(args):
@@ -2487,7 +2505,9 @@ def cmd_repair(args):
     rtfm_dir = rtfm_root / ".rtfm"
 
     from rtfm.core.repair import forget_tracked_binaries, forget_undeclared_sources
-    retired = forget_undeclared_sources(rtfm_dir / "library.db", log=print)
+    retired = forget_undeclared_sources(
+        rtfm_dir / "library.db", log=print,
+        allow_mass=bool(getattr(args, "force", False)))
     from rtfm.core.repair import requeue_unsplit_scans
     retired += requeue_unsplit_scans(rtfm_dir / "library.db", log=print)
     marked = forget_tracked_binaries(rtfm_dir / "library.db", log=print) or retired
@@ -3298,6 +3318,10 @@ def main():
     p_repair = subparsers.add_parser(
         "repair",
         help="Clear index records the current code can no longer produce")
+    p_repair.add_argument(
+        "--force", action="store_true",
+        help="Also take out sources no longer declared when that is half the "
+             "index or more (held back otherwise).")
     p_repair.set_defaults(func=cmd_repair)
 
     # coverage

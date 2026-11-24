@@ -399,7 +399,7 @@ class TestRegisteringASourceGitIgnores:
         pdfs.mkdir()
         assert _run_cli("add", str(pdfs), "--corpus", "papers",
                         "--no-gitignore") == 0
-        assert list_sources(rtfm_project)[0]["honor_gitignore"] is False
+        assert list_sources(rtfm_project)[-1]["honor_gitignore"] is False
 
     def test_without_the_flag_the_default_is_left_alone(self, rtfm_project):
         from rtfm.config import list_sources
@@ -407,7 +407,7 @@ class TestRegisteringASourceGitIgnores:
         pdfs = rtfm_project / "papers"
         pdfs.mkdir()
         assert _run_cli("add", str(pdfs), "--corpus", "papers") == 0
-        assert "honor_gitignore" not in list_sources(rtfm_project)[0]
+        assert "honor_gitignore" not in list_sources(rtfm_project)[-1]
 
     def test_the_rules_are_stored_as_patterns_not_as_one_string(
             self, rtfm_project):
@@ -417,5 +417,5 @@ class TestRegisteringASourceGitIgnores:
         d.mkdir()
         assert _run_cli("add", str(d), "--corpus", "code",
                         "--exclude", "*.min.js,vendor/*") == 0
-        assert list_sources(rtfm_project)[0]["exclude"] == [
+        assert list_sources(rtfm_project)[-1]["exclude"] == [
             "*.min.js", "vendor/*"]
