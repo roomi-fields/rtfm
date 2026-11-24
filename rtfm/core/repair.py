@@ -264,9 +264,15 @@ def find_undeclared_files(
     return gone, rehomed
 
 
+#: Below this many files, a retirement is never held back: small indexes
+#: have nothing much to lose and a test fixture is all small.
+MASS_RETIREMENT_MIN_FILES = 100
+
+
 def forget_undeclared_sources(
     db_path: Path,
     log: Callable[[str], None] | None = None,
+    allow_mass: bool = False,
 ) -> int:
     """Take out of the index what no declared source covers any more.
 
@@ -277,6 +283,14 @@ def forget_undeclared_sources(
 
     Not run when the configuration cannot be read: an unreadable file says
     nothing about what is declared. Idempotent.
+
+    Held back when it would take out half the index or more (and at least
+    ``MASS_RETIREMENT_MIN_FILES``), unless *allow_mass*. That much is never
+    routine: a migration that changed every recorded path emptied whole
+    projects, and adding a first source used to drop the project directory
+    without a word. The automatic passes (start, reconcile) say so in the
+    log and leave the index as it is; an explicit removal (``rtfm remove``,
+    ``rtfm repair --force``) passes *allow_mass*.
     """
     say = log or (lambda m: None)
     db_path = Path(db_path)
@@ -293,6 +307,16 @@ def forget_undeclared_sources(
         if not _table_exists(conn, "indexed_files"):
             return 0
         gone, rehomed = find_undeclared_files(conn, declared)
+        total = conn.execute("SELECT COUNT(*) FROM indexed_files").fetchone()[0]
+        if (not allow_mass and len(gone) >= MASS_RETIREMENT_MIN_FILES
+                and 2 * len(gone) >= total):
+            corpora = sorted({c for _, c in gone})
+            say(f"source retirement HELD BACK: {len(gone)} of {total} "
+                f"file(s) ({', '.join(corpora)}) are under no declared source. "
+                f"Index left as it is. If those sources were removed on "
+                f"purpose, run `rtfm repair --force`; otherwise declare them "
+                f"again (`rtfm add`).")
+            return 0
         if rehomed:
             conn.executemany(
                 "UPDATE indexed_files SET root_path = ? "

@@ -130,3 +130,32 @@ def test_every_start_and_every_reconcile_run_it():
     root = Path(__file__).resolve().parents[1] / "core"
     for name in ("supervisor.py", "handlers.py"):
         assert "forget_undeclared_sources" in (root / name).read_text(encoding="utf-8"), name
+
+
+def _track_many(project, n, corpus, root):
+    lib = Library(str(project / ".rtfm" / "library.db"))
+    for i in range(n):
+        lib.update_indexed_file(f"f{i}.md", "h", corpus, f"f{i}",
+                                root_path=str(root))
+    lib.close()
+
+
+def test_taking_out_half_the_index_is_held_back(project):
+    # The project directory stopped being declared: every file of it would go.
+    _config(project, [{"path": str(project / "notes"), "corpus": "notes"}])
+    _track_many(project, 150, "default", project)
+    _track(project, "a.md", "notes", project / "notes")
+    said = []
+    assert forget_undeclared_sources(project / ".rtfm" / "library.db",
+                                     log=said.append) == 0
+    assert len(_tracked(project)) == 151
+    assert "HELD BACK" in said[0]
+
+
+def test_an_explicit_removal_takes_out_however_much(project):
+    _config(project, [{"path": str(project / "notes"), "corpus": "notes"}])
+    _track_many(project, 150, "default", project)
+    _track(project, "a.md", "notes", project / "notes")
+    assert forget_undeclared_sources(project / ".rtfm" / "library.db",
+                                     allow_mass=True) == 150
+    assert _tracked(project) == [("notes", "a.md")]
